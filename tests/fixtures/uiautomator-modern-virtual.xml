@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <!-- Synthetic accessibility/virtual-content variation; not tied to a specific vendor. -->
+  <node index="0" package="com.example.sanitized" class="android.view.View" text="" resource-id="" content-desc="" bounds="[0,0][1080,2400]" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" selected="false" visible-to-user="true">
+    <node index="0" package="com.example.sanitized" class="android.view.View" text="" resource-id="" content-desc="Virtual action" bounds="[48,400][520,520]" clickable="true" enabled="true" focusable="true" focused="false" scrollable="false" selected="false" visible-to-user="true" />
+    <node index="2" package="com.example.sanitized" class="android.view.View" text="Virtual label" resource-id="" content-desc="" bounds="[48,560][1032,640]" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" selected="false" visible-to-user="true" />
+  </node>
+</hierarchy>

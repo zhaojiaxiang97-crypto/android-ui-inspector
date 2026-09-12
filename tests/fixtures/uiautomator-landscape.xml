@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="1">
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.example.sanitized" content-desc="" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" selected="false" visible-to-user="true" bounds="[0,0][2400,1080]">
+    <node index="0" text="Landscape sample" resource-id="com.example.sanitized:id/header" class="android.widget.TextView" package="com.example.sanitized" content-desc="" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" selected="false" visible-to-user="true" bounds="[104,0][920,88]" />
+    <node index="1" text="Open panel" resource-id="com.example.sanitized:id/open" class="android.widget.Button" package="com.example.sanitized" content-desc="Open panel" clickable="true" enabled="true" focusable="true" focused="true" scrollable="false" selected="false" visible-to-user="true" bounds="[1840,900][2360,1040]" />
+  </node>
+</hierarchy>

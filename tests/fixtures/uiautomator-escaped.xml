@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="3">
+  <node index="0" text="A &amp; B &lt; C" resource-id="com.example.sanitized:id/escaped" class="android.widget.TextView" package="com.example.sanitized" content-desc="Say &quot;hello&quot;" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" selected="false" visible-to-user="true" bounds="[0,0][1,1]" />
+</hierarchy>
