@@ -1,0 +1,78 @@
+{
+  "name": "android-ui-inspector",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Cross-platform Android UI hierarchy inspector",
+  "author": "Android UI Inspector contributors",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"bun run dev:renderer\" \"bun run dev:main\" \"bun run dev:preload\" \"bun run dev:electron\"",
+    "dev:renderer": "vite --host 127.0.0.1 --port 1420",
+    "dev:main": "bun build electron/main.ts --outfile dist-electron/main.cjs --target node --format cjs --external electron --watch",
+    "dev:preload": "bun build electron/preload.ts --outfile dist-electron/preload.cjs --target node --format cjs --external electron --watch",
+    "dev:electron": "wait-on http://127.0.0.1:1420 dist-electron/main.cjs dist-electron/preload.cjs && node scripts/start-electron.cjs --dev",
+    "build": "tsc && bun run build:renderer && bun run build:electron",
+    "build:renderer": "vite build",
+    "build:electron": "bun build electron/main.ts --outfile dist-electron/main.cjs --target node --format cjs --external electron && bun build electron/preload.ts --outfile dist-electron/preload.cjs --target node --format cjs --external electron",
+    "test": "bun test tests",
+    "test:tree-ui": "bun run scripts/render-benchmark.mjs --checks-only",
+    "test:coordinates": "node scripts/coordinate-checks.mjs",
+    "prepare:windows": "node scripts/prepare-windows-runtime.cjs",
+    "diagnose:startup": "node scripts/startup-probe.mjs",
+    "smoke:app": "bun run build && node scripts/app-smoke.mjs",
+    "benchmark:tree": "bun run scripts/tree-benchmark.ts",
+    "benchmark:render": "bun run scripts/render-benchmark.mjs",
+    "preview": "vite preview",
+    "start": "node scripts/start-electron.cjs",
+    "package": "bun run build && electron-builder",
+    "package:win": "bun run build && electron-builder --win --publish never --config.electronDist=./node_modules/electron/dist",
+    "package:mac": "bun run build && electron-builder --mac",
+    "package:linux": "bun run build && electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.androiduiinspector.desktop",
+    "productName": "Android UI Inspector",
+    "directories": {
+      "output": "release"
+    },
+    "asar": true,
+    "afterPack": "build/after-pack.cjs",
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": ["nsis"]
+    },
+    "nsis": {
+      "include": "build/installer.nsh"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": ["dmg", "zip"]
+    },
+    "linux": {
+      "category": "Development",
+      "target": ["AppImage", "deb"]
+    }
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.11.1",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^6.0.2",
+    "concurrently": "^10.0.5",
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16",
+    "wait-on": "^9.1.0"
+  }
+}
