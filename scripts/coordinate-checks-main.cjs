@@ -6,7 +6,7 @@ const project = resolve(__dirname, ".."), output = join(project, ".benchmarks");
 mkdirSync(output, { recursive: true });
 app.setPath("userData", mkdtempSync(join(output, "coordinates-profile-")));
 app.disableHardwareAcceleration();
-const deadline = setTimeout(() => { console.error("Coordinate checks exceeded 120 seconds"); app.exit(1); }, 120000);
+const deadline = setTimeout(() => { console.error("Coordinate checks exceeded 240 seconds"); app.exit(1); }, 240000);
 app.whenReady().then(async () => {
   const window = new BrowserWindow({ show: false, width: 1280, height: 880, webPreferences: { sandbox: true, nodeIntegration: false, contextIsolation: true, backgroundThrottling: false } });
   window.webContents.on("render-process-gone", (_event, details) => { console.error(details); app.exit(1); });

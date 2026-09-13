@@ -10,6 +10,7 @@
 - 忽略不可见、空、倒置和非有限 bounds；父节点缺 bounds 不阻断合法子节点。迭代查找最小可见矩形；同面积优先更深层，再取 XML 后序兄弟。XML 顺序不代表真实绘制层级，遮挡和重叠仍需在树中确认。
 - 截图原点始终是完整图片左上角，不能拿根节点 bounds 当屏幕尺寸。状态栏、导航栏、挖孔和应用留边不应引起整体平移。
 - 更换图片重新建立解码状态；未加载、解码失败时不允许反查，也不沿用上一张图的高亮。节点树不依赖图片解码。
+- 手动截图倍率使用 `25%–1600%`；stage 仍按实际 layout box 设置宽高，2D 反查继续读取图片自身 `getBoundingClientRect()`，因此高倍率不会引入额外坐标偏移。
 
 ## 方向与尺寸核对
 
@@ -87,6 +88,15 @@ node scripts/app-smoke.mjs --packaged --require-device --expect-landscape
 ```
 
 冒烟脚本新增 metadata 保存/重新读取/历史预览检查，构建版和打包版均已通过，使用隔离用户数据目录，不改用户原有历史。本轮在同一台手机完成横屏、竖屏实机回归；用户手动旋转后重新采集，没有强制改写手机设置，也未实机复现采集中途旋转。没有实机时不得把合成测试计为实机通过。
+
+## 2026-09-13 高倍率与 3D 增量验收
+
+- `bun run test:coordinates` 在 100%/125%/150% 页面缩放下各通过 25 组，实际 ScreenshotPreview 反查覆盖 25/50/100/200/400/800/1600%。
+- `bun run test:dpi` 的 1/1.25/1.5 device-scale-factor 代理报告均为成功；该代理仍不等价于 Windows 系统 DPI。
+- CSS 3D layer 现使用 yaw/pitch 球面相机：yaw 可环绕，pitch 限制在接近极点之前；相机变换不改变源 bounds。完整连续 360°人工扫视列为后续补充验收。
+- 节点详情新增 screen px 几何尺寸、父级内偏移和 CSS 风格盒模型。原生 Android UIAutomator 只提供 bounds，padding、border、margin 和真实 content 区域显示为“未暴露”，不会被伪造为 `0px`。
+- 开发版实机报告：`.benchmarks/app-smoke/2026-09-13T13-31-24-407Z/`；Windows 打包版实机报告：`.benchmarks/app-smoke/2026-09-13T13-34-12-854Z/`。两者均通过 15 项检查，renderer errors 为空。
+- 最新盒模型修正版打包实机报告：`.benchmarks/app-smoke/2026-09-13T13-42-19-161Z/`；15 项通过，51 节点、20.3 KB XML、1080×2400 PNG，renderer errors 为空。对应 NSIS 为 `release/Android UI Inspector Setup 0.1.0.exe`，112,313,534 字节，SHA-256 `59CB4D4B58BC24AD65B36654E52212A1B6F3AC24CA9D1523A167A1F4CDE9F5CF`。
 
 ## 交付与后续
 

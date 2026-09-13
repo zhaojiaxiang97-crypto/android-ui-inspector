@@ -13,6 +13,8 @@
 
 夹具只用于解析器回归；它们不能代表所有厂商的完整 UIAutomator 输出，也不替代真实设备验收。
 
+`visual-screen.svg` 是固定的脱敏截图源，供 `bun run visual:baseline` 的 Electron fixture 模式使用。它与 `uiautomator-portrait.xml` 共用 `1080×2400` 坐标空间；脚本会在三个固定 viewport 下生成工作台截图和 DOM 尺寸报告，生成物写入 `.benchmarks/`，不提交到仓库。
+
 ## 来源矩阵
 
 | 样本 | 来源 | 实机结论 |

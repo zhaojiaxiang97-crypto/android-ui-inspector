@@ -3,7 +3,7 @@ import type { AdbProbeResult, ExportSnapshotRequest, ExportSnapshotResult, SaveS
 declare global {
   interface Window {
     electronApi: {
-      readonly runtime: { readonly sandboxed: boolean; readonly contextIsolated: boolean };
+      readonly runtime: { readonly sandboxed: boolean; readonly contextIsolated: boolean; readonly fixtureMode?: boolean };
       probeAdb: () => Promise<AdbProbeResult>;
       inspectDevice: (serial: string) => Promise<UiSnapshot>;
       copyText: (value: string) => Promise<void>;

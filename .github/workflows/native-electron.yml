@@ -1,0 +1,84 @@
+name: Native Electron checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: ${{ matrix.os }} fixture smoke
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        shell: bash
+      - name: Build and run fixture smoke
+        shell: bash
+        env:
+          CI_OS: ${{ runner.os }}
+        run: |
+          if [ "$CI_OS" = "Linux" ]; then
+            xvfb-run -a bun run build
+            xvfb-run -a node scripts/app-smoke.mjs --fixture --drag-outside --viewport=1264x816
+          else
+            bun run build
+            node scripts/app-smoke.mjs --fixture --drag-outside --viewport=1264x816
+          fi
+
+  package:
+    name: ${{ matrix.name }} package
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            command: bun run package:mac
+            artifact: macos-release
+          - name: Linux
+            os: ubuntu-latest
+            command: bun run package:linux
+            artifact: linux-release
+          - name: Windows
+            os: windows-latest
+            command: bun run package:win
+            artifact: windows-release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        shell: bash
+      - name: Build native package
+        run: ${{ matrix.command }}
+        shell: bash
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Start packaged application
+        shell: bash
+        env:
+          CI_OS: ${{ runner.os }}
+        run: |
+          if [ "$CI_OS" = "Linux" ]; then
+            xvfb-run -a node scripts/packaged-startup.mjs
+          else
+            node scripts/packaged-startup.mjs
+          fi
+      - name: Upload native package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release/**
+          if-no-files-found: error

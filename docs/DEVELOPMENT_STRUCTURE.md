@@ -13,20 +13,24 @@ android-ui-inspector/
 │  ├─ capture-display.ts     # 截图与显示元数据
 │  └─ snapshot-store.ts      # 本地快照历史
 ├─ src/                      # React renderer，只负责界面和交互
-│  ├─ App.tsx
-│  ├─ App.css
-│  └─ components/            # 截图预览和虚拟树组件
+│  ├─ App.tsx                 # 工作台状态、Toolbar 和左右主布局
+│  ├─ App.css                 # 明亮极简主题、响应式布局和交互状态样式
+│  └─ components/            # 截图预览、3D layer 和节点属性组件
 ├─ shared/                   # 主进程、renderer、测试共用的纯逻辑
 │  ├─ types.ts
 │  ├─ tree-utils.ts
 │  ├─ visible-tree.ts
-│  └─ screen-coordinates.ts
-├─ tests/                    # 单元测试、DOM 回归和脱敏 XML fixture
+│  ├─ screen-coordinates.ts
+│  ├─ orbit-camera.ts        # 360°球面相机纯函数
+│  └─ node-metrics.ts        # bounds 几何度量纯函数
+├─ tests/                    # 单元测试、DOM 回归和脱敏 XML/视觉 fixture
 │  └─ fixtures/
 ├─ benchmarks/               # 性能/坐标基准页和合成树数据
-├─ scripts/                  # 开发、诊断、冒烟、基准和权限辅助脚本
+├─ scripts/                  # 开发、诊断、冒烟、视觉基线、基准和权限辅助脚本
 ├─ build/                    # electron-builder hook 和 NSIS 扩展
-├─ docs/                     # 验收记录、性能报告和开发约定
+├─ .github/workflows/        # 三平台静态检查、原生打包和启动验证
+├─ docs/                     # 验收记录、设计资产、性能报告和开发约定
+│  └─ design/                # ImageGen 视觉参考和界面设计稿
 ├─ public/                   # Vite 静态资源；目前为空，新增资源再放这里
 ├─ src-tauri/                # 历史 Tauri 原型，不属于默认 Electron 构建链
 ├─ index.html                # renderer 入口模板
@@ -74,9 +78,9 @@ scripts/ ─────────────> 构建产物、测试页和 El
 
 | 要增加的内容 | 放置位置 | 备注 |
 | --- | --- | --- |
-| 新的 UI 页面、面板、交互 | `src/` 或 `src/components/` | 通过现有 `window.electronApi` 调用桌面能力 |
+| 新的 UI 页面、面板、交互 | `src/` 或 `src/components/` | 通过现有 `window.electronApi` 调用桌面能力；节点属性面板不直接读取 ADB |
 | ADB 命令、XML/PNG 采集 | `electron/adb.ts` 或相邻 Electron 模块 | 主进程执行并校验参数 |
-| 主进程与 renderer 共用的类型/算法 | `shared/` | 保持纯 TypeScript |
+| 主进程与 renderer 共用的类型/算法 | `shared/` | 保持纯 TypeScript；相机数学和 bounds 度量放这里 |
 | 解析边界或回归样本 | `tests/`、`tests/fixtures/` | 样本必须脱敏并配套断言 |
 | 性能、坐标和真实 DOM 检查 | `benchmarks/`、`scripts/` | 输出统一进入 `.benchmarks/` |
 | 安装包、权限和构建钩子 | `build/`、`scripts/` | 不把生成文件写回源码目录 |

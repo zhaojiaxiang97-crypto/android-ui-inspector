@@ -1,13 +1,14 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain } from "electron";
 import type { SaveDialogOptions } from "electron";
 import { writeFile } from "node:fs/promises";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
-import { inspectDevice, probeAdb } from "./adb";
+import { inspectDevice, parseUiHierarchy, probeAdb } from "./adb";
 import { clearSnapshots, loadSnapshots, saveSnapshot } from "./snapshot-store";
-import type { ExportFormat, ExportSnapshotRequest, ExportSnapshotResult } from "../shared/types";
+import type { DeviceInfo, ExportFormat, ExportSnapshotRequest, ExportSnapshotResult, UiNode, UiSnapshot } from "../shared/types";
 
 const rendererUrl = process.env.ELECTRON_RENDERER_URL;
+const visualFixtureMode = process.argv.includes("--visual-fixture");
 let mainWindow: BrowserWindow | null = null;
 let quitting = false;
 
@@ -15,14 +16,76 @@ let quitting = false;
 // prepared by the development and packaging hooks; do not bypass the sandbox.
 app.disableHardwareAcceleration();
 
+function requestedWindowSize() {
+  const value = process.argv.find((argument) => argument.startsWith("--window-size="))?.slice("--window-size=".length);
+  const match = value?.match(/^(\d+)x(\d+)$/i);
+  if (!match) return { width: 1280, height: 880 };
+  const width = Math.max(960, Math.min(3200, Number(match[1])));
+  const height = Math.max(700, Math.min(2200, Number(match[2])));
+  return Number.isFinite(width) && Number.isFinite(height) ? { width, height } : { width: 1280, height: 880 };
+}
+
+function countNodes(node: UiNode | null) {
+  if (!node) return 0;
+  const pending = [node];
+  let count = 0;
+  for (let cursor = 0; cursor < pending.length; cursor += 1) {
+    count += 1;
+    pending.push(...pending[cursor].children);
+  }
+  return count;
+}
+
+function fixtureProbe() {
+  const device: DeviceInfo = {
+    serial: "visual-fixture",
+    state: "device",
+    model: "Fixture Pixel",
+    product: "android-ui-inspector-fixture",
+    transportId: null,
+  };
+  return {
+    adbPath: "visual-fixture",
+    adbVersion: "Android Debug Bridge visual fixture",
+    devices: [device],
+    error: null,
+  };
+}
+
+function fixtureSnapshot(serial: string): UiSnapshot {
+  const fixtureDirectory = join(app.getAppPath(), "tests", "fixtures");
+  const rawXml = readFileSync(join(fixtureDirectory, "uiautomator-portrait.xml"), "utf8");
+  const screenshotSvg = readFileSync(join(fixtureDirectory, "visual-screen.svg"), "utf8");
+  const parsed = parseUiHierarchy(rawXml);
+  const screenshotSize = { width: 1080, height: 2400 };
+  const frame = { ...screenshotSize, rotation: 0 as const };
+  return {
+    serial,
+    root: parsed.root,
+    nodeCount: countNodes(parsed.root),
+    xmlSize: Buffer.byteLength(rawXml, "utf8"),
+    rawXml,
+    screenshotDataUrl: `data:image/svg+xml;base64,${Buffer.from(screenshotSvg, "utf8").toString("base64")}`,
+    error: null,
+    warning: null,
+    hierarchyDumpMode: "full",
+    captureGeometry: {
+      hierarchyRotation: parsed.rotation,
+      beforeScreenshot: frame,
+      afterScreenshot: frame,
+      screenshotSize,
+    },
+  };
+}
+
 function createWindow() {
+  const windowSize = requestedWindowSize();
   const window = new BrowserWindow({
-    width: 1280,
-    height: 880,
+    ...windowSize,
     minWidth: 960,
     minHeight: 700,
     title: "Android UI Inspector",
-    backgroundColor: "#0e1212",
+    backgroundColor: "#f7fafb",
     show: false,
     webPreferences: {
       // Resolve at runtime: Bun may inline the source directory for __dirname.
@@ -30,6 +93,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      additionalArguments: visualFixtureMode ? ["--visual-fixture"] : [],
     },
   });
   mainWindow = window;
@@ -132,12 +196,12 @@ async function exportSnapshot(input: unknown): Promise<ExportSnapshotResult> {
   }
 }
 
-ipcMain.handle("probe-adb", () => probeAdb());
+ipcMain.handle("probe-adb", () => visualFixtureMode ? fixtureProbe() : probeAdb());
 ipcMain.handle("inspect-device", (_event, serial: unknown) => {
   if (typeof serial !== "string" || !serial.trim()) {
     throw new Error("设备序列号不能为空。");
   }
-  return inspectDevice(serial);
+  return visualFixtureMode ? fixtureSnapshot(serial) : inspectDevice(serial);
 });
 ipcMain.handle("copy-text", (_event, value: unknown) => {
   if (typeof value !== "string") throw new Error("复制内容无效。");

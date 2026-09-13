@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { ExportSnapshotRequest, SaveSnapshotRequest } from "../shared/types";
 
 contextBridge.exposeInMainWorld("electronApi", {
-  runtime: { sandboxed: process.sandboxed, contextIsolated: process.contextIsolated },
+  runtime: { sandboxed: process.sandboxed, contextIsolated: process.contextIsolated, fixtureMode: process.argv.includes("--visual-fixture") },
   probeAdb: () => ipcRenderer.invoke("probe-adb"),
   inspectDevice: (serial: string) => ipcRenderer.invoke("inspect-device", serial),
   copyText: (value: string) => ipcRenderer.invoke("copy-text", value),

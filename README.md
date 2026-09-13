@@ -16,6 +16,11 @@
 - 本地保存 UI 快照，重启后可查看历史记录、节点变化摘要和截图方向元数据。
 - 大树使用记忆化节点与虚拟列表，支持全部展开/折叠、选中定位和 Home/End 键盘导航。
 - 截图等比缩放、半开边界命中、越界 bounds 裁剪，并在采集方向或尺寸冲突时暂停截图定位。
+- 点击有有效 bounds 的树节点后，可在右侧进入基于 hierarchy 深度的 CSS 3D 层级展开视图；支持父子范围、层间距、breadcrumb、360°球面相机、旋转/平移和选中层同步。
+- 截图支持 25%–1600% 缩放、50/100/200/400/800/1600 快速倍率、适应窗口、重置、Ctrl/⌘+滚轮锚点缩放，以及空格/Shift/中键平移和 3D Alt/右键环绕旋转。
+- 选中控件后显示 UIAutomator 常用属性、screen px 几何尺寸、父级内偏移和 CSS 风格盒模型；原生 Android 无法提供的 padding、border、margin 会明确标记为不可用，不伪造 CSS 数值。
+- 采用明亮极简工作台布局：Toolbar 集中设备与采集操作，左侧保留 hierarchy 树，右侧统一承载 2D/3D 画布、缩放控制和节点属性；顶部搜索可用 `Ctrl/⌘+K` 快速聚焦。
+- 首页采用极简双卡片布局：左侧聚焦当前设备，右侧提供三步连接指引；设备采集动作只保留在顶部 Toolbar，主标题、正文和属性文字使用更易读的系统字体与字号层级。
 - 提供树逻辑、真实 DOM、坐标、启动和实体设备冒烟测试，以及 Windows electron-builder 打包链路。
 
 ## 重要边界
@@ -55,7 +60,11 @@ bun install
 adb devices -l
 ```
 
-只有显示为 `device` 且已授权的设备可以执行“检查 UI”。项目只读取设备信息、UIAutomator XML 和屏幕截图；自动化验收不会向手机发送点击或输入。
+只有显示为 `device` 且已授权的设备可以执行检查。进入检查工作台后，在顶部 Toolbar 选择设备并点击唯一的“采集截图”按钮；项目只读取设备信息、UIAutomator XML 和屏幕截图，自动化验收不会向手机发送点击或输入。
+
+检查工作台采用双栏布局：左侧是可搜索、可筛选和可键盘操作的 hierarchy 树，右侧是等比设备截图及当前节点详情。点击左侧节点会在截图上按真实 `bounds` 高亮，点击截图也会反向定位到左侧树节点；快照历史收纳在右侧“快照与历史”折叠区。
+
+在右侧截图工具栏可以切换 2D 与 3D 层级视图。3D 视图按 UIAutomator hierarchy 的父子深度模拟 Z 间距，不等同于 Android 实际 RenderNode、Canvas 或 GPU 绘制顺序；同层顺序只作为辅助理解。3D 初始姿态保持正面，只有使用 Alt+拖动或方向键时才会旋转，避免选中节点后整张设备画面倾斜。点击任意可见 layer、breadcrumb 或左侧树节点都会保持同一个选中节点。
 
 ### 启动开发环境
 
@@ -83,8 +92,13 @@ bun run start
 | `bun run start` | 启动本地生产构建 | 读取 `dist/` 和 `dist-electron/` |
 | `bun test` | 单元测试和解析回归 | 终端结果 |
 | `bun run test:tree-ui` | 真实 DOM 树交互回归 | `.benchmarks/tree-behavior.json` |
-| `bun run test:coordinates` | 截图坐标映射回归 | `.benchmarks/screen-coordinates.json` |
+| `bun run test:coordinates` | 截图坐标、25%–1600% 缩放反查回归 | `.benchmarks/screen-coordinates.json` |
+| `bun run test:dpi` | Electron 100%/125%/150% device-scale-factor 代理矩阵 | `.benchmarks/dpi-checks/` |
+| `bun run visual:baseline` | 固定脱敏 hierarchy 在 1264×816/1440×900/1587×1000 生成视觉基线 | `.benchmarks/visual-baseline/` |
+| `bun run visual:home` | 首页极简布局在 1264×816/1440×900/1587×1000 生成视觉基线 | `.benchmarks/home-visual-baseline/` |
+| `bun run smoke:fixture-dpi` | 固定 fixture 的 100%/125%/150% 完整应用与窗口外拖动回归 | `.benchmarks/fixture-dpi-smoke/` |
 | `bun run benchmark:tree` | 纯逻辑大树基准 | `.benchmarks/tree-*.json` |
+| `bun run benchmark:layers` | 3D LayerRecord 大树布局基准 | `.benchmarks/layer-layout.json` |
 | `bun run benchmark:render` | 真实 DOM/虚拟树基准 | `.benchmarks/tree-virtual.json` |
 | `bun run prepare:windows` | 准备 Windows Electron 沙箱权限 | 本机运行时目录 |
 | `bun run diagnose:startup software` | 诊断开发构建启动链路 | `.benchmarks/startup/` |
@@ -100,9 +114,10 @@ bun x tsc --noEmit
 bun test
 bun run test:tree-ui
 bun run test:coordinates
+bun run test:dpi
 ```
 
-当前已验证的基线是：44 项单元测试通过；树 UI 回归覆盖旧基线和虚拟树行为；坐标回归在 100%/125%/150% 页面缩放下共覆盖 72 组。性能方法和结果见 [树性能报告](docs/TREE_PERFORMANCE.md)，坐标边界见 [截图坐标验收](docs/SCREEN_COORDINATES.md)。
+当前已验证的基线是：56 项单元测试通过；树 UI 回归覆盖旧基线和虚拟树行为；坐标回归在 100%/125%/150% 页面缩放下共覆盖 75 组，并包含高倍率截图反查；DPI 代理回归在 devicePixelRatio 1/1.25/1.5 下各覆盖 25 组。3D LayerRecord 基准覆盖 1,000～25,000 节点，性能方法和结果见 [树性能报告](docs/TREE_PERFORMANCE.md)，坐标边界见 [截图坐标验收](docs/SCREEN_COORDINATES.md)。
 
 连接授权手机后，运行完整 Windows 冒烟：
 
@@ -116,7 +131,11 @@ bun run smoke:app --require-device
 node scripts/app-smoke.mjs --packaged --require-device
 ```
 
-冒烟测试使用独立用户数据目录，覆盖沙箱、preload、设备刷新、完整 hierarchy、节点选择、原始属性、截图反查、搜索、键盘导航和快照历史。报告、日志、页面截图和真实手机 XML 只写入被忽略的 `.benchmarks/`，不要把含私人页面的文件直接发布。
+冒烟测试使用独立用户数据目录，覆盖沙箱、preload、设备刷新、完整 hierarchy、节点选择、3D 层级展开、layer 高亮、layer 快速切换、viewport 边缘拖动、缩放/适应、原始属性、截图反查、搜索、键盘导航和快照历史；通过后还会保存 `layers3d.png` 供人工检查。追加 `--reduced-motion` 可验证无障碍动态偏好下动画被关闭，追加 `--expect-landscape` 可验收横屏设备。报告、日志、页面截图和真实手机 XML 只写入被忽略的 `.benchmarks/`，不要把含私人页面的文件直接发布。
+
+`bun run test:dpi` 会用独立 Electron 进程依次注入 `force-device-scale-factor=1/1.25/1.5`，复用生产 `ScreenshotPreview` 坐标 harness，并断言 `devicePixelRatio`、布局框和反查矩阵。它是可重复的 DPI 代理，不等价于 Windows 设置里的系统缩放、多显示器 Per-Monitor DPI 或实体设备显示输出。
+
+本轮首页设计稿：[main-interface-redesign-v2.png](docs/design/main-interface-redesign-v2.png)。它是视觉参考资产，实际布局由 `src/App.tsx` 和 `src/App.css` 实现。
 
 ## 打包
 
@@ -132,6 +151,10 @@ bun run package:linux
 
 跨平台发布应在对应操作系统上构建，或使用对应平台的 CI runner。Windows x64 打包会为 `release/win-unpacked` 准备 Electron 沙箱运行时权限；NSIS 安装时也会在实际安装目录追加读取/执行权限，同时保留既有权限，不会关闭 renderer sandbox。
 
+`.github/workflows/static-render.yml` 已加入 Ubuntu、macOS、Windows 三平台的静态 renderer 矩阵：单测、树 UI、坐标、DPI 代理和生产构建会在对应 runner 执行；Linux Electron 检查通过 `xvfb-run` 提供无头显示环境。真实 Android 设备冒烟仍只在接入设备的 Windows/macOS/Linux runner 上执行。
+
+`.github/workflows/native-electron.yml` 还会在三平台运行固定 fixture 的 Electron 应用冒烟；macOS/Linux runner 会构建对应原生包、启动打包应用并上传 release artifact。当前本机已完成 Windows 版验证，三平台 CI 的最终结果以 GitHub Actions 运行记录为准。
+
 当前安装包未配置 Authenticode/Apple Developer 签名，干净系统可能显示未知发布者。安装、升级、卸载以及 macOS/Linux 的发布验证仍应在目标平台继续完成。
 
 ## 目录与开发边界
@@ -139,10 +162,10 @@ bun run package:linux
 ```text
 electron/       主进程、ADB、截图、IPC、快照持久化
 src/            React renderer 和界面组件
-shared/         跨进程共享类型、树算法、坐标算法
+shared/         跨进程共享类型、树算法、坐标算法、3D layer 纯函数布局
 tests/          单元/DOM 回归与脱敏 UIAutomator fixture
 benchmarks/     合成树、坐标页、真实 DOM 基准入口
-scripts/        启动、诊断、冒烟、基准编排
+scripts/        启动、诊断、冒烟、树与 3D layer 基准编排
 build/          打包 hook 和 NSIS 扩展
 docs/           性能、坐标、Windows 启动与目录约定
 public/         Vite 静态资源
@@ -152,6 +175,8 @@ dist*/release/  构建生成目录，不手动编辑、不提交
 ```
 
 更详细的职责、依赖方向和新文件放置规则见 [开发目录约定](docs/DEVELOPMENT_STRUCTURE.md)。核心原则是：renderer 只能通过 preload 白名单访问桌面能力；主进程校验 IPC 输入；共享算法保持纯 TypeScript；测试 fixture 必须脱敏；生成产物不得回写源码目录。
+
+本轮 Windows 版视觉对齐改造已完成；固定脱敏 fixture、Windows OS DPI、窗口外拖动以及 macOS/Linux 原生打包等环境验收项仍按计划文档逐步补齐。差距清单、目标布局、实施记录和验收标准见 [UI 设计稿对齐改造计划](docs/UI_REDESIGN_REFACTOR_PLAN.md)。
 
 ## 贡献流程
 
@@ -165,7 +190,7 @@ dist*/release/  构建生成目录，不手动编辑、不提交
 
 - 在更多 Android 版本、厂商、分辨率、系统 DPI、折叠屏和多显示器环境继续验证坐标映射。
 - 收集并脱敏更多 UIAutomator 输出，补充厂商属性、异常 bounds、虚拟节点和深层 hierarchy 回归。
-- 在干净 Windows 环境完成安装/升级/卸载测试，并补齐 macOS、Linux 启动验证。
+- 在干净 Windows 环境完成安装/升级/卸载测试；等待三平台 CI 首次运行后，再补齐 macOS/Linux 的打包启动和真实设备验证。
 - 继续评估超大树筛选、差异计算、原始属性展示和屏幕阅读器体验。
 
 项目阶段性实施记录由工作区上级的 `ANDROID_UI_INSPECTOR_PLAN.md` 维护；仓库内的开发规则和验收说明见 `docs/`。

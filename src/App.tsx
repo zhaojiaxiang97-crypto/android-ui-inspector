@@ -4,6 +4,7 @@ import type { AdbProbeResult, ExportFormat, StoredSnapshot, UiNode, UiSnapshot }
 import { filterTree, flattenNodes, nodeDisplayLabel } from "../shared/tree-utils";
 import { UiTree } from "./components/UiTree";
 import { ScreenshotPreview } from "./components/ScreenshotPreview";
+import { NodePropertiesPanel } from "./components/NodePropertiesPanel";
 
 function formatCheckedAt(date: Date | null) {
   if (!date) return "尚未检查";
@@ -354,6 +355,16 @@ function App() {
   }, [refreshDevices]);
 
   useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "k") return;
+      event.preventDefault();
+      document.getElementById("global-node-search")?.focus();
+    };
+    window.addEventListener("keydown", focusSearch);
+    return () => window.removeEventListener("keydown", focusSearch);
+  }, []);
+
+  useEffect(() => {
     let active = true;
     async function restoreSnapshots() {
       setSnapshotsLoading(true);
@@ -560,8 +571,38 @@ function App() {
     setSnapshotStatus(`正在查看历史快照 ${entry.id.slice(0, 8)}`);
   }, []);
 
+  const selectDevice = useCallback((serial: string) => {
+    setSelectedSerial(serial || null);
+    setSnapshot(null);
+    setSelectedNode(null);
+    setInspectionError(null);
+    setCopyStatus(null);
+    setExportStatus(null);
+    setTreeQuery("");
+    setInteractiveOnly(false);
+    setIdentifiedOnly(false);
+    setSnapshotStatus(null);
+    setLatestDiff(null);
+    setDiffExpanded(false);
+  }, []);
+
+  const toolbarSerial = selectedSerial ?? readyDevices[0]?.serial ?? "";
+  const toolbarDevice = devices.find((device) => device.serial === toolbarSerial) ?? null;
+  const primaryDevice = toolbarDevice ?? devices[0] ?? null;
+  const homeConnectionLabel = runtimeError || probe?.error
+    ? "连接异常"
+    : primaryDevice?.state === "device"
+      ? "已授权，可开始检查"
+      : primaryDevice
+        ? stateLabel(primaryDevice.state)
+        : "等待设备连接";
+  const captureSerial = toolbarDevice?.state === "device" ? toolbarDevice.serial : null;
+  const captureSelected = useCallback(() => {
+    if (captureSerial) void inspectDevice(captureSerial);
+  }, [captureSerial, inspectDevice]);
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${selectedSerial ? "inspection-active" : ""}`}>
       <header className="topbar">
         <div className="brand-lockup">
           <div className="brand-mark" aria-hidden="true">
@@ -570,14 +611,49 @@ function App() {
           </div>
           <div>
             <p className="eyebrow">ANDROID TOOLING</p>
-            <h1>UI Inspector</h1>
+            <h1>Android UI Inspector</h1>
           </div>
           <span className="alpha-badge">ALPHA</span>
         </div>
 
-        <div className="topbar-meta">
-          <span className="connection-dot" />
-          <span>本机工作区</span>
+        <div className="topbar-meta inspector-toolbar">
+          {selectedSerial && (
+            <button className="toolbar-back-button" type="button" onClick={closeInspector} aria-label="返回设备列表">
+              ‹ 返回
+            </button>
+          )}
+          <div className="toolbar-device-control">
+            <span className={`connection-dot ${statusTone}`} aria-hidden="true" />
+            <label className="toolbar-label" htmlFor="device-select">目标设备</label>
+            <select
+              id="device-select"
+              className="device-select"
+              aria-label="选择 Android 设备"
+              value={toolbarSerial}
+              onChange={(event) => selectDevice(event.currentTarget.value)}
+            >
+              <option value="">{devices.length > 0 ? "选择设备" : "未发现设备"}</option>
+              {devices.map((device) => (
+                <option
+                  key={device.serial}
+                  value={device.serial}
+                  data-device-state={device.state}
+                  className="device-option"
+                >
+                  {device.model ?? "Android device"} · {stateLabel(device.state)}
+                </option>
+              ))}
+              {selectedSerial && !toolbarDevice && (
+                <option value={selectedSerial} data-device-state="history">{selectedSerial} · 历史快照</option>
+              )}
+            </select>
+            {toolbarDevice && <span className={`device-state toolbar-device-state ${toolbarDevice.state}`}>{stateLabel(toolbarDevice.state)}</span>}
+          </div>
+          <span className={`toolbar-status ${statusTone}`} title={runtimeError || probe?.error || undefined}>
+            {runtimeError || probe?.error ? "连接异常" : captureSerial ? "设备已连接" : "等待设备"}
+          </span>
+          <span className={`adb-badge ${hasAdb ? "ready" : "missing"}`}>ADB {hasAdb ? "READY" : "MISSING"}</span>
+          <span className="toolbar-checked">{formatCheckedAt(checkedAt)}</span>
           <button
             className="refresh-button"
             type="button"
@@ -587,149 +663,119 @@ function App() {
             <span className={loading ? "refresh-icon spinning" : "refresh-icon"}>↻</span>
             {loading ? "检查中" : "刷新设备"}
           </button>
+          <button
+            className="capture-button"
+            type="button"
+            onClick={captureSelected}
+            disabled={!captureSerial || inspectionLoading || loading}
+          >
+            <span className={inspectionLoading ? "capture-icon spinning" : "capture-icon"} aria-hidden="true">●</span>
+            {inspectionLoading ? "采集中…" : "采集截图"}
+          </button>
+          <label className="topbar-search" htmlFor="global-node-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              id="global-node-search"
+              type="search"
+              value={treeQuery}
+              onChange={(event) => setTreeQuery(event.target.value)}
+              placeholder="搜索节点…"
+              aria-label="搜索 UI 节点"
+            />
+            <kbd>⌘ K</kbd>
+          </label>
         </div>
       </header>
 
       <main className="workspace">
-        <section className="hero-section">
-          <div>
-            <p className="section-kicker">STEP 01 / DEVICE BRIDGE</p>
-            <h2>先把设备接进来。</h2>
-            <p className="hero-copy">
-              通过 ADB 建立稳定连接，后续才能读取 UI 层级、截图并定位到具体控件。
-            </p>
-          </div>
-          <div className="hero-orbit" aria-hidden="true">
-            <div className="orbit-ring ring-one" />
-            <div className="orbit-ring ring-two" />
-            <div className="orbit-core">ADB</div>
-            <span className="orbit-node node-one" />
-            <span className="orbit-node node-two" />
-            <span className="orbit-node node-three" />
-          </div>
-        </section>
-
-        <section className="metrics-grid" aria-label="连接状态概览">
-          <article className="metric-card accent-card">
-            <span className="metric-label">可用设备</span>
-            <strong>{readyDevices.length}</strong>
-            <span className="metric-caption">可开始检查 UI</span>
-          </article>
-          <article className="metric-card">
-            <span className="metric-label">检测到</span>
-            <strong>{devices.length}</strong>
-            <span className="metric-caption">包含待授权设备</span>
-          </article>
-          <article className="metric-card">
-            <span className="metric-label">ADB 状态</span>
-            <strong className="metric-status">{hasAdb ? "READY" : "MISSING"}</strong>
-            <span className="metric-caption">{probe?.adbVersion ?? "等待检测"}</span>
-          </article>
-        </section>
-
-        <section className={`status-banner ${statusTone}`}>
-          <div className="status-icon" aria-hidden="true">
-            {statusTone === "success" ? "✓" : statusTone === "danger" ? "!" : "·"}
-          </div>
-          <div className="status-content">
-            <strong>
-              {runtimeError || probe?.error
-                ? "ADB 还没有准备好"
-                : readyDevices.length
-                  ? `${readyDevices.length} 台设备已就绪`
-                  : "等待 Android 设备连接"}
-            </strong>
-            <span>
-              {runtimeError || probe?.error ||
-                (readyDevices.length
-                  ? "设备已通过授权，可以进入 UI 层级检查。"
-                  : "连接 USB 并开启 USB 调试，应用会自动识别设备。")}
-            </span>
-          </div>
-          <span className="last-checked">最后检查 {formatCheckedAt(checkedAt)}</span>
-        </section>
-
-        <div className="content-grid">
-          <section className="panel device-panel">
-            <div className="panel-heading">
-              <div>
-                <p className="section-kicker">CONNECTED TARGETS</p>
-                <h3>设备列表</h3>
-              </div>
-              <span className="count-pill">{devices.length.toString().padStart(2, "0")}</span>
-            </div>
-
-            {devices.length > 0 ? (
-              <div className="device-list">
-                {devices.map((device) => (
-                  <article className="device-card" key={device.serial}>
-                    <div className="device-avatar">{device.model?.slice(0, 1).toUpperCase() ?? "A"}</div>
-                    <div className="device-details">
-                      <div className="device-name-row">
-                        <h4>{device.model ?? "Android device"}</h4>
-                        <span className={`device-state ${device.state}`}>{stateLabel(device.state)}</span>
-                      </div>
-                      <p>{device.serial}</p>
-                      <span className="device-product">{device.product ?? "USB / ADB target"}</span>
-                    </div>
-                    <button
-                      className="inspect-button"
-                      type="button"
-                      onClick={() => void inspectDevice(device.serial)}
-                      disabled={device.state !== "device" || inspectionLoading}
-                    >
-                      检查 UI <span>→</span>
-                    </button>
-                  </article>
-                ))}
-              </div>
-            ) : (
-              <div className="empty-state">
-                <div className="empty-illustration" aria-hidden="true">
-                  <div className="phone-shape"><span /><span /><span /></div>
-                  <div className="empty-cable" />
+        <section className="home-view" aria-label="设备连接">
+          <div className="home-layout">
+            <section className="home-card connected-device-card">
+              <div className="home-card-heading">
+                <div>
+                  <p className="home-kicker">CONNECTED DEVICE</p>
+                  <h2>已连接设备</h2>
                 </div>
-                <h4>{runtimeError || probe?.error ? "无法找到 ADB" : "还没有发现设备"}</h4>
-                <p>
-                  {runtimeError || probe?.error
-                    ? "请确认 Platform-Tools 已安装，并从 Electron 桌面应用启动。"
-                    : "插入 Android 手机后点击右上角刷新。首次连接时，请在手机上允许 USB 调试。"}
-                </p>
-                <button className="secondary-button" type="button" onClick={() => void refreshDevices()} disabled={loading}>
-                  {loading ? "重新检查中" : "重新检查"}
-                </button>
+                <span className={`home-state-pill ${statusTone}`}>
+                  <span className="home-status-dot" aria-hidden="true" />
+                  {homeConnectionLabel}
+                </span>
               </div>
-            )}
-          </section>
 
-          <aside className="panel setup-panel">
-            <div className="panel-heading">
-              <div>
-                <p className="section-kicker">QUICK SETUP</p>
-                <h3>连接前准备</h3>
+              {primaryDevice ? (
+                <>
+                  <div className="home-device-hero">
+                    <div className="home-phone-illustration" aria-hidden="true">
+                      <div className="home-phone-speaker" />
+                      <div className="home-phone-screen">
+                        <span />
+                        <span />
+                        <span />
+                      </div>
+                    </div>
+                    <div className="home-device-copy">
+                      <h3>{primaryDevice.model ?? "Android device"}</h3>
+                      <code>{primaryDevice.serial}</code>
+                      <p>{primaryDevice.product ?? "USB / ADB target"}</p>
+                      <div className="home-device-status">
+                        <span className={`home-status-dot ${primaryDevice.state === "device" ? "ready" : ""}`} aria-hidden="true" />
+                        <strong>{stateLabel(primaryDevice.state)}</strong>
+                        <span>{hasAdb ? "ADB READY" : "ADB MISSING"}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="home-device-footer">
+                    <div>
+                      <strong>{readyDevices.length > 0 ? "准备开始检查 UI" : "等待设备授权"}</strong>
+                      <p>{readyDevices.length > 0 ? "使用顶部的“采集截图”读取当前页面。" : "请在手机上允许这台电脑进行 USB 调试。"}</p>
+                    </div>
+                    <span className="home-device-count">{devices.length} 台设备</span>
+                  </div>
+                </>
+              ) : (
+                <div className="home-empty-state">
+                  <div className="home-phone-illustration empty" aria-hidden="true">
+                    <div className="home-phone-screen"><span /><span /><span /></div>
+                  </div>
+                  <h3>{runtimeError || probe?.error ? "ADB 尚未准备好" : "等待 Android 设备"}</h3>
+                  <p>{runtimeError || probe?.error ? "请确认 Platform-Tools 已安装后重新检查。" : "连接 USB 并开启 USB 调试，应用会自动识别设备。"}</p>
+                  <button className="home-secondary-action" type="button" onClick={() => void refreshDevices()} disabled={loading}>
+                    {loading ? "检查中…" : "重新检查设备"}
+                  </button>
+                </div>
+              )}
+            </section>
+
+            <aside className="home-card quick-start-card">
+              <div className="home-card-heading">
+                <div>
+                  <p className="home-kicker">QUICK START</p>
+                  <h2>开始之前</h2>
+                </div>
+                <span className="home-step-count">01 — 03</span>
               </div>
-              <span className="setup-index">01—03</span>
-            </div>
-            <ol className="setup-list">
-              <li>
-                <span className="step-number">01</span>
-                <div><strong>打开开发者选项</strong><p>设置 → 关于手机 → 连续点击版本号</p></div>
-              </li>
-              <li>
-                <span className="step-number">02</span>
-                <div><strong>开启 USB 调试</strong><p>在开发者选项中打开 USB 调试</p></div>
-              </li>
-              <li>
-                <span className="step-number">03</span>
-                <div><strong>允许这台电脑</strong><p>在手机弹窗中确认 RSA 授权</p></div>
-              </li>
-            </ol>
-            <div className="setup-note">
-              <span className="note-icon">i</span>
-              <p>当前版本只读取设备信息，不会修改手机数据。</p>
-            </div>
-          </aside>
-        </div>
+              <ol className="home-steps">
+                <li>
+                  <span className="home-step-number">01</span>
+                  <div><strong>打开开发者选项</strong><p>设置 → 关于手机 → 连续点击版本号</p></div>
+                </li>
+                <li>
+                  <span className="home-step-number">02</span>
+                  <div><strong>开启 USB 调试</strong><p>在开发者选项中打开 USB 调试</p></div>
+                </li>
+                <li>
+                  <span className="home-step-number">03</span>
+                  <div><strong>允许这台电脑</strong><p>在手机弹窗中确认 RSA 授权</p></div>
+                </li>
+              </ol>
+              <div className="home-safety-note">
+                <span aria-hidden="true">i</span>
+                <p>当前版本只读取设备信息，不会修改手机数据。</p>
+              </div>
+            </aside>
+          </div>
+          <p className="home-last-checked">最后检查：{formatCheckedAt(checkedAt)}</p>
+        </section>
         {selectedSerial && (
           <section className="panel inspector-panel">
             <div className="inspector-heading">
@@ -738,33 +784,61 @@ function App() {
                 <h3>界面层级</h3>
               </div>
               <div className="inspector-heading-meta">
-                <span>{snapshot ? `${snapshot.nodeCount} nodes · ${formatBytes(snapshot.xmlSize)} · ${dumpModeLabel(snapshot.hierarchyDumpMode)}` : "读取中"}</span>
-                <button
-                  className="close-button inspector-refresh"
-                  type="button"
-                  onClick={() => void inspectDevice(selectedSerial)}
-                  disabled={inspectionLoading}
-                >
-                  {inspectionLoading ? "读取中" : "刷新 UI"}
-                </button>
+                <span className="snapshot-summary">{snapshot ? `${snapshot.nodeCount} nodes · ${formatBytes(snapshot.xmlSize)} · ${dumpModeLabel(snapshot.hierarchyDumpMode)}` : "读取中"}</span>
                 <button className="close-button" type="button" onClick={closeInspector}>返回设备</button>
               </div>
             </div>
 
             {inspectionLoading ? (
-              <div className="inspection-placeholder">
-                <span className="loading-orbit" />
-                <h4>正在读取 UI hierarchy</h4>
-                <p>执行 uiautomator dump，并从设备拉取当前页面结构。</p>
+              <div className="inspector-grid inspector-state-grid">
+                <div className="tree-pane inspector-state-pane">
+                  <div className="subpanel-heading">
+                    <span>层级树</span>
+                    <span className="tree-hint">读取中</span>
+                  </div>
+                  <div className="workspace-empty-copy">
+                    <span className="loading-orbit" />
+                    <h4>正在读取 UI hierarchy</h4>
+                    <p>执行 uiautomator dump，并从设备拉取当前页面结构。</p>
+                  </div>
+                </div>
+                <div className="preview-pane inspector-state-pane">
+                  <div className="subpanel-heading">
+                    <span>设备画面</span>
+                    <span className="tree-hint">采集中</span>
+                  </div>
+                  <div className="workspace-empty-copy">
+                    <span className="workspace-empty-icon" aria-hidden="true">◎</span>
+                    <h4>正在同步截图</h4>
+                    <p>等待 hierarchy 和设备画面完成采集。</p>
+                  </div>
+                </div>
               </div>
             ) : inspectionError || snapshot?.error ? (
-              <div className="inspection-placeholder error-placeholder">
-                <div className="error-mark">!</div>
-                <h4>读取失败</h4>
-                <p>{inspectionError || snapshot?.error}</p>
-                <button className="secondary-button" type="button" onClick={() => void inspectDevice(selectedSerial)}>
-                  再试一次
-                </button>
+              <div className="inspector-grid inspector-state-grid">
+                <div className="tree-pane inspector-state-pane">
+                  <div className="subpanel-heading">
+                    <span>层级树</span>
+                    <span className="tree-hint">读取失败</span>
+                  </div>
+                  <div className="workspace-empty-copy error-placeholder">
+                    <div className="error-mark">!</div>
+                    <h4>读取失败</h4>
+                    <p>{inspectionError || snapshot?.error}</p>
+                    <span className="tree-hint">请使用顶部“采集截图”重新获取。</span>
+                  </div>
+                </div>
+                <div className="preview-pane inspector-state-pane">
+                  <div className="subpanel-heading">
+                    <span>设备画面</span>
+                    <span className="tree-hint">未采集</span>
+                  </div>
+                  <div className="workspace-empty-copy">
+                    <span className="workspace-empty-icon" aria-hidden="true">×</span>
+                    <h4>暂无截图结果</h4>
+                    <p>本次检查未生成可用截图，右侧会在下一次采集后显示设备画面。</p>
+                  </div>
+                </div>
               </div>
             ) : snapshot?.root ? (
               <>
@@ -774,76 +848,6 @@ function App() {
                     当前 hierarchy 包含 {virtualNodeCount} 个 VirtualChild 虚拟无障碍节点。它们只代表应用暴露的可访问性信息，不保证包含所有实际绘制控件。
                   </div>
                 )}
-                <div className="snapshot-toolbar">
-                  <div className="snapshot-toolbar-info">
-                    <span>本地快照：{savedSnapshots.length} 份</span>
-                    {snapshotsLoading && <span className="tree-hint">正在读取本地记录…</span>}
-                    {latestDiff ? (
-                      <>
-                        <span className="snapshot-diff">较上一份：{diffSummary(latestDiff)}</span>
-                        <button className="diff-toggle" type="button" onClick={() => setDiffExpanded((value) => !value)}>
-                          {diffExpanded ? "收起明细" : "查看明细"}
-                        </button>
-                      </>
-                    ) : !snapshotsLoading && <span className="tree-hint">保存后可比较下一次刷新</span>}
-                    {snapshotStatus && <span className="snapshot-status">{snapshotStatus}</span>}
-                    {diffExportStatus && <span className="snapshot-export-status">{diffExportStatus}</span>}
-                    {snapshotStoreError && <span className="snapshot-store-error">{snapshotStoreError}</span>}
-                  </div>
-                  <div className="snapshot-actions">
-                    <button className="close-button" type="button" onClick={() => void saveCurrentSnapshot()} disabled={snapshotsLoading}>保存快照</button>
-                    <button className="close-button" type="button" onClick={() => void clearSavedSnapshots()} disabled={snapshotsLoading || (savedSnapshots.length === 0 && !snapshotStoreError)}>清空记录</button>
-                  </div>
-                </div>
-                {savedSnapshots.length > 0 && (
-                  <div className="snapshot-history">
-                    <div className="snapshot-history-heading">
-                      <span>最近保存</span>
-                      <span>最多保留 30 份</span>
-                    </div>
-                    <div className="snapshot-history-list">
-                      {savedSnapshots.slice(-6).reverse().map((entry) => (
-                        <button className="snapshot-history-item" type="button" key={entry.id} onClick={() => viewSavedSnapshot(entry)}>
-                          <code>{formatSnapshotTime(entry.capturedAt)}</code>
-                          <span>{entry.snapshot.nodeCount} nodes</span>
-                          <span className="tree-hint">{entry.snapshot.serial}</span>
-                          {entry.diff && <span className="snapshot-diff">{diffSummary(entry.diff)}</span>}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {latestDiff && diffExpanded && (
-                  <div className="snapshot-diff-details">
-                    <div className="snapshot-history-heading">
-                      <span>节点变化明细</span>
-                      <div className="diff-heading-actions">
-                        <span>最多展示 200 项</span>
-                        <button className="diff-toggle" type="button" onClick={() => void exportLatestDiff()}>导出差异 JSON</button>
-                      </div>
-                    </div>
-                    {latestDiff.changes.length === 0 ? (
-                      <p className="diff-empty">未发现节点变化</p>
-                    ) : (
-                      <div className="diff-list">
-                        {latestDiff.changes.map((change) => (
-                          <div
-                            className={`diff-row ${change.kind}`}
-                            key={`${change.kind}-${change.id}`}
-                            title={change.details.length > 0
-                              ? change.details.map((detail) => `${detail.field}: ${detail.previous ?? "∅"} → ${detail.current ?? "∅"}`).join("\n")
-                              : undefined}
-                          >
-                            <span className="diff-kind">{changeKindLabel(change.kind)}</span>
-                            <code>#{change.id}</code>
-                            <span className="diff-label">{change.label}</span>
-                            <span className="diff-fields">{change.fields.length > 0 ? change.fields.join(" · ") : "节点结构"}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
                 <div className="inspector-grid">
                   <div className="tree-pane">
                     <div className="subpanel-heading">
@@ -851,18 +855,23 @@ function App() {
                       <span className="tree-hint">{hasTreeFilter ? `${filteredNodeCount}/${snapshot.nodeCount} nodes` : `${snapshot.nodeCount} nodes`}</span>
                     </div>
                     <div className="tree-tools">
-                      <input
-                        className="tree-search"
-                        type="search"
-                        value={treeQuery}
-                        onChange={(event) => setTreeQuery(event.target.value)}
-                        placeholder="搜索文本、resource-id、class…"
-                        aria-label="搜索 UI 节点"
-                      />
-                      <div className="tree-filter-row">
-                        <label><input type="checkbox" checked={interactiveOnly} onChange={(event) => setInteractiveOnly(event.target.checked)} /> 可操作</label>
-                        <label><input type="checkbox" checked={identifiedOnly} onChange={(event) => setIdentifiedOnly(event.target.checked)} /> 有标识</label>
-                        {hasTreeFilter && <button className="tree-clear" type="button" onClick={clearTreeFilter}>清除筛选</button>}
+                      <div className="tree-search-row">
+                        <input
+                          className="tree-search"
+                          type="search"
+                          value={treeQuery}
+                          onChange={(event) => setTreeQuery(event.target.value)}
+                          placeholder="搜索文本、resource-id、class…"
+                          aria-label="搜索 UI 节点"
+                        />
+                        {hasTreeFilter && <button className="tree-clear tree-clear-inline" type="button" onClick={clearTreeFilter}>清除筛选</button>}
+                        <details className="tree-filter-details">
+                          <summary>筛选</summary>
+                          <div className="tree-filter-row">
+                            <label><input type="checkbox" checked={interactiveOnly} onChange={(event) => setInteractiveOnly(event.target.checked)} /> 可操作</label>
+                            <label><input type="checkbox" checked={identifiedOnly} onChange={(event) => setIdentifiedOnly(event.target.checked)} /> 有标识</label>
+                          </div>
+                        </details>
                       </div>
                     </div>
                     <UiTree
@@ -883,6 +892,87 @@ function App() {
                       <span>设备画面</span>
                       <span className="tree-hint">{selectedSerial}</span>
                     </div>
+                    <details className="snapshot-drawer">
+                      <summary>
+                        <span>快照与历史</span>
+                        <span className="snapshot-drawer-summary">
+                          {savedSnapshots.length} 份
+                          {latestDiff ? ` · ${diffSummary(latestDiff)}` : " · 保存当前页面"}
+                        </span>
+                      </summary>
+                      <div className="snapshot-drawer-body">
+                        <div className="snapshot-toolbar">
+                          <div className="snapshot-toolbar-info">
+                            <span>本地快照：{savedSnapshots.length} 份</span>
+                            {snapshotsLoading && <span className="tree-hint">正在读取本地记录…</span>}
+                            {latestDiff ? (
+                              <>
+                                <span className="snapshot-diff">较上一份：{diffSummary(latestDiff)}</span>
+                                <button className="diff-toggle" type="button" onClick={() => setDiffExpanded((value) => !value)}>
+                                  {diffExpanded ? "收起明细" : "查看明细"}
+                                </button>
+                              </>
+                            ) : !snapshotsLoading && <span className="tree-hint">保存后可比较下一次刷新</span>}
+                            {snapshotStatus && <span className="snapshot-status">{snapshotStatus}</span>}
+                            {diffExportStatus && <span className="snapshot-export-status">{diffExportStatus}</span>}
+                            {snapshotStoreError && <span className="snapshot-store-error">{snapshotStoreError}</span>}
+                          </div>
+                          <div className="snapshot-actions">
+                            <button className="close-button" type="button" onClick={() => void saveCurrentSnapshot()} disabled={snapshotsLoading}>保存快照</button>
+                            <button className="close-button" type="button" onClick={() => void clearSavedSnapshots()} disabled={snapshotsLoading || (savedSnapshots.length === 0 && !snapshotStoreError)}>清空记录</button>
+                          </div>
+                        </div>
+                        {savedSnapshots.length > 0 && (
+                          <div className="snapshot-history">
+                            <div className="snapshot-history-heading">
+                              <span>最近保存</span>
+                              <span>最多保留 30 份</span>
+                            </div>
+                            <div className="snapshot-history-list">
+                              {savedSnapshots.slice(-6).reverse().map((entry) => (
+                                <button className="snapshot-history-item" type="button" key={entry.id} onClick={() => viewSavedSnapshot(entry)}>
+                                  <code>{formatSnapshotTime(entry.capturedAt)}</code>
+                                  <span>{entry.snapshot.nodeCount} nodes</span>
+                                  <span className="tree-hint">{entry.snapshot.serial}</span>
+                                  {entry.diff && <span className="snapshot-diff">{diffSummary(entry.diff)}</span>}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {latestDiff && diffExpanded && (
+                          <div className="snapshot-diff-details">
+                            <div className="snapshot-history-heading">
+                              <span>节点变化明细</span>
+                              <div className="diff-heading-actions">
+                                <span>最多展示 200 项</span>
+                                <button className="diff-toggle" type="button" onClick={() => void exportLatestDiff()}>导出差异 JSON</button>
+                              </div>
+                            </div>
+                            {latestDiff.changes.length === 0 ? (
+                              <p className="diff-empty">未发现节点变化</p>
+                            ) : (
+                              <div className="diff-list">
+                                {latestDiff.changes.map((change) => (
+                                  <div
+                                    className={`diff-row ${change.kind}`}
+                                    key={`${change.kind}-${change.id}`}
+                                    title={change.details.length > 0
+                                      ? change.details.map((detail) => `${detail.field}: ${detail.previous ?? "∅"} → ${detail.current ?? "∅"}`).join("\n")
+                                      : undefined}
+                                  >
+                                    <span className="diff-kind">{changeKindLabel(change.kind)}</span>
+                                    <code>#{change.id}</code>
+                                    <span className="diff-label">{change.label}</span>
+                                    <span className="diff-fields">{change.fields.length > 0 ? change.fields.join(" · ") : "节点结构"}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </details>
                     {snapshot.screenshotDataUrl ? (
                       <ScreenshotPreview key={treeSession} src={snapshot.screenshotDataUrl} root={snapshot.root}
                         selectedNode={selectedNode} geometry={snapshot.captureGeometry} onSelect={handleScreenshotSelect} />
@@ -897,24 +987,11 @@ function App() {
                           <span className="node-id">#{detailNode.id}</span>
                         </div>
                         {virtualAccessibilityHint(detailNode) && <p className="node-source-note">{virtualAccessibilityHint(detailNode)}</p>}
-                        <dl>
-                          <div><dt>class</dt><dd>{detailNode.className ?? "—"}</dd></div>
-                          <div><dt>index</dt><dd>{detailNode.index ?? "—"}</dd></div>
-                          <div><dt>package</dt><dd>{detailNode.package ?? "—"}</dd></div>
-                          <div><dt>text</dt><dd>{detailNode.text ?? "—"}</dd></div>
-                          <div><dt>content-desc</dt><dd>{detailNode.contentDesc ?? "—"}</dd></div>
-                          <div><dt>resource-id</dt><dd>{detailNode.resourceId ?? "—"}</dd></div>
-                          <div><dt>bounds</dt><dd>{detailNode.bounds?.raw ?? "—"}</dd></div>
-                          <div><dt>flags</dt><dd>{[
-                            detailNode.clickable && "clickable",
-                            detailNode.enabled && "enabled",
-                            detailNode.focusable && "focusable",
-                            detailNode.focused && "focused",
-                            detailNode.scrollable && "scrollable",
-                            detailNode.selected && "selected",
-                            !detailNode.visibleToUser && "hidden",
-                          ].filter(Boolean).join(" · ") || "none"}</dd></div>
-                        </dl>
+                        <NodePropertiesPanel
+                          root={snapshot.root!}
+                          node={detailNode}
+                          screenshotSize={snapshot.captureGeometry?.screenshotSize ?? null}
+                        />
                         {detailAttributes.length > 0 ? (
                           <details className="node-attributes" open>
                             <summary>全部 XML 属性 · {detailAttributes.length}</summary>
@@ -962,7 +1039,32 @@ function App() {
                   </div>
                 </div>
               </>
-            ) : null}
+            ) : (
+              <div className="inspector-grid inspector-empty-grid">
+                <div className="tree-pane empty-tree-pane">
+                  <div className="subpanel-heading">
+                    <span>层级树</span>
+                    <span className="tree-hint">等待 hierarchy</span>
+                  </div>
+                  <div className="workspace-empty-copy">
+                    <span className="workspace-empty-icon" aria-hidden="true">⌁</span>
+                    <h4>{captureSerial ? "准备采集当前页面" : "请选择已授权设备"}</h4>
+                    <p>{captureSerial ? "点击顶部“采集截图”，同时获取 UIAutomator 层级和设备画面。" : "顶部选择已授权的 Android 设备后，再开始采集。"}</p>
+                  </div>
+                </div>
+                <div className="preview-pane empty-preview-pane">
+                  <div className="subpanel-heading">
+                    <span>设备截图</span>
+                    <span className="tree-hint">未采集</span>
+                  </div>
+                  <div className="workspace-empty-copy">
+                    <span className="workspace-empty-icon" aria-hidden="true">◎</span>
+                    <h4>{captureSerial ? "等待截图结果" : "连接设备后开始"}</h4>
+                    <p>{captureSerial ? "截图和树状结构会在这里同步显示。" : "请先连接并授权 Android 设备。"}</p>
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
         )}
       </main>

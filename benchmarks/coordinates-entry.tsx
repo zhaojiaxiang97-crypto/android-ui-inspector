@@ -49,6 +49,16 @@ async function verifyCoordinates() {
   const image = () => host.querySelector<HTMLImageElement>("img")!;
   const stage = () => host.querySelector<HTMLElement>(".screenshot-stage")!;
   const ready = () => until(() => image().complete && image().naturalWidth > 0 && stage().dataset.coordinateStatus !== "loading", "image did not become ready");
+  const zoomReadout = () => host.querySelector<HTMLElement>(".zoom-readout")?.textContent;
+  const setZoom = async (target: 0.25 | 0.5 | 1 | 2 | 4 | 8 | 16) => {
+    host.querySelector<HTMLButtonElement>(".zoom-reset")?.click();
+    await until(() => zoomReadout() === "100%", "zoom reset did not reach 100%");
+    const preset = host.querySelector<HTMLSelectElement>(".zoom-preset-select");
+    assert(preset, "zoom preset select missing");
+    preset.value = String(target);
+    preset.dispatchEvent(new Event("change", { bubbles: true }));
+    await until(() => zoomReadout() === `${target * 100}%`, `zoom did not reach ${target * 100}%`);
+  };
   const click = (fx: number, fy: number) => {
     const r = image().getBoundingClientRect();
     image().dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: r.left + r.width * fx, clientY: r.top + r.height * fy, pointerType: "mouse", isPrimary: true, button: 0 }));
@@ -87,6 +97,22 @@ async function verifyCoordinates() {
         checks.push(`${width}x${height}: panel ${panelWidth}, fit/click/edge/clipping/thin-overlay`);
       }
     }
+
+    // Exercise the actual ScreenshotPreview controls at the extreme manual
+    // zoom values and re-run reverse lookup against the resized layout box.
+    current = fixture({ width: 1080, height: 2400 }); geometry = current.geometry; host.style.width = "680px"; selected = current.root; render(); await ready();
+    for (const target of [0.25, 0.5, 1, 2, 4, 8, 16] as const) {
+      selected = current.root; render(); await tick(); await setZoom(target);
+      const r = image().getBoundingClientRect(), s = stage().getBoundingClientRect();
+      near(r.left, s.left, `zoom ${target}: image/stage left`); near(r.top, s.top, `zoom ${target}: image/stage top`);
+      near(r.width, s.width, `zoom ${target}: image/stage width`); near(r.height, s.height, `zoom ${target}: image/stage height`);
+      near(r.width / 180, target, `zoom ${target}: width scale`, 0.002);
+      click(.1, .2);
+      assert(selected?.id === "0/0", `zoom ${target}: reverse lookup selected ${selected?.id}`);
+      checkOverlay(selected.bounds!);
+    }
+    await setZoom(1);
+    checks.push("ScreenshotPreview zoom 25/50/100/200/400/800/1600%, layout box and reverse lookup");
 
     // Scroll changes client rect origin, not device pixel coordinates.
     window.scrollTo(0, 60); await tick(); click(.1, .2);
