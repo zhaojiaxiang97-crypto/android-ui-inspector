@@ -1,7 +1,7 @@
 import { memo, useCallback, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, KeyboardEvent } from "react";
+import type { CSSProperties, KeyboardEvent, SetStateAction } from "react";
 import { nodeDisplayLabel, nodeShortClass } from "../../shared/tree-utils";
-import { expandAncestors, indexTree, nearestVisibleId, scrollToTreeRow, TREE_ROW_HEIGHT, TREE_VIRTUAL_THRESHOLD, treeWindow, visibleTreeRows } from "../../shared/visible-tree";
+import { collapseTreeBranch, expandAncestors, indexTree, nearestVisibleId, scrollToTreeRow, TREE_ROW_HEIGHT, TREE_VIRTUAL_THRESHOLD, treeWindow, visibleTreeRows } from "../../shared/visible-tree";
 import type { TreeRow } from "../../shared/visible-tree";
 import type { UiNode } from "../../shared/types";
 
@@ -11,12 +11,19 @@ type UiTreeProps = {
   filterActive: boolean;
   filterKey: string;
   selectedId: string | null;
+  expanded: ReadonlySet<string>;
   revealRequest?: number;
+  onExpandedChange: (next: SetStateAction<ReadonlySet<string>>) => void;
   onSelect: (node: UiNode) => void;
   onClearFilter: () => void;
 };
 
 const FILTER_EXPANDED: ReadonlySet<string> = new Set();
+
+function treeNodeKind(node: UiNode, hasChildren: boolean) {
+  if (node.clickable || node.focusable || node.scrollable) return "interactive";
+  return hasChildren ? "container" : "leaf";
+}
 
 type RowProps = {
   row: TreeRow;
@@ -32,6 +39,13 @@ type RowProps = {
 const UiTreeRow = memo(function UiTreeRow({ row, domId, selected, active, expanded, filterActive, onSelect, onToggle }: RowProps) {
   const { node, depth } = row;
   const hasChildren = node.children.length > 0;
+  const shortClass = nodeShortClass(node);
+  const label = nodeDisplayLabel(node);
+  const hasSecondaryLabel = label !== shortClass;
+  const kind = treeNodeKind(node, hasChildren);
+  const muted = !node.visibleToUser || !node.enabled;
+  // ponytail: cap deep indentation so Android trees stay readable in a narrow inspector rail.
+  const indentation = 10 + Math.min(depth, 7) * 14;
   return (
     <div
       id={domId}
@@ -43,34 +57,35 @@ const UiTreeRow = memo(function UiTreeRow({ row, domId, selected, active, expand
       aria-setsize={row.setSize}
       aria-expanded={hasChildren ? expanded : undefined}
       aria-selected={selected}
-      className={`tree-row ${selected ? "selected" : ""} ${active ? "active" : ""}`}
-      style={{ paddingLeft: 14 + Math.min(depth, 12) * 18 }}
+      data-tree-kind={kind}
+      className={`tree-row tree-kind-${kind} ${hasSecondaryLabel ? "has-secondary-label" : ""} ${muted ? "is-muted" : ""} ${selected ? "selected" : ""} ${active ? "active" : ""}`}
+      style={{ paddingLeft: indentation }}
       title={`${nodeDisplayLabel(node)} · #${node.id} · 第 ${depth + 1} 层`}
       onMouseDown={(event) => event.preventDefault()}
       onClick={() => onSelect(node.id)}
     >
       <span
         aria-hidden="true"
-        className={`tree-chevron ${hasChildren ? "has-children" : "leaf"}`}
+        className={`tree-chevron ${hasChildren ? "has-children" : "leaf"} ${expanded ? "expanded" : ""}`}
         title={filterActive && hasChildren ? "筛选期间保持展开" : undefined}
         onClick={(event) => {
           if (!hasChildren) return;
           event.stopPropagation();
           onToggle(node.id);
         }}
-      >{hasChildren ? (expanded ? "⌄" : "›") : "·"}</span>
-      <span className="tree-class">{nodeShortClass(node)}</span>
-      <span className="tree-label">{nodeDisplayLabel(node)}</span>
-      {node.clickable && <span className="tree-flag">tap</span>}
+      >{hasChildren ? (expanded ? "▾" : "▸") : ""}</span>
+      <span className="tree-node-icon" aria-hidden="true" />
+      <span className="tree-class">{shortClass}</span>
+      {hasSecondaryLabel && <span className="tree-label">{label}</span>}
+      {node.clickable && <span className="tree-flag" role="img" aria-label="可点击">tap</span>}
     </div>
   );
 });
 
 // The caller keys this component by inspection/history session, not by filter.
 // Expansion belongs to the whole tree, never to rows that virtualization evicts.
-export const UiTree = memo(function UiTree({ root, filteredRoot, filterActive, filterKey, selectedId, revealRequest = 0, onSelect, onClearFilter }: UiTreeProps) {
+export const UiTree = memo(function UiTree({ root, filteredRoot, filterActive, filterKey, selectedId, expanded, revealRequest = 0, onExpandedChange, onSelect, onClearFilter }: UiTreeProps) {
   const index = useMemo(() => indexTree(root), [root]);
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => expandAncestors(index, new Set([root.id]), selectedId));
   const [activeId, setActiveId] = useState<string | null>(selectedId);
   const [localReveal, setLocalReveal] = useState(0);
   const [scrollTop, setScrollTop] = useState(0);
@@ -89,6 +104,10 @@ export const UiTree = memo(function UiTree({ root, filteredRoot, filterActive, f
   const activePosition = resolvedActive ? positions.get(resolvedActive) : undefined;
   const activeMounted = activePosition !== undefined && activePosition >= start && activePosition < end;
   const rowDomId = (id: string) => `${treeId}-${encodeURIComponent(id)}`;
+  const allExpandedIds = useMemo(
+    () => new Set([...index.values()].filter((row) => row.node.children.length > 0).map((row) => row.node.id)),
+    [index],
+  );
 
   useLayoutEffect(() => {
     const element = viewport.current!;
@@ -103,10 +122,10 @@ export const UiTree = memo(function UiTree({ root, filteredRoot, filterActive, f
   // Ordinary scrolling/collapsing must not reopen a manually closed branch.
   useLayoutEffect(() => {
     const target = selectedId && index.has(selectedId) ? selectedId : root.id;
-    setExpanded((previous) => expandAncestors(index, previous, target));
+    onExpandedChange((previous) => expandAncestors(index, previous, target));
     setActiveId(target);
     pendingReveal.current = target;
-  }, [index, root.id, selectedId, revealRequest, localReveal, filterKey]);
+  }, [index, root.id, selectedId, revealRequest, localReveal, filterKey, onExpandedChange]);
 
   useLayoutEffect(() => {
     const element = viewport.current!;
@@ -145,12 +164,13 @@ export const UiTree = memo(function UiTree({ root, filteredRoot, filterActive, f
     viewport.current?.focus({ preventScroll: true });
     setActiveId(id);
     if (filterActive) return;
-    setExpanded((previous) => {
+    onExpandedChange((previous) => {
+      if (previous.has(id)) return collapseTreeBranch(previous, id);
       const next = new Set(previous);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      next.add(id);
       return next;
     });
-  }, [filterActive]);
+  }, [filterActive, onExpandedChange]);
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.altKey || event.ctrlKey || event.metaKey || activePosition === undefined) return;
@@ -182,8 +202,8 @@ export const UiTree = memo(function UiTree({ root, filteredRoot, filterActive, f
     <div className="ui-tree" style={{ "--tree-row-height": `${TREE_ROW_HEIGHT}px` } as CSSProperties}>
       <div className="tree-toolbar">
         <div className="tree-toolbar-actions">
-          <button className="tree-clear tree-expand-all" type="button" disabled={filterActive || rows.length === 0} onClick={() => setExpanded(new Set([...index.values()].filter((row) => row.node.children.length > 0).map((row) => row.node.id)))}>全部展开</button>
-          <button className="tree-clear tree-collapse-all" type="button" disabled={filterActive || rows.length === 0} onClick={() => setExpanded(new Set())}>全部折叠</button>
+          <button className="tree-clear tree-expand-all" type="button" disabled={filterActive || rows.length === 0} onClick={() => onExpandedChange(allExpandedIds)}>全部展开</button>
+          <button className="tree-clear tree-collapse-all" type="button" disabled={filterActive || rows.length === 0} onClick={() => onExpandedChange(new Set())}>全部折叠</button>
           <button className="tree-clear tree-locate" type="button" disabled={!selectedId || !index.has(selectedId)} onClick={() => { onClearFilter(); setLocalReveal((value) => value + 1); }}>定位选中</button>
         </div>
         <span className="tree-hint" title="方向键浏览和展开/折叠，Home/End 跳转首末行">{rows.length} 行{virtual ? " · 按需渲染" : ""}{filterActive ? " · 筛选展开" : ""}</span>

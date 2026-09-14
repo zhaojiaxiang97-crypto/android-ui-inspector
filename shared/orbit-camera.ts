@@ -9,8 +9,10 @@ export type OrbitCamera = {
   panY: number;
 };
 
-export const MIN_ELEVATION = -89;
-export const MAX_ELEVATION = 89;
+// Keep full-screen planes readable instead of letting an oblique view turn
+// them into edge-on blades. Yaw remains unrestricted for the full orbit.
+export const MIN_ELEVATION = -65;
+export const MAX_ELEVATION = 65;
 
 export function wrapDegrees(value: number) {
   if (!Number.isFinite(value)) return 0;

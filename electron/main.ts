@@ -12,10 +12,6 @@ const visualFixtureMode = process.argv.includes("--visual-fixture");
 let mainWindow: BrowserWindow | null = null;
 let quitting = false;
 
-// Software rendering is sufficient for this inspector. Runtime file ACLs are
-// prepared by the development and packaging hooks; do not bypass the sandbox.
-app.disableHardwareAcceleration();
-
 function requestedWindowSize() {
   const value = process.argv.find((argument) => argument.startsWith("--window-size="))?.slice("--window-size=".length);
   const match = value?.match(/^(\d+)x(\d+)$/i);

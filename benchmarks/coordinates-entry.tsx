@@ -45,7 +45,7 @@ async function verifyCoordinates() {
   let current = fixture({ width: 1080, height: 2400 });
   let geometry: CaptureGeometry | undefined = current.geometry;
   const selectedId = () => selected?.id;
-  const render = () => flushSync(() => reactRoot.render(<ScreenshotPreview src={current.src} root={current.root} selectedNode={selected} geometry={geometry} onSelect={value => { selected = value; calls++; render(); }} />));
+  const render = () => flushSync(() => reactRoot.render(<ScreenshotPreview src={current.src} root={current.root} selectedNode={selected} expandedNodeIds={new Set([current.root.id])} geometry={geometry} onSelect={value => { selected = value; calls++; render(); }} />));
   const image = () => host.querySelector<HTMLImageElement>("img")!;
   const stage = () => host.querySelector<HTMLElement>(".screenshot-stage")!;
   const ready = () => until(() => image().complete && image().naturalWidth > 0 && stage().dataset.coordinateStatus !== "loading", "image did not become ready");

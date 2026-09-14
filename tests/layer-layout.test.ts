@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildLayerLayout, buildLayerRecords } from "../shared/layer-layout";
+import { buildLayerLayout, buildLayerOverview, buildLayerRecords } from "../shared/layer-layout";
 import type { UiBounds, UiNode } from "../shared/types";
 
 const size = { width: 100, height: 100 };
@@ -117,4 +117,53 @@ test("layer cap never drops the selected node and can disable parent or child co
 
   const noParents = buildLayerRecords(root, selected, size, { includeParents: false, includeChildren: false });
   assert.deepEqual(noParents.map((record) => record.id), ["selected"]);
+});
+
+test("overlapping siblings receive separate depth slots for direct 3D picking", () => {
+  const root = node("root", bounds(0, 0, 100, 100));
+  const selected = node("selected", bounds(10, 10, 90, 90));
+  selected.children = [node("child-1", bounds(20, 20, 80, 80)), node("child-2", bounds(20, 20, 80, 80))];
+  root.children = [selected];
+
+  const records = buildLayerRecords(root, selected, size, { layerGap: 20 });
+
+  assert.deepEqual(records.map((record) => record.z), [-20, 0, 20, 40]);
+});
+
+test("large exploded branches keep distinct layers inside the camera range", () => {
+  const root = node("root", bounds(0, 0, 100, 100));
+  const selected = node("selected", bounds(10, 10, 90, 90));
+  selected.children = Array.from({ length: 24 }, (_, index) => node(`child-${index}`, bounds(20, 20, 80, 80)));
+  root.children = [selected];
+
+  const records = buildLayerRecords(root, selected, size, { layerGap: 20 });
+  const zValues = records.map((record) => record.z);
+
+  assert.equal(new Set(zValues).size, zValues.length);
+  assert.ok(Math.max(...zValues) <= 240);
+});
+
+test("overview expands every visible descendant and keeps Z slots stable across selection", () => {
+  const root = node("root", bounds(0, 0, 100, 100));
+  const front = node("front", bounds(15, 15, 85, 85));
+  front.attributes = { "drawing-order": "8" };
+  const middle = node("middle", bounds(10, 10, 90, 90));
+  middle.attributes = { "drawing-order": "4" };
+  const nested = node("nested", bounds(20, 20, 80, 80), "android.widget.Button");
+  middle.children = [nested];
+  const behind = node("behind", bounds(5, 5, 95, 95));
+  behind.attributes = { "drawing-order": "1" };
+  root.children = [front, middle, behind];
+
+  const overview = buildLayerOverview(root, nested, size, { layerGap: 64 });
+  const reselected = buildLayerOverview(root, front, size, { layerGap: 64 });
+  const collapsed = buildLayerOverview(root, nested, size, { layerGap: 64, expandedIds: new Set(["root"]) });
+
+  assert.equal(overview.parent?.id, "root");
+  assert.deepEqual(overview.records.map((record) => record.id), ["behind", "middle", "nested", "front"]);
+  assert.deepEqual(overview.records.map((record) => record.z), [-192, -128, -64, 0]);
+  assert.deepEqual(reselected.records.map((record) => record.z), overview.records.map((record) => record.z));
+  assert.deepEqual(collapsed.records.map((record) => record.id), ["behind", "middle", "front"]);
+  assert.equal(overview.records.find((record) => record.isSelected)?.id, "nested");
+  assert.ok((overview.parent?.z ?? 0) < Math.min(...overview.records.map((record) => record.z)));
 });

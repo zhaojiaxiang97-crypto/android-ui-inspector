@@ -47,7 +47,7 @@ async function runTreeRenderCase(input: RenderCase) {
   let selected = targets[0];
   const draw = () => {
     flushSync(() => reactRoot.render(input.variant === "virtual"
-      ? <UiTree root={node} filteredRoot={node} selectedId={selected.id} filterActive filterKey="all" onSelect={onSelect} onClearFilter={onSelect} />
+      ? <UiTree root={node} filteredRoot={node} selectedId={selected.id} expanded={new Set()} filterActive filterKey="all" onExpandedChange={() => {}} onSelect={onSelect} onClearFilter={onSelect} />
       : <Tree node={node} depth={0} selectedId={selected.id} forceExpand onSelect={onSelect} />));
     // Force style/layout inside the measured interval. Paint is not included.
     void host.offsetHeight;

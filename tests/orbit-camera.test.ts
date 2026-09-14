@@ -22,8 +22,8 @@ describe("orbit camera math", () => {
   });
 
   test("clamps pitch before the camera reaches a pole", () => {
-    assert.equal(clampElevation(-120), -89);
-    assert.equal(clampElevation(120), 89);
+    assert.equal(clampElevation(-120), -65);
+    assert.equal(clampElevation(120), 65);
     assert.equal(clampElevation(22), 22);
   });
 
@@ -36,9 +36,9 @@ describe("orbit camera math", () => {
 
   test("keyboard orbit wraps horizontally and clamps vertically", () => {
     const left = orbitFromKeys({ ...camera, azimuth: -179 }, "ArrowLeft", 6);
-    const up = orbitFromKeys({ ...camera, elevation: -87 }, "ArrowUp", 6);
+    const up = orbitFromKeys({ ...camera, elevation: -63 }, "ArrowUp", 6);
     assert.equal(left.azimuth, 175);
-    assert.equal(up.elevation, -89);
+    assert.equal(up.elevation, -65);
   });
 
   test("camera transform applies inverse orbit rotation", () => {

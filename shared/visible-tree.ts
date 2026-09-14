@@ -47,6 +47,17 @@ export function expandAncestors(index: TreeIndex, expanded: ReadonlySet<string>,
   return result ?? expanded;
 }
 
+export function collapseTreeBranch(expanded: ReadonlySet<string>, id: string): ReadonlySet<string> {
+  const prefix = `${id}/`;
+  let result: Set<string> | null = null;
+  for (const expandedId of expanded) {
+    if (expandedId !== id && !expandedId.startsWith(prefix)) continue;
+    result ??= new Set(expanded);
+    result.delete(expandedId);
+  }
+  return result ?? expanded;
+}
+
 export function nearestVisibleId(id: string | null, index: TreeIndex, visible: ReadonlyMap<string, number>): string | null {
   let candidate = id;
   while (candidate) {

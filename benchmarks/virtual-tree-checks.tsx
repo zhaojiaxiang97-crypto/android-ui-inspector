@@ -4,6 +4,7 @@ import { UiTree } from "../src/components/UiTree";
 import { filterTree } from "../shared/tree-utils";
 import { indexTree, TREE_ROW_HEIGHT, visibleTreeRows } from "../shared/visible-tree";
 import type { UiNode } from "../shared/types";
+import type { SetStateAction } from "react";
 import { createTree } from "./fixtures";
 
 function check(value: unknown, message: string): asserts value {
@@ -18,6 +19,7 @@ export async function verifyVirtualTreeBehavior() {
   let root = createTree(21);
   let selectedId: string | null = root.id;
   let selectedNode: UiNode | null = null;
+  let expanded: ReadonlySet<string> = new Set([root.id]);
   let selectionCalls = 0;
   let query = "";
   let session = 0;
@@ -25,9 +27,15 @@ export async function verifyVirtualTreeBehavior() {
   const checks: string[] = [];
   const onSelect = (node: UiNode) => { selectedNode = node; selectedId = node.id; selectionCalls += 1; draw(); };
   const clearFilter = () => { query = ""; draw(); };
+  const updateExpanded = (next: SetStateAction<ReadonlySet<string>>) => {
+    const value = typeof next === "function" ? next(expanded) : next;
+    if (value === expanded) return;
+    expanded = value;
+    draw();
+  };
   const draw = () => {
     const filtered = filterTree(root, { query, interactiveOnly: false, identifiedOnly: false });
-    flushSync(() => reactRoot.render(<UiTree key={session} root={root} filteredRoot={filtered} filterActive={Boolean(query)} filterKey={query} selectedId={selectedId} revealRequest={reveal} onSelect={onSelect} onClearFilter={clearFilter} />));
+    flushSync(() => reactRoot.render(<UiTree key={session} root={root} filteredRoot={filtered} expanded={expanded} filterActive={Boolean(query)} filterKey={query} selectedId={selectedId} revealRequest={reveal} onExpandedChange={updateExpanded} onSelect={onSelect} onClearFilter={clearFilter} />));
     void host.offsetHeight;
   };
   const row = (id: string) => [...host.querySelectorAll<HTMLElement>(".tree-row")].find((element) => element.dataset.treeId === id);
@@ -89,7 +97,7 @@ export async function verifyVirtualTreeBehavior() {
     query = ""; draw();
     checks.push("filtered tree returns original nodes and retains manual expansion");
 
-    root = createTree(25_000); selectedId = root.id; session += 1; draw();
+    root = createTree(25_000); selectedId = root.id; expanded = new Set([root.id]); session += 1; draw();
     click(".tree-expand-all");
     check(viewport().dataset.rowCount === "25000" && viewport().dataset.virtual === "true", "expand-all did not enable virtualization");
     bounded();
@@ -116,7 +124,7 @@ export async function verifyVirtualTreeBehavior() {
     }
     checks.push("external deep selection opens ancestors and scrolls into view");
 
-    root = createTree(10_000, "wide"); selectedId = "0/9998"; session += 1; draw();
+    root = createTree(10_000, "wide"); selectedId = "0/9998"; expanded = new Set([root.id]); session += 1; draw();
     visibleSelection("0/9998"); bounded();
     await scroll(0);
     check(!row("0/9998") && !viewport().hasAttribute("aria-activedescendant"), `offscreen active descendant was left dangling: ${JSON.stringify({ top: viewport().scrollTop, count: count(), mounted: Boolean(row("0/9998")), active: viewport().getAttribute("aria-activedescendant") })}`);
@@ -146,13 +154,13 @@ export async function verifyVirtualTreeBehavior() {
     reveal += 1; draw(); visibleSelection("0/9998"); bounded();
     checks.push("resized viewport keeps fixed row height and bounded DOM");
 
-    root = createTree(21); root.text = "Replacement snapshot"; selectedId = root.id; session += 1; draw();
+    root = createTree(21); root.text = "Replacement snapshot"; selectedId = root.id; expanded = new Set([root.id]); session += 1; draw();
     check(count() === 5 && row("0")?.textContent?.includes("Replacement snapshot"), "snapshot session retained old tree state");
     selectedId = "missing"; draw();
     check(host.querySelectorAll('[aria-selected="true"]').length === 0 && host.querySelector<HTMLButtonElement>(".tree-locate")!.disabled, "removed ID did not degrade safely");
     checks.push("new snapshot resets state and missing selected IDs are safe");
     for (const size of [499, 500]) {
-      root = createTree(size, "wide"); selectedId = root.id; session += 1; draw();
+      root = createTree(size, "wide"); selectedId = root.id; expanded = new Set([root.id]); session += 1; draw();
       check(viewport().dataset.virtual === String(size >= 500), "virtual threshold boundary is wrong");
       if (size < 500) check(count() === size, "small list unexpectedly dropped rows");
       else bounded();

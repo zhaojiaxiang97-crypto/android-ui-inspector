@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import "./App.css";
 import type { AdbProbeResult, ExportFormat, StoredSnapshot, UiNode, UiSnapshot } from "../shared/types";
 import { filterTree, flattenNodes, nodeDisplayLabel } from "../shared/tree-utils";
@@ -149,6 +149,23 @@ type SavedSnapshot = StoredSnapshot & {
   diff: SnapshotDiff | null;
 };
 
+type DetailsResizeDrag = {
+  pointerId: number;
+  startY: number;
+  startHeight: number;
+  height: number;
+  minimum: number;
+  maximum: number;
+};
+
+const MIN_DETAILS_HEIGHT = 0;
+const MIN_SCREENSHOT_HEIGHT = 260;
+const DETAILS_COLLAPSE_SNAP_HEIGHT = 32;
+
+function clamp(value: number, minimum: number, maximum: number) {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
 function diffValue(value: string | boolean | null) {
   return value === null ? null : String(value);
 }
@@ -247,6 +264,10 @@ function formatSnapshotTime(value: string) {
   });
 }
 
+function expandedTreeNodeIds(root: UiNode) {
+  return new Set([...flattenNodes(root).values()].filter((node) => node.children.length > 0).map((node) => node.id));
+}
+
 function changeKindLabel(kind: SnapshotChange["kind"]) {
   if (kind === "added") return "新增";
   if (kind === "removed") return "删除";
@@ -269,7 +290,12 @@ function App() {
   const [interactiveOnly, setInteractiveOnly] = useState(false);
   const [identifiedOnly, setIdentifiedOnly] = useState(false);
   const [treeSession, setTreeSession] = useState(0);
+  const [treeExpandedIds, setTreeExpandedIds] = useState<ReadonlySet<string>>(new Set());
   const [treeRevealRequest, setTreeRevealRequest] = useState(0);
+  const [detailsHeight, setDetailsHeight] = useState<number | null>(null);
+  const [detailsResizing, setDetailsResizing] = useState(false);
+  const detailsResizeRef = useRef<DetailsResizeDrag | null>(null);
+  const [sceneToolbarHost, setSceneToolbarHost] = useState<HTMLDivElement | null>(null);
   const [savedSnapshots, setSavedSnapshots] = useState<SavedSnapshot[]>([]);
   const [snapshotsLoading, setSnapshotsLoading] = useState(true);
   const [snapshotStoreError, setSnapshotStoreError] = useState<string | null>(null);
@@ -303,6 +329,7 @@ function App() {
     setSelectedSerial(serial);
     setSnapshot(null);
     setSelectedNode(null);
+    setTreeExpandedIds(new Set());
     setInspectionError(null);
     setCopyStatus(null);
     setExportStatus(null);
@@ -318,6 +345,7 @@ function App() {
       const result = await window.electronApi.inspectDevice(serial);
       setSnapshot(result);
       setSelectedNode(result.root);
+      setTreeExpandedIds(result.root ? expandedTreeNodeIds(result.root) : new Set());
       if (result.error) {
         setInspectionError(result.error);
       }
@@ -334,6 +362,7 @@ function App() {
     setSelectedSerial(null);
     setSnapshot(null);
     setSelectedNode(null);
+    setTreeExpandedIds(new Set());
     setInspectionError(null);
     setCopyStatus(null);
     setExportStatus(null);
@@ -349,6 +378,56 @@ function App() {
     setIdentifiedOnly(false);
     setTreeRevealRequest((value) => value + 1);
   }, []);
+
+  const detailsResizeBounds = useCallback((handle: HTMLElement) => {
+    const preview = handle.closest<HTMLElement>(".preview-pane");
+    const details = preview?.querySelector<HTMLElement>(".node-details");
+    const frame = preview?.querySelector<HTMLElement>(".screenshot-frame");
+    if (!preview || !details || !frame) return { minimum: MIN_DETAILS_HEIGHT, maximum: MIN_DETAILS_HEIGHT };
+    const staticHeight = Math.max(0, preview.clientHeight - details.offsetHeight - frame.offsetHeight);
+    return {
+      minimum: MIN_DETAILS_HEIGHT,
+      maximum: Math.max(MIN_DETAILS_HEIGHT, preview.clientHeight - staticHeight - MIN_SCREENSHOT_HEIGHT),
+    };
+  }, []);
+
+  const beginDetailsResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    const details = event.currentTarget.closest<HTMLElement>(".preview-pane")?.querySelector<HTMLElement>(".node-details");
+    if (!details) return;
+    const { minimum, maximum } = detailsResizeBounds(event.currentTarget);
+    detailsResizeRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: details.offsetHeight, height: details.offsetHeight, minimum, maximum };
+    setDetailsResizing(true);
+    event.preventDefault();
+  }, [detailsResizeBounds]);
+
+  const moveDetailsResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = detailsResizeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const nextHeight = Math.round(clamp(drag.startHeight + drag.startY - event.clientY, drag.minimum, drag.maximum));
+    drag.height = nextHeight <= DETAILS_COLLAPSE_SNAP_HEIGHT ? 0 : nextHeight;
+    event.currentTarget.closest<HTMLElement>(".preview-pane")?.style.setProperty("--node-details-height", `${drag.height}px`);
+  }, []);
+
+  const endDetailsResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = detailsResizeRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    detailsResizeRef.current = null;
+    setDetailsHeight(drag.height);
+    setDetailsResizing(false);
+  }, []);
+
+  const resizeDetailsByKeyboard = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const adjustment = event.key === "ArrowUp" ? 24 : event.key === "ArrowDown" ? -24 : 0;
+    if (!adjustment && event.key !== "Home" && event.key !== "End") return;
+    const details = event.currentTarget.closest<HTMLElement>(".preview-pane")?.querySelector<HTMLElement>(".node-details");
+    if (!details) return;
+    const { minimum, maximum } = detailsResizeBounds(event.currentTarget);
+    const current = detailsHeight ?? details.offsetHeight;
+    const next = event.key === "Home" ? minimum : event.key === "End" ? maximum : clamp(current + adjustment, minimum, maximum);
+    setDetailsHeight(Math.round(next));
+    event.preventDefault();
+  }, [detailsHeight, detailsResizeBounds]);
 
   useEffect(() => {
     void refreshDevices();
@@ -559,6 +638,7 @@ function App() {
     setSelectedSerial(entry.snapshot.serial);
     setSnapshot(entry.snapshot);
     setSelectedNode(entry.snapshot.root);
+    setTreeExpandedIds(entry.snapshot.root ? expandedTreeNodeIds(entry.snapshot.root) : new Set());
     setInspectionError(entry.snapshot.error);
     setCopyStatus(null);
     setExportStatus(null);
@@ -575,6 +655,7 @@ function App() {
     setSelectedSerial(serial || null);
     setSnapshot(null);
     setSelectedNode(null);
+    setTreeExpandedIds(new Set());
     setInspectionError(null);
     setCopyStatus(null);
     setExportStatus(null);
@@ -600,6 +681,7 @@ function App() {
   const captureSelected = useCallback(() => {
     if (captureSerial) void inspectDevice(captureSerial);
   }, [captureSerial, inspectDevice]);
+  const previewStyle = detailsHeight === null ? undefined : { "--node-details-height": `${detailsHeight}px` } as CSSProperties;
 
   return (
     <div className={`app-shell ${selectedSerial ? "inspection-active" : ""}`}>
@@ -685,6 +767,7 @@ function App() {
             <kbd>⌘ K</kbd>
           </label>
         </div>
+        <div className="scene-toolbar-host" ref={setSceneToolbarHost} />
       </header>
 
       <main className="workspace">
@@ -879,15 +962,17 @@ function App() {
                       root={snapshot.root}
                       filteredRoot={filteredRoot}
                       selectedId={selectedNode?.id ?? snapshot.root.id}
+                      expanded={treeExpandedIds}
                       filterActive={hasTreeFilter}
                       filterKey={JSON.stringify([treeQuery, interactiveOnly, identifiedOnly])}
                       revealRequest={treeRevealRequest}
+                      onExpandedChange={setTreeExpandedIds}
                       onSelect={setSelectedNode}
                       onClearFilter={clearTreeFilter}
                     />
                   </div>
 
-                  <div className="preview-pane">
+                  <div className={`preview-pane ${detailsHeight === 0 ? "details-collapsed" : ""}`} style={previewStyle} onPointerMove={moveDetailsResize} onPointerUp={endDetailsResize} onPointerCancel={endDetailsResize}>
                     <div className="subpanel-heading">
                       <span>设备画面</span>
                       <span className="tree-hint">{selectedSerial}</span>
@@ -975,9 +1060,19 @@ function App() {
                     </details>
                     {snapshot.screenshotDataUrl ? (
                       <ScreenshotPreview key={treeSession} src={snapshot.screenshotDataUrl} root={snapshot.root}
-                        selectedNode={selectedNode} geometry={snapshot.captureGeometry} onSelect={handleScreenshotSelect} />
+                        selectedNode={selectedNode} expandedNodeIds={treeExpandedIds} geometry={snapshot.captureGeometry} toolbarHost={sceneToolbarHost} onSelect={handleScreenshotSelect} />
                     ) : <div className="screenshot-frame"><div className="no-screenshot">截图不可用</div></div>}
                     {detailNode && (
+                      <>
+                      <div
+                        className={`node-details-resizer ${detailsResizing ? "is-dragging" : ""}`}
+                        role="separator"
+                        tabIndex={0}
+                        aria-label="调整属性栏高度；向下拖到底可隐藏，可上下拖拽或使用方向键"
+                        aria-orientation="horizontal"
+                        onPointerDown={beginDetailsResize}
+                        onKeyDown={resizeDetailsByKeyboard}
+                      />
                       <div className="node-details">
                         <div className="node-detail-heading">
                           <div>
@@ -1035,6 +1130,7 @@ function App() {
                           </div>
                         )}
                       </div>
+                      </>
                     )}
                   </div>
                 </div>

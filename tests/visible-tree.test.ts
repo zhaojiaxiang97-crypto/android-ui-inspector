@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createTree, makeNode } from "../benchmarks/fixtures";
-import { expandAncestors, indexTree, nearestVisibleId, scrollToTreeRow, TREE_ROW_HEIGHT, treeWindow, visibleTreeRows } from "../shared/visible-tree";
+import { collapseTreeBranch, expandAncestors, indexTree, nearestVisibleId, scrollToTreeRow, TREE_ROW_HEIGHT, treeWindow, visibleTreeRows } from "../shared/visible-tree";
 import { filterTree } from "../shared/tree-utils";
 
 test("visible rows preserve preorder, levels and sibling metadata", () => {
@@ -25,6 +25,13 @@ test("revealing ancestors is immutable, exact and idempotent", () => {
   assert.equal(expandAncestors(index, expanded, "0/10/0"), expanded);
   assert.equal(expandAncestors(index, original, "missing"), original);
   assert.equal(expandAncestors(index, original, null), original);
+});
+
+test("collapsing a branch also clears every nested expansion", () => {
+  const expanded = new Set(["0", "0/1", "0/1/0", "0/10"]);
+  const collapsed = collapseTreeBranch(expanded, "0/1");
+  assert.deepEqual([...collapsed].sort(), ["0", "0/10"]);
+  assert.equal(collapseTreeBranch(collapsed, "0/1"), collapsed);
 });
 
 test("focus falls back to a visible ancestor without positional-prefix confusion", () => {

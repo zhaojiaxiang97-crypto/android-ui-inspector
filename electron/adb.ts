@@ -91,6 +91,12 @@ function findAdbPath() {
     addCandidate(candidates, sdkRoot ? join(sdkRoot, "platform-tools", adbName) : undefined);
   }
 
+  if (process.platform === "darwin") {
+    addCandidate(candidates, join(homedir(), "Library", "Android", "sdk", "platform-tools", adbName));
+    addCandidate(candidates, join("/opt/homebrew", "bin", adbName));
+    addCandidate(candidates, join("/usr/local", "bin", adbName));
+  }
+
   const localAppData = process.env.LOCALAPPDATA;
   if (localAppData) {
     addCandidate(candidates, join(localAppData, "Android", "Sdk", "platform-tools", adbName));

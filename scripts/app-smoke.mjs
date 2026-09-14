@@ -236,45 +236,108 @@ try {
       await until(() => evaluate(`document.querySelector('.node-id').textContent !== ${JSON.stringify(initialId)}`), "tree selection");
     }
     assert.equal(await evaluate("document.querySelectorAll('.tree-row.selected').length"), 1);
+    const treeVisualState = await evaluate(`(() => {
+      const rows = Array.from(document.querySelectorAll('.tree-row'));
+      const selected = document.querySelector('.tree-row.selected');
+      return {
+        rowCount: rows.length,
+        iconCount: rows.filter((row) => row.querySelector('.tree-node-icon')).length,
+        duplicateLabelCount: rows.filter((row) => {
+          const className = row.querySelector('.tree-class')?.textContent?.trim();
+          const label = row.querySelector('.tree-label')?.textContent?.trim();
+          return Boolean(label && label === className);
+        }).length,
+        selectedAccent: getComputedStyle(selected, '::before').backgroundColor,
+      };
+    })()`);
+    assert.equal(treeVisualState.iconCount, treeVisualState.rowCount, "Tree rows are missing hierarchy icons");
+    assert.equal(treeVisualState.duplicateLabelCount, 0, "Tree repeats class names as secondary labels");
+    assert.notEqual(treeVisualState.selectedAccent, "rgba(0, 0, 0, 0)", "Tree selection has no leading marker");
     recordCheck("real-device hierarchy and tree selection");
     if (rowCount > 1) {
       await until(() => evaluate("Boolean(document.querySelector('.layer-scene'))"), "3D hierarchy expansion");
-      const layerState = await evaluate(`(() => ({
+      await until(() => evaluate("document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderer === 'webgl'"), "WebGL scene renderer");
+      const layerState = await evaluate(`(() => {
+        const canvas = document.querySelector('.layer-webgl-canvas');
+        const selectedPlane = document.querySelector('.layer-plane.selected');
+        const selectedLayer = selectedPlane;
+        return {
         mode: document.querySelector('.layer-scene')?.dataset.viewMode,
+        renderer: canvas?.dataset.layerRenderer,
+        rendererError: canvas?.dataset.layerWebglError || null,
+        canvasPixels: canvas?.dataset.layerCanvasPixels || null,
         count: Number(document.querySelector('.layer-scene')?.dataset.layerCount || 0),
+        textureCount: Number(document.querySelector('.layer-scene')?.dataset.layerTextureCount || 0),
+        outlineCount: Number(document.querySelector('.layer-scene')?.dataset.layerOutlineCount || 0),
+        selectionCount: Number(document.querySelector('.layer-scene')?.dataset.layerSelectionCount || 0),
+        texturedUnselectedCount: document.querySelectorAll('.layer-plane.surface:not(.selected)').length,
         selectedTreeId: document.querySelector('.tree-row.selected')?.dataset.treeId,
-        selectedLayerId: document.querySelector('.layer-plane.selected')?.dataset.layerNodeId,
+        selectedLayerId: selectedLayer?.dataset.layerNodeId,
+        selectedLayerRole: selectedLayer?.dataset.layerRole,
+        selectedLayerTexture: selectedLayer?.dataset.layerTexture,
+        selectedLayerFocus: selectedLayer?.dataset.layerFocus,
+        selectedLayerHitTestable: selectedLayer?.dataset.layerHitTestable,
+        selectedPlaneCount: document.querySelectorAll('.layer-plane.selected').length,
+        hasMovingBasePlane: Boolean(document.querySelector('.layer-scene-base-plane[data-layer-base="true"]')),
+        fullScreenSurfaceCount: (() => {
+          const stage = document.querySelector('.screenshot-stage');
+          if (!stage) return 0;
+          const stageStyle = getComputedStyle(stage);
+          const stageWidth = Number.parseFloat(stageStyle.width);
+          const stageHeight = Number.parseFloat(stageStyle.height);
+          return Array.from(document.querySelectorAll('.layer-plane[data-layer-role="surface"]')).filter((plane) => {
+            const style = getComputedStyle(plane);
+            const widthRatio = Number.parseFloat(style.width) / stageWidth;
+            const heightRatio = Number.parseFloat(style.height) / stageHeight;
+            return (widthRatio >= 0.9 && heightRatio >= 0.75) || (widthRatio >= 0.75 && heightRatio >= 0.9);
+          }).length;
+        })(),
         hasZoomToolbar: Boolean(document.querySelector('.zoom-controls')),
         zoomPresetCount: document.querySelectorAll('.zoom-preset-select option').length,
-        hasBreadcrumb: Boolean(document.querySelector('.layer-breadcrumb')),
+        stageOutline: getComputedStyle(document.querySelector('.screenshot-stage')).outlineStyle,
+        stageBoxShadow: getComputedStyle(document.querySelector('.screenshot-stage')).boxShadow,
+        stageBackground: getComputedStyle(document.querySelector('.screenshot-stage')).backgroundColor,
         hasLayerOptions: Boolean(document.querySelector('.layer-options')),
         hasNodeProperties: Boolean(document.querySelector('.node-properties-panel')),
         hasBoxModel: Boolean(document.querySelector('.box-model-card')),
         orbitReadout: document.querySelector('.orbit-readout')?.textContent?.trim() || '',
-        breadcrumbText: document.querySelector('.layer-breadcrumb')?.textContent?.trim() || '',
-        breadcrumbRect: (() => { const rect = document.querySelector('.layer-breadcrumb')?.getBoundingClientRect(); return rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null; })(),
-        animationName: (() => { const plane = document.querySelector('.layer-plane'); return plane ? getComputedStyle(plane).animationName : null; })(),
-        animationDuration: (() => { const plane = document.querySelector('.layer-plane'); return plane ? getComputedStyle(plane).animationDuration : null; })(),
-      }))()`);
+        pivotZ: Number(document.querySelector('.layer-scene')?.dataset.layerPivotZ || 0),
+        animationName: (() => { const canvas = document.querySelector('.layer-webgl-canvas'); return canvas ? getComputedStyle(canvas).animationName : null; })(),
+        animationDuration: (() => { const canvas = document.querySelector('.layer-webgl-canvas'); return canvas ? getComputedStyle(canvas).animationDuration : null; })(),
+      };
+      })()`);
       assert.equal(layerState.mode, "layers3d");
+      assert.equal(layerState.renderer, "webgl", `3D scene did not initialize WebGL: ${layerState.rendererError || 'unknown error'}`);
+      assert.match(layerState.canvasPixels ?? "", /^\d+x\d+$/, "WebGL canvas has no backing store");
       assert.ok(layerState.count > 0, "3D scene has no visible layer planes");
+      assert.ok(["surface", "outline"].includes(layerState.selectedLayerRole), "3D selected layer lost its visual role");
+      assert.equal(layerState.selectedLayerTexture, layerState.selectedLayerRole === "surface" ? "true" : "false", "3D selected texture role is inconsistent");
+      assert.equal(layerState.selectedLayerFocus, "true", "3D selected layer has no focus marker");
+      assert.equal(layerState.selectedLayerHitTestable, "true", "Selected direct child must remain hoverable and clickable");
+      assert.equal(layerState.selectedPlaneCount, 1, "3D selected layer lost its focus plane");
+      assert.equal(layerState.selectionCount, 1, "3D scene must draw one focus highlight");
+      assert.equal(layerState.hasMovingBasePlane, true, "3D screenshot surface is outside the moving layer scene");
+      assert.equal(layerState.stageOutline, "none", "3D stage still leaves a stationary outline behind the scene");
+      assert.equal(layerState.stageBoxShadow, "none", "3D stage still leaves a stationary shadow behind the scene");
+      assert.equal(layerState.stageBackground, "rgba(0, 0, 0, 0)", "3D stage still leaves a stationary backdrop behind the scene");
+      assert.equal(layerState.fullScreenSurfaceCount, 0, "3D scene still renders a full-screen container as a texture surface");
+      assert.ok(layerState.textureCount >= 0 && layerState.textureCount <= layerState.count, "3D texture surface count is invalid");
+      if (fixture && layerState.textureCount > 0) assert.ok(layerState.texturedUnselectedCount > 0 || layerState.selectedLayerRole === "surface", "Styled direct children lost their screenshot appearance");
       assert.equal(layerState.selectedLayerId, layerState.selectedTreeId, "3D selected plane does not follow tree selection");
       assert.equal(layerState.hasZoomToolbar, true);
       assert.equal(layerState.zoomPresetCount, 7, "Zoom presets do not cover custom plus 50/100/200/400/800/1600");
-      assert.equal(layerState.hasBreadcrumb, true);
       assert.equal(layerState.hasLayerOptions, true);
       assert.equal(layerState.hasNodeProperties, true);
       assert.equal(layerState.hasBoxModel, true);
       assert.match(layerState.orbitReadout, /Yaw/);
-      assert.ok(layerState.breadcrumbText.length > 0, "3D breadcrumb has no hierarchy path");
-      assert.ok(layerState.breadcrumbRect?.width > 0 && layerState.breadcrumbRect?.height > 0, "3D breadcrumb has no visible box");
+      assert.ok(layerState.pivotZ < 0, "3D camera still orbits around the front layer instead of the layer stack center");
       const workspaceLayout = await evaluate(`(() => {
         const box = (selector) => {
           const element = document.querySelector(selector);
           if (!element) return null;
           const rect = element.getBoundingClientRect();
           const style = getComputedStyle(element);
-          return { left: rect.left, top: rect.top, width: rect.width, height: rect.height, background: style.backgroundColor, overflowX: style.overflowX, overflowY: style.overflowY };
+          return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height, background: style.backgroundColor, overflowX: style.overflowX, overflowY: style.overflowY };
         };
         return {
           viewport: { width: window.innerWidth, height: window.innerHeight },
@@ -282,24 +345,44 @@ try {
           hierarchy: box('.tree-pane'),
           preview: box('.preview-pane'),
           toolbar: box('.screenshot-view-toolbar'),
+          toolbarHost: box('.scene-toolbar-host'),
           snapshot: box('.snapshot-drawer'),
           frame: box('.screenshot-frame'),
           details: box('.node-details'),
           properties: box('.node-properties-panel'),
           grid: box('.viewport-grid'),
           gizmo: box('.viewport-gizmo'),
-          layerSettings: box('.layer-settings'),
+          windowStack: box('.window-stack-label'),
           documentOverflowX: document.documentElement.scrollWidth - window.innerWidth,
         };
       })()`);
+      report.workspaceLayout = workspaceLayout;
       assert.ok(workspaceLayout.frame?.height >= 250, "Screenshot viewport is too short for the light workspace layout");
+      assert.ok(workspaceLayout.hierarchy?.width >= 320, "Hierarchy rail is too narrow for class and resource labels");
       assert.ok(workspaceLayout.details?.height >= 200, "Node properties panel is not visible in the initial viewport");
       assert.ok(workspaceLayout.properties?.width > 0 && workspaceLayout.properties?.height > 0, "Node property columns have no visible layout box");
       assert.ok(workspaceLayout.grid?.width > 0 && workspaceLayout.gizmo?.width > 0, "3D viewport decorations are missing");
-      assert.ok(workspaceLayout.layerSettings?.width > 0, "3D low-frequency settings control is missing");
+      assert.ok(workspaceLayout.windowStack?.width > 0, "3D current-window label is missing");
+      assert.ok(workspaceLayout.toolbarHost?.height > 0, "3D view toolbar did not move into the top bar");
+      assert.ok(workspaceLayout.toolbar?.bottom <= workspaceLayout.preview?.top + 1, "3D view toolbar still occupies the preview area");
       if (workspaceLayout.viewport.width >= 1100) assert.ok(workspaceLayout.toolbar?.height <= 56, "Wide inspector toolbar wrapped unexpectedly");
       assert.ok(workspaceLayout.documentOverflowX <= 1, "Inspector layout introduces horizontal document overflow");
-      report.workspaceLayout = workspaceLayout;
+      const pivotLayout = await evaluate(`(() => {
+        const canvas = document.querySelector('.layer-webgl-canvas');
+        const stage = document.querySelector('.screenshot-stage');
+        const scene = document.querySelector('.layer-scene');
+        if (!canvas || !stage || !scene) return null;
+        const canvasRect = canvas.getBoundingClientRect();
+        const stageRect = stage.getBoundingClientRect();
+        return {
+          pivotX: Number(scene.dataset.layerPivotX),
+          pivotY: Number(scene.dataset.layerPivotY),
+          expectedX: stageRect.left - canvasRect.left + stageRect.width / 2,
+          expectedY: stageRect.top - canvasRect.top + stageRect.height / 2,
+        };
+      })()`);
+      assert.ok(pivotLayout, "3D scene pivot metadata is missing");
+      assert.ok(Math.abs(pivotLayout.pivotX - pivotLayout.expectedX) <= 2 && Math.abs(pivotLayout.pivotY - pivotLayout.expectedY) <= 2, "3D camera is not centered on the window hierarchy");
       if (reducedMotion) {
         assert.equal(layerState.animationName, "none", "reduced-motion did not disable layer animation");
         assert.equal(layerState.animationDuration, "0s", "reduced-motion layer animation still has duration");
@@ -308,10 +391,132 @@ try {
       report.layerState = layerState;
       recordCheck("tree selection opens 3D layer scene and highlights selected plane");
       recordCheck("light workspace layout keeps canvas, properties and 3D viewport decorations visible");
+      await delay(250);
+      const resizeDistance = 120;
+      const detailsResize = await evaluate(`(() => {
+        const handle = document.querySelector('.node-details-resizer');
+        const details = document.querySelector('.node-details');
+        if (!handle || !details) return null;
+        const rect = handle.getBoundingClientRect();
+        return {
+          before: details.getBoundingClientRect().height,
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        };
+      })()`);
+      assert.ok(detailsResize, "Property panel resize handle is missing");
+      await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: detailsResize.x, y: detailsResize.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
+      await delay(80);
+      await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: detailsResize.x, y: detailsResize.y - resizeDistance, button: "none", buttons: 1, modifiers: 0 });
+      await delay(80);
+      await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: detailsResize.x, y: detailsResize.y - resizeDistance, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
+      await until(() => evaluate(`document.querySelector('.node-details')?.getBoundingClientRect().height > ${JSON.stringify(detailsResize.before + 10)}`), "property panel resize");
+      report.detailsResize = await evaluate("document.querySelector('.node-details')?.getBoundingClientRect().height || 0");
+      const resizedHandle = await evaluate(`(() => {
+        const rect = document.querySelector('.node-details-resizer')?.getBoundingClientRect();
+        return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
+      })()`);
+      assert.ok(resizedHandle, "Property panel resize handle disappeared after dragging");
+      await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: resizedHandle.x, y: resizedHandle.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
+      await delay(80);
+      await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: resizedHandle.x, y: resizedHandle.y + resizeDistance, button: "none", buttons: 1, modifiers: 0 });
+      await delay(80);
+      await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: resizedHandle.x, y: resizedHandle.y + resizeDistance, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
+      await until(() => evaluate(`document.querySelector('.node-details')?.getBoundingClientRect().height <= ${JSON.stringify(detailsResize.before + 10)}`), "property panel resize reset");
+      const collapseTarget = await evaluate(`(() => {
+        const handle = document.querySelector('.node-details-resizer');
+        const preview = document.querySelector('.preview-pane');
+        if (!handle || !preview) return null;
+        const handleRect = handle.getBoundingClientRect();
+        const previewRect = preview.getBoundingClientRect();
+        return { x: handleRect.left + handleRect.width / 2, y: handleRect.top + handleRect.height / 2, targetY: previewRect.bottom - 2 };
+      })()`);
+      assert.ok(collapseTarget, "Property panel collapse handle is missing");
+      await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: collapseTarget.x, y: collapseTarget.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
+      await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: collapseTarget.x, y: collapseTarget.targetY, button: "none", buttons: 1, modifiers: 0 });
+      await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: collapseTarget.x, y: collapseTarget.targetY, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
+      await until(() => evaluate("document.querySelector('.preview-pane')?.classList.contains('details-collapsed') && document.querySelector('.node-details')?.getBoundingClientRect().height <= 1"), "property panel collapse");
+      const collapsedHandle = await evaluate(`(() => {
+        const rect = document.querySelector('.node-details-resizer')?.getBoundingClientRect();
+        return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
+      })()`);
+      assert.ok(collapsedHandle, "Property panel resize handle disappeared after collapsing");
+      await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: collapsedHandle.x, y: collapsedHandle.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
+      await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: collapsedHandle.x, y: collapsedHandle.y - 120, button: "none", buttons: 1, modifiers: 0 });
+      await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: collapsedHandle.x, y: collapsedHandle.y - 120, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
+      await until(() => evaluate("document.querySelector('.node-details')?.getBoundingClientRect().height > 80"), "property panel expand");
+      await delay(250);
+      recordCheck("dragging the property divider resizes, hides and restores the bottom panel");
+      const hoverPoints = await evaluate(`(() => {
+        const rect = document.querySelector('.layer-webgl-canvas')?.getBoundingClientRect();
+        if (!rect) return [];
+        const canvas = document.querySelector('.layer-webgl-canvas');
+        const probeX = Number(canvas?.dataset.layerProbeX);
+        const probeY = Number(canvas?.dataset.layerProbeY);
+        const probe = Number.isFinite(probeX) && Number.isFinite(probeY) ? [{ x: rect.left + probeX, y: rect.top + probeY }] : [];
+        return [...probe, ...[0.2, 0.5, 0.8].flatMap((x) => [0.2, 0.5, 0.8].map((y) => ({ x: rect.left + rect.width * x, y: rect.top + rect.height * y })))]
+      })()`);
+      let hoverResult = null;
+      for (const point of hoverPoints) {
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "none", buttons: 0 });
+        await delay(80);
+        const hoveredId = await evaluate("document.querySelector('.layer-scene')?.dataset.layerHoveredId || null");
+        if (hoveredId) {
+          hoverResult = { point, hoveredId };
+          break;
+        }
+      }
+      if (fixture) assert.ok(hoverResult, "3D layer hover did not resolve a layer in the overview");
+      if (hoverResult) {
+        const hoverScreenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+        writeFileSync(join(output, "layers3d-hover.png"), Buffer.from(hoverScreenshot.data, "base64"));
+        report.layerHover = { ...hoverResult, screenshot: "layers3d-hover.png" };
+        recordCheck("3D layer hover resolves a blue-highlight target");
+      } else {
+        report.layerHover = "skipped: no overview layer intersects the fixed hover grid";
+      }
+      const branchId = await evaluate(`(() => {
+        const rows = Array.from(document.querySelectorAll('.tree-row'));
+        const rootId = rows[0]?.dataset.treeId;
+        const row = ${fixture ? "rows.find((item) => item.querySelector('.tree-class')?.textContent?.includes('LinearLayout'))" : "rows.find((item) => item.dataset.treeId !== rootId && item.hasAttribute('aria-expanded'))"};
+        row?.click();
+        return row?.dataset.treeId || null;
+      })()`);
+      if (fixture) assert.ok(branchId, "Fixture does not expose a branch node for 3D expansion");
+      if (branchId) {
+        await until(() => evaluate(`document.querySelector('.tree-row.selected')?.dataset.treeId === ${JSON.stringify(branchId)}`), "branch selection");
+        const branchSpread = await evaluate(`(() => ({
+          mode: document.querySelector('.layer-scene')?.dataset.layerMode,
+          parentId: document.querySelector('.layer-scene')?.dataset.layerParentId,
+          rootId: document.querySelector('.tree-row')?.dataset.treeId,
+          gap: Number(document.querySelector('[aria-label="3D 层间距"]')?.value || 0),
+          clickableLayers: document.querySelectorAll('.layer-plane[data-layer-hit-testable="true"]').length,
+          surfaceCount: document.querySelectorAll('.layer-plane[data-layer-role="surface"]').length,
+          textOnlyCount: document.querySelectorAll('.layer-plane[data-layer-content="text"]').length,
+          layers: Array.from(document.querySelectorAll('.layer-plane')).map((plane) => {
+            const rect = plane.getBoundingClientRect();
+            return { role: plane.dataset.layerRole, z: plane.dataset.layerZ, left: Math.round(rect.left), top: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) };
+          }),
+          zOrderSources: Array.from(document.querySelectorAll('.layer-plane')).map((plane) => plane.dataset.layerZOrderSource),
+        }))()`);
+        await delay(600);
+        const branchScreenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+        writeFileSync(join(output, "layers3d-branch.png"), Buffer.from(branchScreenshot.data, "base64"));
+        report.branchSpread = { ...branchSpread, screenshot: "layers3d-branch.png" };
+        if (fixture) {
+          assert.equal(branchSpread.mode, "overview", "3D hierarchy must open as a full overview");
+          assert.equal(branchSpread.parentId, branchSpread.rootId, "Selecting a container must not collapse the full overview");
+          assert.ok(branchSpread.gap >= 64, "Default 3D layer gap is too small");
+          assert.ok(branchSpread.clickableLayers > 0, "Overview layers are not directly clickable");
+          assert.ok(branchSpread.surfaceCount > 0, "Overview has no independently textured controls");
+          assert.ok(branchSpread.zOrderSources.every(Boolean), "Overview does not report its Z-order source");
+        }
+        recordCheck("full overview stays expanded while selecting a container");
+      }
       const alternateLayerId = await evaluate(`(() => {
         const selectedId = document.querySelector('.tree-row.selected')?.dataset.treeId;
         const rootId = document.querySelector('.tree-row')?.dataset.treeId;
-        return Array.from(document.querySelectorAll('.layer-plane:not(.selected)'))
+        return Array.from(document.querySelectorAll('.layer-plane:not(.selected)[data-layer-hit-testable="true"]'))
           .find((plane) => plane.dataset.layerNodeId && plane.dataset.layerNodeId !== selectedId && plane.dataset.layerNodeId !== rootId)
           ?.dataset.layerNodeId || null;
       })()`);
@@ -324,7 +529,8 @@ try {
           return true;
         })()`);
         await until(() => evaluate(`(() => {
-          const selectedPlane = document.querySelector('.layer-plane.selected');
+          const selectedPlane = document.querySelector('.layer-plane.selected')
+            || document.querySelector('.layer-scene-base-plane[data-layer-selected="true"]');
           const selectedTree = document.querySelector('.tree-row.selected');
           return selectedPlane?.dataset.layerNodeId === ${JSON.stringify(alternateLayerId)}
             && selectedTree?.dataset.treeId === ${JSON.stringify(alternateLayerId)};
@@ -342,30 +548,48 @@ try {
         const frame = document.querySelector('.screenshot-frame')?.getBoundingClientRect();
         if (!stage || !frame || stage.width <= 0 || stage.height <= 0) return null;
         return {
-          start: { x: stage.left + stage.width / 2, y: stage.top + stage.height / 2 },
+          start: { x: frame.left + 28, y: frame.top + 28 },
           end: { x: Math.max(frame.left + 2, frame.right - 3), y: Math.max(frame.top + 2, frame.bottom - 3) },
         };
       })()`);
       if (dragPoints) {
-        const transformBeforeDrag = await evaluate("getComputedStyle(document.querySelector('.layer-scene-inner')).transform");
-        await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: dragPoints.start.x, y: dragPoints.start.y, button: "left", buttons: 1, modifiers: 1, clickCount: 1 });
-        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: dragPoints.end.x, y: dragPoints.end.y, button: "none", buttons: 1, modifiers: 1 });
-        await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: dragPoints.end.x, y: dragPoints.end.y, button: "left", buttons: 0, modifiers: 1, clickCount: 1 });
+        const renderBeforeDrag = await evaluate("Number(document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderVersion || 0)");
+        await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: dragPoints.start.x, y: dragPoints.start.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: (dragPoints.start.x + dragPoints.end.x) / 2, y: (dragPoints.start.y + dragPoints.end.y) / 2, button: "none", buttons: 1, modifiers: 0 });
+        await delay(16);
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: dragPoints.end.x, y: dragPoints.end.y, button: "none", buttons: 1, modifiers: 0 });
+        await delay(32);
+        const liveDrag = await evaluate(`(() => {
+          const frame = document.querySelector('.screenshot-frame');
+          const canvas = document.querySelector('.layer-webgl-canvas');
+          return {
+            dragging: frame?.classList.contains('is-3d-dragging'),
+            renderer: canvas?.dataset.layerRenderer,
+            renderVersion: Number(canvas?.dataset.layerRenderVersion || 0),
+          };
+        })()`);
+        assert.equal(liveDrag.dragging, true, "3D drag did not enter its lightweight rendering state");
+        assert.equal(liveDrag.renderer, "webgl", "3D drag left the WebGL renderer");
+        assert.ok(liveDrag.renderVersion > renderBeforeDrag, "3D drag did not redraw the WebGL scene");
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: dragPoints.end.x, y: dragPoints.end.y, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
         await delay(600);
-        const dragState = await evaluate("getComputedStyle(document.querySelector('.layer-scene-inner')).transform");
-        report.drag = { points: dragPoints, transformBefore: transformBeforeDrag, transform: dragState };
-        assert.notEqual(dragState, transformBeforeDrag, "3D edge drag did not rotate");
-        recordCheck("3D Alt-drag rotates through the viewport edge and releases cleanly");
+        const dragState = await evaluate("Number(document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderVersion || 0)");
+        const rotatedScreenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+        writeFileSync(join(output, "layers3d-rotated.png"), Buffer.from(rotatedScreenshot.data, "base64"));
+        report.drag = { points: dragPoints, renderBefore: renderBeforeDrag, renderVersion: dragState, live: liveDrag };
+        assert.ok(dragState > renderBeforeDrag, "3D edge drag did not redraw the WebGL scene");
+        recordCheck("3D drag redraws the WebGL scene without DOM layer transforms");
+        recordCheck("3D left-drag rotates through the viewport edge and releases cleanly");
 
         if (dragOutside) {
-          const outsideBefore = await evaluate("getComputedStyle(document.querySelector('.layer-scene-inner')).transform");
+          const outsideBefore = await evaluate("Number(document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderVersion || 0)");
           const frame = await evaluate("(() => { const rect = document.querySelector('.screenshot-frame')?.getBoundingClientRect(); return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null; })()");
           const outsideX = (await evaluate("innerWidth")) + 180;
           const outsideY = Math.max(1, Math.min((await evaluate("innerHeight")) - 1, frame?.y ?? 1));
-          await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: frame?.x ?? dragPoints.start.x, y: frame?.y ?? dragPoints.start.y, button: "left", buttons: 1, modifiers: 1, clickCount: 1 });
-          await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: (frame?.x ?? dragPoints.start.x) + 80, y: (frame?.y ?? dragPoints.start.y) + 24, button: "none", buttons: 1, modifiers: 1 });
-          await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: outsideX, y: outsideY, button: "none", buttons: 1, modifiers: 1 });
-          await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: outsideX, y: outsideY, button: "left", buttons: 0, modifiers: 1, clickCount: 1 });
+          await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: frame?.x ?? dragPoints.start.x, y: frame?.y ?? dragPoints.start.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
+          await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: (frame?.x ?? dragPoints.start.x) + 80, y: (frame?.y ?? dragPoints.start.y) + 24, button: "none", buttons: 1, modifiers: 0 });
+          await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: outsideX, y: outsideY, button: "none", buttons: 1, modifiers: 0 });
+          await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: outsideX, y: outsideY, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
           // Chrome's CDP input domain does not always deliver a release whose
           // coordinates are outside the emulated page. Re-enter once and send
           // an idempotent release so the harness matches the native pointer-up
@@ -374,24 +598,36 @@ try {
           await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: frame?.x ?? dragPoints.start.x, y: frame?.y ?? dragPoints.start.y, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
           await delay(300);
           const outsideState = await evaluate(`(() => ({
-            transform: getComputedStyle(document.querySelector('.layer-scene-inner')).transform,
+            renderVersion: Number(document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderVersion || 0),
             bodyTransform: getComputedStyle(document.body).transform,
             shellTransform: getComputedStyle(document.querySelector('.app-shell')).transform,
             documentOverflowX: document.documentElement.scrollWidth - innerWidth,
             frameFocused: document.activeElement === document.querySelector('.screenshot-frame'),
           }))()`);
-          report.dragOutside = { outsidePoint: { x: outsideX, y: outsideY }, transformBefore: outsideBefore, ...outsideState };
+          report.dragOutside = { outsidePoint: { x: outsideX, y: outsideY }, renderBefore: outsideBefore, ...outsideState };
           assert.equal(outsideState.bodyTransform, "none", "3D drag leaked a transform to document body");
           assert.equal(outsideState.shellTransform, "none", "3D drag leaked a transform to the app shell");
           assert.ok(outsideState.documentOverflowX <= 1, "Outside drag introduced horizontal document overflow");
           recordCheck("3D drag releases safely after leaving the application viewport");
         }
       }
-      const cameraBefore = await evaluate("getComputedStyle(document.querySelector('.layer-scene-inner')).transform");
+      const cameraBefore = await evaluate("Number(document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderVersion || 0)");
       await evaluate("document.querySelector('.screenshot-frame').focus()");
       await connection.send("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 });
       await connection.send("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 });
-      await until(() => evaluate(`getComputedStyle(document.querySelector('.layer-scene-inner')).transform !== ${JSON.stringify(cameraBefore)}`), "3D keyboard rotation");
+      await until(() => evaluate(`Number(document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderVersion || 0) > ${JSON.stringify(cameraBefore)}`), "3D keyboard rotation");
+      const wheelPoint = await evaluate(`(() => {
+        const rect = document.querySelector('.screenshot-frame')?.getBoundingClientRect();
+        return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
+      })()`);
+      if (wheelPoint) {
+        const wheelHandled = await evaluate(`document.querySelector('.screenshot-frame')?.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, clientX: ${wheelPoint.x}, clientY: ${wheelPoint.y}, deltaY: -120 })) === false`);
+        assert.equal(wheelHandled, true, "Mouse wheel was not handled by the screenshot workspace");
+        await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '125%'"), "mouse wheel zoom in");
+        await evaluate(`document.querySelector('.screenshot-frame')?.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, clientX: ${wheelPoint.x}, clientY: ${wheelPoint.y}, deltaY: 120 }))`);
+        await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '100%'"), "mouse wheel zoom out");
+        recordCheck("mouse wheel zooms the screenshot workspace");
+      }
       await evaluate("document.querySelector('[aria-label=\"放大截图\"]').click()");
       await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '125%'"), "screenshot zoom in");
       await evaluate(`(() => {
@@ -404,9 +640,10 @@ try {
       await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '800%'"), "high screenshot zoom preset");
       await evaluate("document.querySelector('.zoom-reset').click()");
       await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '100%'"), "screenshot fit zoom");
+      await delay(500);
       const layersScreenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
       writeFileSync(join(output, "layers3d.png"), Buffer.from(layersScreenshot.data, "base64"));
-      report.visualBaseline = { screenshot: "layers3d.png", camera: "Yaw 0° · Pitch 0°", zoom: "100%" };
+      report.visualBaseline = { screenshot: "layers3d.png", camera: await evaluate("document.querySelector('.orbit-readout')?.textContent?.trim() || ''"), zoom: "100%" };
       recordCheck("screenshot zoom in and fit controls");
     }
     await evaluate("document.querySelector('.tree-expand-all').click()");
@@ -425,6 +662,10 @@ try {
     }
     await evaluate("document.querySelector('.tree-collapse-all').click()");
     await until(() => evaluate("document.querySelectorAll('.tree-row').length === 1"), "collapse before screenshot reveal");
+    // In 3D a click intentionally picks the front-most projected layer. Switch
+    // to 2D before checking source-image coordinate reverse lookup.
+    await evaluate("document.querySelector('.view-mode-toggle button')?.click()");
+    await until(() => evaluate("!document.querySelector('.screenshot-frame')?.classList.contains('layers3d-active')"), "2D mode before screenshot reverse lookup");
     await until(() => evaluate("document.querySelector('.screenshot-stage img')?.naturalWidth > 0 && Boolean(document.querySelector('.selection-overlay'))"), "screenshot and bounds");
     await evaluate("document.querySelector('.screenshot-stage').scrollIntoView({block:'center', behavior:'instant'})");
     await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
