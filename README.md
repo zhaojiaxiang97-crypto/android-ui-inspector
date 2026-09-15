@@ -136,6 +136,8 @@ node scripts/app-smoke.mjs --packaged --require-device
 
 `bun run test:dpi` 会用独立 Electron 进程依次注入 `force-device-scale-factor=1/1.25/1.5`，复用生产 `ScreenshotPreview` 坐标 harness，并断言 `devicePixelRatio`、布局框和反查矩阵。它是可重复的 DPI 代理，不等价于 Windows 设置里的系统缩放、多显示器 Per-Monitor DPI 或实体设备显示输出。
 
+完整的测试分层、覆盖矩阵、执行顺序、真实设备边界、证据格式和发布门槛见 [测试总计划](docs/TEST_PLAN.md)。
+
 本轮首页设计稿：[main-interface-redesign-v2.png](docs/design/main-interface-redesign-v2.png)。它是视觉参考资产；实际布局由 `src/components/DeviceHomeView.tsx`、`src/components/AppHeader.tsx`、`src/styles/tokens.css` 和 `src/App.css` 实现。
 
 ## 打包

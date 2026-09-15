@@ -33,6 +33,7 @@ android-ui-inspector/
 ├─ build/                    # electron-builder hook 和 NSIS 扩展
 ├─ .github/workflows/        # 三平台静态检查、原生打包和启动验证
 ├─ docs/                     # 验收记录、设计资产、性能报告和开发约定
+│  ├─ TEST_PLAN.md           # 测试分层、矩阵、边界和发布门槛
 │  └─ design/                # ImageGen 视觉参考和界面设计稿
 ├─ public/                   # Vite 静态资源；目前为空，新增资源再放这里
 ├─ src-tauri/                # 历史 Tauri 原型，不属于默认 Electron 构建链
@@ -76,6 +77,7 @@ scripts/ ─────────────> 构建产物、测试页和 El
 - `tests/` 的 XML 和截图输入应脱敏；新增厂商差异时优先增加 fixture 和解析测试，不要把真实个人页面放进仓库。
 - `benchmarks/` 用于测量和回归，不承载产品功能；基准专用组件不要从 `src/` 反向引用。
 - `scripts/` 只放命令行入口或测试编排；可复用的业务逻辑应下沉到 `shared/` 或可测试的 Electron 模块。
+- 测试的统一边界和执行顺序以 `docs/TEST_PLAN.md` 为准；其他专项文档只补充领域细节，不重复定义相互矛盾的发布门槛。
 - 首页状态由 `shared/device-state.ts` 决策，`src/components/DeviceHomeView.tsx` 只负责状态呈现和动作回调；`src/components/AppHeader.tsx` 只负责品牌、设备上下文、顶栏操作和帮助入口。`App.tsx` 保留检查会话、快照和跨组件状态编排，不再承载首页/顶栏的大段 JSX。
 - 新的颜色、字体、圆角、间距和阴影必须先在 `src/styles/tokens.css` 增加或复用 token；`App.css` 负责布局与组件状态，历史样式清理完成前不得再新增同选择器的无说明覆盖。
 

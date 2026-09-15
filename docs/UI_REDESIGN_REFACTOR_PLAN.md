@@ -753,6 +753,8 @@ node scripts/app-smoke.mjs --packaged --require-device
 
 暂停后继续开发时，优先顺序为：清理 `src/App.css` 历史 override 并完成 token 分区、基于最新源码重新打 Windows 安装包并补打包版实机回归，然后再收集物理 Windows DPI/多显示器和 macOS/Linux CI 环境证据。本次暂停不把这些外部环境验收项标记为完成。
 
+测试范围、用例分层、组合矩阵、真实设备只读边界和发布门槛已统一收录到 [测试总计划](TEST_PLAN.md)；本计划只保留与 UI 视觉/结构重构直接相关的专项差距和实现记录。
+
 ## 11. 完成定义
 
 只有以下条件全部满足，才将本阶段标记为完成：
