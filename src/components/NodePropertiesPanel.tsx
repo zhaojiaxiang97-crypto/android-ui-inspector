@@ -30,13 +30,14 @@ export function NodePropertiesPanel({ root, node, screenshotSize }: Props) {
     node.selected && "selected",
     !node.visibleToUser && "hidden",
   ].filter(Boolean).join(" · ") || "none";
+  const source = node.attributes?.["inspection-source"] === "debug-qml" ? "QML Debug" : "View Debug";
 
   return (
     <div className="node-properties-panel">
       <section className="node-property-section" aria-labelledby="node-common-properties">
         <div className="node-property-heading">
           <h5 id="node-common-properties">常用属性</h5>
-          <span>UIAutomator</span>
+          <span>{source}</span>
         </div>
         <dl className="node-property-grid">
           <div><dt>class</dt><dd title={node.className ?? undefined}>{valueOrDash(node.className)}</dd></div>
@@ -64,7 +65,7 @@ export function NodePropertiesPanel({ root, node, screenshotSize }: Props) {
             <div><dt>右 / 下</dt><dd>{px(rect.right)} / {px(rect.bottom)}</dd></div>
             <div><dt>中心点</dt><dd>{px(rect.centerX)} / {px(rect.centerY)}</dd></div>
             <div><dt>面积</dt><dd>{Math.round(rect.area).toLocaleString("zh-CN")} px²</dd></div>
-            <div><dt>Z / 深度</dt><dd>无实测 Z · hierarchy depth {metrics.depth}</dd></div>
+            <div><dt>Z / 深度</dt><dd>{node.attributes?.z !== undefined ? `Z ${node.attributes.z}` : "无实测 Z"} · hierarchy depth {metrics.depth}</dd></div>
             <div><dt>bounds</dt><dd title={node.bounds?.raw}>{node.bounds?.raw ?? "—"}</dd></div>
             {parentOffset && <div><dt>父级内偏移</dt><dd>X {px(parentOffset.x)} · Y {px(parentOffset.y)}</dd></div>}
             {screenshotSize && <div><dt>截图尺寸</dt><dd>{screenshotSize.width} × {screenshotSize.height}px</dd></div>}
@@ -100,7 +101,7 @@ export function NodePropertiesPanel({ root, node, screenshotSize }: Props) {
         </div>
         <p className="box-model-note">
           {rect
-            ? "UIAutomator 只提供控件外部 bounds；padding、border、margin 和真实 content 区域不能从 bounds 推断，因此未填充为 0。"
+            ? "当前调试源只提供控件外部 bounds；padding、border、margin 和真实 content 区域不伪造为 0。"
             : "当前节点没有有效 bounds，盒模型无法计算。"}
         </p>
       </section>

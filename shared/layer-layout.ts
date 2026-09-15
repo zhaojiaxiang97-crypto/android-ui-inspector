@@ -29,6 +29,7 @@ export type LayerRecord = {
   isSelected: boolean;
   isAncestor: boolean;
   isDescendant: boolean;
+  isCollapsed: boolean;
   isVirtual: boolean;
   hitTestable: boolean;
 };
@@ -248,6 +249,7 @@ export function buildLayerLayout(root: UiNode, selectedNode: UiNode | null, size
         isSelected: entry.isSelected,
         isAncestor: entry.isAncestor,
         isDescendant: entry.isDescendant,
+        isCollapsed: false,
         isVirtual: hasVirtualClass(entry.node),
         hitTestable: true,
       };
@@ -332,6 +334,7 @@ export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, si
       isSelected: entry.node.id === target,
       isAncestor: entry.node.id !== target && selectedPath.has(entry.node.id),
       isDescendant: selectedDescendants.has(entry.node.id),
+      isCollapsed: Boolean(entry.node.children.length && options.expandedIds && !options.expandedIds.has(entry.node.id)),
       isVirtual: hasVirtualClass(entry.node),
       hitTestable: true,
     };
@@ -351,8 +354,9 @@ export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, si
         isSelected: rootEntry.node.id === target,
         isAncestor: false,
         isDescendant: false,
+        isCollapsed: Boolean(rootEntry.node.children.length && options.expandedIds && !options.expandedIds.has(rootEntry.node.id)),
         isVirtual: hasVirtualClass(rootEntry.node),
-        hitTestable: false,
+        hitTestable: Boolean(rootEntry.node.children.length && options.expandedIds && !options.expandedIds.has(rootEntry.node.id)),
       }
     : null;
 

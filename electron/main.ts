@@ -87,6 +87,7 @@ function fixtureSnapshot(serial: string): UiSnapshot {
     screenshotDataUrl: `data:image/svg+xml;base64,${Buffer.from(screenshotSvg, "utf8").toString("base64")}`,
     error: null,
     warning: null,
+    inspectionSource: "uiautomator",
     hierarchyDumpMode: "full",
     captureGeometry: {
       hierarchyRotation: parsed.rotation,

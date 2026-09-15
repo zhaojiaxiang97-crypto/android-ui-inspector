@@ -7,6 +7,7 @@ const project = fileURLToPath(new URL("../", import.meta.url));
 const reportRoot = join(project, ".benchmarks", "app-smoke");
 const output = join(project, ".benchmarks", "fixture-dpi-smoke", new Date().toISOString().replace(/[:.]/g, "-"));
 const scales = [1, 1.25, 1.5];
+const runner = process.versions.bun ? process.execPath : "bun";
 mkdirSync(output, { recursive: true });
 
 function latestReport(startedAt) {
@@ -30,7 +31,7 @@ function latestReport(startedAt) {
 
 async function runScale(scale) {
   const startedAt = Date.now();
-  const child = spawn(process.execPath, [
+  const child = spawn(runner, [
     join(project, "scripts", "app-smoke.mjs"),
     "--fixture",
     "--drag-outside",

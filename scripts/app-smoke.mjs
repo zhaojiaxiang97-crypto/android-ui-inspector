@@ -298,6 +298,7 @@ try {
     if (rowCount > 1) {
       await until(() => evaluate("Boolean(document.querySelector('.layer-scene'))"), "3D hierarchy expansion");
       await until(() => evaluate("document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderer === 'webgl'"), "WebGL scene renderer");
+      await until(() => evaluate("document.querySelector('.layer-plane.selected')?.dataset.layerNodeId === document.querySelector('.tree-row.selected')?.dataset.treeId"), "3D selection synchronization");
       const layerState = await evaluate(`(() => {
         const canvas = document.querySelector('.layer-webgl-canvas');
         const selectedPlane = document.querySelector('.layer-plane.selected');
@@ -312,6 +313,9 @@ try {
         outlineCount: Number(document.querySelector('.layer-scene')?.dataset.layerOutlineCount || 0),
         selectionCount: Number(document.querySelector('.layer-scene')?.dataset.layerSelectionCount || 0),
         texturedUnselectedCount: document.querySelectorAll('.layer-plane.surface:not(.selected)').length,
+        expandedParentSurfaceCount: document.querySelectorAll('.layer-plane.surface[data-layer-expanded-parent="true"]').length,
+        expandedCompositeCount: document.querySelectorAll('.layer-plane[data-layer-texture-mode="composite"]').length,
+        isolatedSurfaceCount: document.querySelectorAll('.layer-plane.surface[data-layer-texture-mode="isolated"]').length,
         selectedTreeId: document.querySelector('.tree-row.selected')?.dataset.treeId,
         selectedLayerId: selectedLayer?.dataset.layerNodeId,
         selectedLayerRole: selectedLayer?.dataset.layerRole,
@@ -319,7 +323,6 @@ try {
         selectedLayerFocus: selectedLayer?.dataset.layerFocus,
         selectedLayerHitTestable: selectedLayer?.dataset.layerHitTestable,
         selectedPlaneCount: document.querySelectorAll('.layer-plane.selected').length,
-        hasMovingBasePlane: Boolean(document.querySelector('.layer-scene-base-plane[data-layer-base="true"]')),
         fullScreenSurfaceCount: (() => {
           const stage = document.querySelector('.screenshot-stage');
           if (!stage) return 0;
@@ -349,6 +352,8 @@ try {
       })()`);
       assert.equal(layerState.mode, "layers3d");
       assert.equal(layerState.renderer, "webgl", `3D scene did not initialize WebGL: ${layerState.rendererError || 'unknown error'}`);
+      assert.equal(layerState.expandedParentSurfaceCount, 0, "Expanded parent layers must not retain screenshot color");
+      assert.equal(layerState.expandedCompositeCount, 0, "Expanded controls must not retain flattened background pixels");
       assert.match(layerState.canvasPixels ?? "", /^\d+x\d+$/, "WebGL canvas has no backing store");
       assert.ok(layerState.count > 0, "3D scene has no visible layer planes");
       assert.ok(["surface", "outline"].includes(layerState.selectedLayerRole), "3D selected layer lost its visual role");
@@ -357,12 +362,12 @@ try {
       assert.equal(layerState.selectedLayerHitTestable, "true", "Selected direct child must remain hoverable and clickable");
       assert.equal(layerState.selectedPlaneCount, 1, "3D selected layer lost its focus plane");
       assert.equal(layerState.selectionCount, 1, "3D scene must draw one focus highlight");
-      assert.equal(layerState.hasMovingBasePlane, true, "3D screenshot surface is outside the moving layer scene");
       assert.equal(layerState.stageOutline, "none", "3D stage still leaves a stationary outline behind the scene");
       assert.equal(layerState.stageBoxShadow, "none", "3D stage still leaves a stationary shadow behind the scene");
       assert.equal(layerState.stageBackground, "rgba(0, 0, 0, 0)", "3D stage still leaves a stationary backdrop behind the scene");
       assert.equal(layerState.fullScreenSurfaceCount, 0, "3D scene still renders a full-screen container as a texture surface");
       assert.ok(layerState.textureCount >= 0 && layerState.textureCount <= layerState.count, "3D texture surface count is invalid");
+      assert.equal(layerState.isolatedSurfaceCount, layerState.textureCount, "Expanded texture surfaces must use isolated foreground sampling");
       if (fixture && layerState.textureCount > 0) assert.ok(layerState.texturedUnselectedCount > 0 || layerState.selectedLayerRole === "surface", "Styled direct children lost their screenshot appearance");
       assert.equal(layerState.selectedLayerId, layerState.selectedTreeId, "3D selected plane does not follow tree selection");
       assert.equal(layerState.hasZoomToolbar, true);
@@ -499,7 +504,8 @@ try {
       })()`);
       let hoverResult = null;
       for (const point of hoverPoints) {
-        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "none", buttons: 0 });
+        // Keep this hit-test assertion in browser CSS pixels at every forced DPR.
+        await evaluate(`document.querySelector('.layer-webgl-canvas')?.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: ${point.x}, clientY: ${point.y}, pointerId: 1, pointerType: 'mouse', isPrimary: true }))`);
         await delay(80);
         const hoveredId = await evaluate("document.querySelector('.layer-scene')?.dataset.layerHoveredId || null");
         if (hoveredId) {
@@ -570,8 +576,7 @@ try {
           return true;
         })()`);
         await until(() => evaluate(`(() => {
-          const selectedPlane = document.querySelector('.layer-plane.selected')
-            || document.querySelector('.layer-scene-base-plane[data-layer-selected="true"]');
+          const selectedPlane = document.querySelector('.layer-plane.selected');
           const selectedTree = document.querySelector('.tree-row.selected');
           return selectedPlane?.dataset.layerNodeId === ${JSON.stringify(alternateLayerId)}
             && selectedTree?.dataset.treeId === ${JSON.stringify(alternateLayerId)};
@@ -704,6 +709,11 @@ try {
     }
     await evaluate("document.querySelector('.tree-collapse-all').click()");
     await until(() => evaluate("document.querySelectorAll('.tree-row').length === 1"), "collapse before screenshot reveal");
+    if (fixture) {
+      await until(() => evaluate("document.querySelector('.layer-scene')?.dataset.layerRootComposite === 'true' && Number(document.querySelector('.layer-scene')?.dataset.layerCompositeCount || 0) >= 1"), "collapsed root composite layer");
+      assert.equal(await evaluate("document.querySelectorAll('.layer-plane.surface').length"), 0, "A snapshot without independent bitmaps must not substitute a full-screen crop for its subtree");
+      recordCheck("collapsed legacy snapshot avoids unrelated screenshot pixels when independent images are unavailable");
+    }
     // In 3D a click intentionally picks the front-most projected layer. Switch
     // to 2D before checking source-image coordinate reverse lookup.
     await evaluate("document.querySelector('.view-mode-toggle button')?.click()");

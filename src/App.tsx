@@ -16,26 +16,12 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function dumpModeLabel(mode: UiSnapshot["hierarchyDumpMode"]) {
-  if (mode === "full") return "完整 hierarchy";
-  if (mode === "compressed") return "压缩 hierarchy";
-  return "hierarchy 模式未知";
-}
-
-function countVirtualAccessibilityNodes(root: UiNode) {
-  let count = 0;
-  const pending = [root];
-  for (let cursor = 0; cursor < pending.length; cursor += 1) {
-    const node = pending[cursor];
-    if (node.className?.includes("$VirtualChild")) count += 1;
-    pending.push(...node.children);
-  }
-  return count;
-}
-
-function virtualAccessibilityHint(node: UiNode) {
-  if (!node.className?.includes("$VirtualChild")) return null;
-  return "这是 VirtualChild 虚拟无障碍节点。UIAutomator 只能读取应用暴露的 Accessibility 信息，不一定等于 QML、Compose 或 WebView 内部的全部绘制控件。";
+function inspectionSourceLabel(snapshot: UiSnapshot) {
+  if (snapshot.inspectionSource === "debug-qml") return "QML Debug";
+  if (snapshot.inspectionSource === "debug-view") return "View Debug";
+  if (snapshot.hierarchyDumpMode === "full") return "完整 hierarchy";
+  if (snapshot.hierarchyDumpMode === "compressed") return "压缩 hierarchy";
+  return "Debug hierarchy";
 }
 
 function xpathLiteral(value: string) {
@@ -467,10 +453,6 @@ function App() {
   );
   const hasAdb = Boolean(probe?.adbPath);
   const detailNode = selectedNode ?? snapshot?.root ?? null;
-  const virtualNodeCount = useMemo(
-    () => snapshot?.root ? countVirtualAccessibilityNodes(snapshot.root) : 0,
-    [snapshot?.root],
-  );
   const detailAttributes = useMemo(
     () => Object.entries(detailNode?.attributes ?? {}).sort(([left], [right]) => left.localeCompare(right)),
     [detailNode],
@@ -711,11 +693,11 @@ function App() {
           <section className="panel inspector-panel">
             <div className="inspector-heading">
               <div>
-                <p className="section-kicker">UIAUTOMATOR HIERARCHY</p>
+                <p className="section-kicker">DEBUG HIERARCHY</p>
                 <h3>界面层级</h3>
               </div>
               <div className="inspector-heading-meta">
-                <span className="snapshot-summary">{snapshot ? `${snapshot.nodeCount} nodes · ${formatBytes(snapshot.xmlSize)} · ${dumpModeLabel(snapshot.hierarchyDumpMode)}` : "读取中"}</span>
+                <span className="snapshot-summary">{snapshot ? `${snapshot.nodeCount} nodes · ${formatBytes(snapshot.xmlSize)} · ${inspectionSourceLabel(snapshot)}` : "读取中"}</span>
                 <button className="close-button" type="button" onClick={closeInspector}>返回设备</button>
               </div>
             </div>
@@ -730,7 +712,7 @@ function App() {
                   <div className="workspace-empty-copy">
                     <span className="loading-orbit" />
                     <h4>正在读取 UI hierarchy</h4>
-                    <p>执行 uiautomator dump，并从设备拉取当前页面结构。</p>
+                    <p>正在连接 Debug App 并读取真实控件树。</p>
                   </div>
                 </div>
                 <div className="preview-pane inspector-state-pane">
@@ -774,11 +756,6 @@ function App() {
             ) : snapshot?.root ? (
               <>
                 {snapshot.warning && <div className="snapshot-warning">{snapshot.warning}</div>}
-                {virtualNodeCount > 0 && (
-                  <div className="hierarchy-note">
-                    当前 hierarchy 包含 {virtualNodeCount} 个 VirtualChild 虚拟无障碍节点。它们只代表应用暴露的可访问性信息，不保证包含所有实际绘制控件。
-                  </div>
-                )}
                 <div className="inspector-grid">
                   <div className="tree-pane">
                     <div className="subpanel-heading">
@@ -929,7 +906,6 @@ function App() {
                           </div>
                           <span className="node-id">#{detailNode.id}</span>
                         </div>
-                        {virtualAccessibilityHint(detailNode) && <p className="node-source-note">{virtualAccessibilityHint(detailNode)}</p>}
                         <NodePropertiesPanel
                           root={snapshot.root!}
                           node={detailNode}
@@ -937,7 +913,7 @@ function App() {
                         />
                         {detailAttributes.length > 0 ? (
                           <details className="node-attributes" open>
-                            <summary>全部 XML 属性 · {detailAttributes.length}</summary>
+                            <summary>全部调试属性 · {detailAttributes.length}</summary>
                             <dl className="node-attributes-list">
                               {detailAttributes.map(([name, value]) => (
                                 <div key={name}>
@@ -993,7 +969,7 @@ function App() {
                   <div className="workspace-empty-copy">
                     <span className="workspace-empty-icon" aria-hidden="true">⌁</span>
                     <h4>{captureSerial ? "准备采集当前页面" : "请选择已授权设备"}</h4>
-                    <p>{captureSerial ? "点击顶部“采集截图”，同时获取 UIAutomator 层级和设备画面。" : "顶部选择已授权的 Android 设备后，再开始采集。"}</p>
+                    <p>{captureSerial ? "点击顶部“采集截图”，同时获取 Debug 控件树和设备画面。" : "顶部选择已授权的 Android 设备后，再开始采集。"}</p>
                   </div>
                 </div>
                 <div className="preview-pane empty-preview-pane">
@@ -1015,7 +991,7 @@ function App() {
 
       <footer className="app-footer">
         <span>ANDROID UI INSPECTOR / LOCAL-FIRST</span>
-        <span>下一步：读取 UIAutomator hierarchy</span>
+        <span>仅支持 Debug App</span>
       </footer>
     </div>
   );

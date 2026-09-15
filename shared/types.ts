@@ -25,6 +25,7 @@ export type UiBounds = {
 export type PixelSize = { width: number; height: number };
 export type DisplayRotation = 0 | 1 | 2 | 3;
 export type HierarchyDumpMode = "full" | "compressed";
+export type InspectionSource = "uiautomator" | "debug-view" | "debug-qml";
 export type DisplayFrame = PixelSize & { rotation: DisplayRotation };
 export type CaptureGeometry = {
   hierarchyRotation: DisplayRotation | null;
@@ -49,8 +50,10 @@ export type UiNode = {
   scrollable: boolean;
   selected: boolean;
   visibleToUser: boolean;
-  // Raw UIAutomator attributes, including fields not promoted to typed
-  // properties and vendor-specific attributes. Optional for old snapshots.
+  // Exact transparent bitmap captured from a debuggable native View.
+  layerImageDataUrl?: string;
+  layerImageSize?: PixelSize;
+  // Source-specific attributes not promoted to typed properties.
   attributes?: Record<string, string>;
   children: UiNode[];
 };
@@ -64,6 +67,8 @@ export type UiSnapshot = {
   screenshotDataUrl: string | null;
   error: string | null;
   warning: string | null;
+  // Optional for snapshots created before Debug-only inspection was added.
+  inspectionSource?: InspectionSource;
   // Optional for snapshots created before full hierarchy capture was added.
   hierarchyDumpMode?: HierarchyDumpMode;
   // Optional so snapshots saved before display checks remain readable.

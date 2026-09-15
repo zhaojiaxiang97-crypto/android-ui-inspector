@@ -3,13 +3,16 @@ import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import type { AdbProbeResult, CaptureGeometry, DeviceInfo, HierarchyDumpMode, UiBounds, UiNode, UiSnapshot } from "../shared/types";
+import type { AdbProbeResult, CaptureGeometry, DeviceInfo, UiBounds, UiNode, UiSnapshot } from "../shared/types";
 import { assessCaptureGeometry, isRotation } from "../shared/screen-coordinates";
 import { parseInputDisplay, pngSize } from "./capture-display";
+import { inspectQmlHierarchy, type QmlDebugNode } from "./qml-debug";
+import { captureViewLayers, captureTextureViewBitmaps, type CapturedViewLayer } from "./view-debug";
 
 const COMMAND_TIMEOUT_MS = 30_000;
-const UI_XML_PATH = "/sdcard/window_dump.xml";
 const MAX_UI_HIERARCHY_DEPTH = 200;
+const QML_DEBUG_PORT = 3768;
+const qmlDebugTargets = new Map<string, string>();
 
 type CommandResult = {
   code: number | null;
@@ -288,6 +291,326 @@ function countNodes(node: UiNode): number {
   return count;
 }
 
+type ForegroundTarget = { packageName: string; activityName: string; component: string };
+
+function foregroundTarget(output: string): ForegroundTarget | null {
+  const match = output.match(/(?:mResumedActivity|topResumedActivity)[:=].*?\bu\d+\s+([^/\s]+)\/([^\s}\]]+)/);
+  if (!match) return null;
+  return { packageName: match[1], activityName: match[2], component: `${match[1]}/${match[2]}` };
+}
+
+function targetActivitySection(output: string, target: ForegroundTarget) {
+  const marker = `ACTIVITY ${target.component} `;
+  const start = output.indexOf(marker);
+  if (start < 0) throw new Error("前台 Activity 已切换，请重新采集。");
+  const next = output.indexOf("\n  ACTIVITY ", start + marker.length);
+  return output.slice(start, next < 0 ? undefined : next);
+}
+
+function appBounds(section: string): UiBounds | null {
+  const match = section.match(/mAppBounds=Rect\((-?\d+),\s*(-?\d+)\s*-\s*(-?\d+),\s*(-?\d+)\)/);
+  if (!match) return null;
+  const [, left, top, right, bottom] = match.map(Number);
+  return { left, top, right, bottom, raw: `[${left},${top}][${right},${bottom}]` };
+}
+
+function debugViewTree(section: string, target: ForegroundTarget): UiNode {
+  const hierarchy = section.split("View Hierarchy:")[1]?.split("\n    Looper")[0];
+  if (!hierarchy) throw new Error("无法从 Debug App 读取 View Hierarchy。");
+  if (hierarchy.includes("AndroidComposeView")) throw new Error("当前版本尚未支持 Compose Debug 控件树。");
+
+  const rootBounds = appBounds(section);
+  const root: UiNode = {
+    id: "0",
+    index: 0,
+    className: target.activityName,
+    package: target.packageName,
+    text: null,
+    resourceId: null,
+    contentDesc: null,
+    bounds: rootBounds,
+    clickable: false,
+    enabled: true,
+    focusable: false,
+    focused: false,
+    scrollable: false,
+    selected: false,
+    visibleToUser: true,
+    attributes: { "inspection-source": "debug-view" },
+    children: [],
+  };
+  const stack: Array<{ indent: number; node: UiNode; left: number; top: number }> = [{ indent: -1, node: root, left: 0, top: 0 }];
+
+  for (const line of hierarchy.split(/\r?\n/)) {
+    const match = line.match(/^(\s+)([^\s{]+)\{([^}]*)\}(.*)$/);
+    if (!match) continue;
+    const indent = match[1].length;
+    const className = match[2].split("@")[0];
+    const details = match[3];
+    const coordinates = details.match(/\s(-?\d+),(-?\d+)-(-?\d+),(-?\d+)(?:\s|$)/);
+    if (!coordinates) continue;
+    while (stack.length > 1 && stack.at(-1)!.indent >= indent) stack.pop();
+    const parent = stack.at(-1)!;
+    const localLeft = Number(coordinates[1]);
+    const localTop = Number(coordinates[2]);
+    const left = parent.left + localLeft;
+    const top = parent.top + localTop;
+    const right = parent.left + Number(coordinates[3]);
+    const bottom = parent.top + Number(coordinates[4]);
+    const flags = details.trim().split(/\s+/)[1] ?? "";
+    const resourceId = details.match(/#\S+\s+([^\s}]+:id\/[^\s}]+)/)?.[1] ?? null;
+    const text = match[4].match(/^\(([^)]*)\)/)?.[1] || null;
+    const index = parent.node.children.length;
+    const node: UiNode = {
+      id: `${parent.node.id}/${index}`,
+      index,
+      className,
+      package: target.packageName,
+      text,
+      resourceId,
+      contentDesc: null,
+      bounds: { left, top, right, bottom, raw: `[${left},${top}][${right},${bottom}]` },
+      clickable: flags.includes("C"),
+      enabled: flags.includes("E"),
+      focusable: flags.includes("F"),
+      focused: false,
+      scrollable: className.includes("Scroll") || className.includes("Recycler"),
+      selected: false,
+      visibleToUser: flags.startsWith("V"),
+      attributes: { "inspection-source": "debug-view", "view-flags": flags, "view-ref": `${className}@${details.trim().split(/\s+/)[0]}` },
+      children: [],
+    };
+    parent.node.children.push(node);
+    stack.push({ indent, node, left, top });
+  }
+  if (root.children.length === 0) throw new Error("未读取到 Debug View 节点。");
+  return root;
+}
+
+function viewLayerName(node: UiNode) {
+  if (node.resourceId?.includes(":id/")) return `id/${node.resourceId.split(":id/")[1]}`;
+  const className = node.className ?? "";
+  return className.slice(className.lastIndexOf(".") + 1);
+}
+
+export function attachViewLayerImages(root: UiNode, layers: readonly CapturedViewLayer[]) {
+  const nodes: UiNode[] = [];
+  const stack = [...root.children].reverse();
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    nodes.push(node);
+    for (let index = node.children.length - 1; index >= 0; index -= 1) stack.push(node.children[index]);
+  }
+
+  const used = new Set<number>();
+  let attached = 0;
+  for (const layer of layers) {
+    if (!layer.visible || !layer.pngDataUrl || layer.width < 1 || layer.height < 1) continue;
+    let match = -1;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index];
+      if (used.has(index) || !node.visibleToUser || viewLayerName(node) !== layer.name || !node.bounds) continue;
+      const width = node.bounds.right - node.bounds.left;
+      const height = node.bounds.bottom - node.bounds.top;
+      const score = Math.abs(node.bounds.left - layer.x) + Math.abs(node.bounds.top - layer.y) + Math.abs(width - layer.width) + Math.abs(height - layer.height);
+      if (score < bestScore) {
+        match = index;
+        bestScore = score;
+      }
+    }
+    // DDMS and View Hierarchy report the same screen-space rectangle. Do not
+    // attach a similarly named parent bitmap to another View elsewhere.
+    if (match < 0 || bestScore !== 0) continue;
+    used.add(match);
+    nodes[match].layerImageDataUrl = layer.pngDataUrl;
+    nodes[match].layerImageSize = { width: layer.width, height: layer.height };
+    attached += 1;
+  }
+  return attached;
+}
+
+async function captureDebugViewImages(adbPath: string, serial: string, packageName: string, root: UiNode) {
+  const pid = await runDeviceAdb(adbPath, serial, ["shell", "pidof", packageName]);
+  const processId = pid.stdout.toString("utf8").trim().split(/\s+/)[0];
+  if (pid.code !== 0 || !/^\d+$/.test(processId)) return 0;
+  const forwarded = await runDeviceAdb(adbPath, serial, ["forward", "tcp:0", `jdwp:${processId}`]);
+  const port = forwarded.stdout.toString("utf8").trim();
+  if (forwarded.code !== 0 || !/^\d+$/.test(port)) return 0;
+  try {
+    const count = attachViewLayerImages(root, await captureViewLayers(Number(port), (dump) => applyViewProperties(root, dump)));
+    const textures: UiNode[] = [];
+    const pending = [root];
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (!node.visibleToUser) continue;
+      const bounds = node.bounds;
+      if (node.className?.includes("TextureView") && node.attributes?.["view-ref"] && bounds && bounds.right > 0 && bounds.bottom > 0 && bounds.left < (root.bounds?.right ?? Infinity) && bounds.top < (root.bounds?.bottom ?? Infinity)) textures.push(node);
+      pending.push(...node.children);
+    }
+    if (textures.length) {
+      try {
+        const images = await captureTextureViewBitmaps(Number(port), textures.map((node) => node.attributes!["view-ref"]));
+        for (const node of textures) {
+          const image = images.get(node.attributes!["view-ref"]);
+          if (!image) continue;
+          node.layerImageDataUrl = image.pngDataUrl;
+          node.layerImageSize = { width: image.width, height: image.height };
+        }
+      } catch {
+        root.attributes = { ...root.attributes, "texture-capture-warning": "部分视频控件未能读取独立画面。" };
+      }
+    }
+    return count;
+  } finally {
+    await runDeviceAdb(adbPath, serial, ["forward", "--remove", `tcp:${port}`]).catch(() => undefined);
+  }
+}
+
+export function applyViewProperties(root: UiNode, dump: string) {
+  const properties = new Map<string, Record<string, string>>();
+  for (const line of dump.split("\n")) {
+    const header = line.match(/^\s*(\S+@\w+) /);
+    if (!header) continue;
+    const values: Record<string, string> = {};
+    let offset = header[0].length;
+    while (offset < line.length) {
+      const field = line.slice(offset).match(/^([^= ]+)=(\d+),/);
+      if (!field) break;
+      offset += field[0].length;
+      const length = Number(field[2]);
+      if (offset + length > line.length) break;
+      values[field[1]] = line.slice(offset, offset + length);
+      offset += length + 1;
+    }
+    properties.set(header[1], values);
+  }
+  const stack = [{ node: root, alpha: 1, visible: true }];
+  while (stack.length) {
+    const { node, alpha, visible } = stack.pop()!;
+    const values = properties.get(node.attributes?.["view-ref"] ?? "");
+    const ownAlpha = Number(values?.["drawing:getAlpha()"] ?? 1);
+    const effectiveAlpha = alpha * (Number.isFinite(ownAlpha) ? Math.max(0, Math.min(1, ownAlpha)) : 1);
+    node.attributes = { ...node.attributes, "effective-alpha": String(effectiveAlpha) };
+    node.visibleToUser = visible && node.visibleToUser && effectiveAlpha > 0;
+    if (values) {
+      node.attributes["alpha"] = String(ownAlpha);
+      const x = Number(values["layout:getLocationOnScreen_x()"]);
+      const y = Number(values["layout:getLocationOnScreen_y()"]);
+      const width = Number(values["layout:getWidth()"]);
+      const height = Number(values["layout:getHeight()"]);
+      if ([x, y, width, height].every(Number.isFinite)) node.bounds = { left: x, top: y, right: x + width, bottom: y + height, raw: `[${x},${y}][${x + width},${y + height}]` };
+    }
+    for (const child of node.children) stack.push({ node: child, alpha: effectiveAlpha, visible: node.visibleToUser });
+  }
+}
+
+function qmlUiTree(root: QmlDebugNode, packageName: string, viewport: UiBounds | null): UiNode {
+  const rootGeometry = root.geometry;
+  const scaleX = viewport && rootGeometry?.width ? (viewport.right - viewport.left) / rootGeometry.width : 1;
+  const scaleY = viewport && rootGeometry?.height ? (viewport.bottom - viewport.top) / rootGeometry.height : scaleX;
+  const offsetX = viewport?.left ?? 0;
+  const offsetY = viewport?.top ?? 0;
+  const clickableType = /(Button|MouseArea|TapHandler|CheckBox|Switch|Slider|TextField|ComboBox)/i;
+
+  const convert = (source: QmlDebugNode, id: string, index: number): UiNode => {
+    const geometry = source.geometry;
+    const bounds = geometry ? {
+      left: Math.round(offsetX + geometry.x * scaleX),
+      top: Math.round(offsetY + geometry.y * scaleY),
+      right: Math.round(offsetX + (geometry.x + geometry.width) * scaleX),
+      bottom: Math.round(offsetY + (geometry.y + geometry.height) * scaleY),
+      raw: "",
+    } : null;
+    if (bounds) bounds.raw = `[${bounds.left},${bounds.top}][${bounds.right},${bounds.bottom}]`;
+    const node: UiNode = {
+      id,
+      index,
+      className: source.type || "QmlObject",
+      package: packageName,
+      text: geometry?.text || null,
+      resourceId: source.idString || source.objectName || null,
+      contentDesc: null,
+      bounds,
+      clickable: clickableType.test(source.type),
+      enabled: geometry?.enabled ?? true,
+      focusable: /(Focus|Input|TextField|Button)/i.test(source.type),
+      focused: false,
+      scrollable: /(Flickable|ListView|GridView|ScrollView)/i.test(source.type),
+      selected: false,
+      visibleToUser: Boolean(geometry && geometry.visible && geometry.opacity > 0 && geometry.width > 0 && geometry.height > 0),
+      attributes: {
+        "inspection-source": "debug-qml",
+        "qml-debug-id": String(source.debugId),
+        "qml-context-id": String(source.contextId),
+        "qml-parent-id": String(source.parentId),
+        "qml-source": source.url,
+        "qml-line": String(source.line),
+        opacity: String(geometry?.opacity ?? 1),
+        z: String(geometry?.z ?? 0),
+        "drawing-order": String(geometry?.z ?? index),
+      },
+      children: [],
+    };
+    node.children = source.children.map((child, childIndex) => convert(child, `${id}/${childIndex}`, childIndex));
+    return node;
+  };
+  return convert(root, "0", 0);
+}
+
+function delay(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function qmlDebugTree(adbPath: string, serial: string, target: ForegroundTarget) {
+  const forward = await runDeviceAdb(adbPath, serial, ["forward", `tcp:${QML_DEBUG_PORT}`, `tcp:${QML_DEBUG_PORT}`]);
+  if (forward.code !== 0) throw new Error(commandError("无法转发 QML 调试端口", forward));
+
+  if (qmlDebugTargets.get(serial) === target.packageName) {
+    try {
+      return { root: await inspectQmlHierarchy(QML_DEBUG_PORT), restarted: false };
+    } catch {
+      qmlDebugTargets.delete(serial);
+    }
+  }
+
+  await runDeviceAdb(adbPath, serial, ["shell", "am", "force-stop", target.packageName]);
+  const start = await runDeviceAdb(adbPath, serial, [
+    "shell", "am", "start", "-n", target.component,
+    "--es", "applicationArguments", `-qmljsdebugger=port:${QML_DEBUG_PORT},services:QmlDebugger`,
+  ]);
+  if (start.code !== 0 || /\bError:/.test(start.stdout.toString("utf8"))) {
+    throw new Error(commandError("无法以 QML Debug 模式启动目标 App", start));
+  }
+
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      const root = await inspectQmlHierarchy(QML_DEBUG_PORT);
+      qmlDebugTargets.set(serial, target.packageName);
+      return { root, restarted: true };
+    } catch (error) {
+      lastError = error;
+      await delay(250);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("无法连接 QML Debug 服务。");
+}
+
+async function captureScreen(adbPath: string, serial: string) {
+  const beforeScreenshot = await readDisplayFrame(adbPath, serial);
+  const result = await runDeviceAdb(adbPath, serial, ["exec-out", "screencap", "-p"]);
+  const screenshotSize = pngSize(result.stdout);
+  if (result.code !== 0 || !screenshotSize) return { result, screenshotDataUrl: null, captureGeometry: undefined };
+  const afterScreenshot = await readDisplayFrame(adbPath, serial);
+  const captureGeometry: CaptureGeometry = { hierarchyRotation: beforeScreenshot?.rotation ?? null, beforeScreenshot, afterScreenshot, screenshotSize };
+  return {
+    result,
+    screenshotDataUrl: `data:image/png;base64,${result.stdout.toString("base64")}`,
+    captureGeometry,
+  };
+}
+
 function errorSnapshot(serial: string, error: string): UiSnapshot {
   return {
     serial,
@@ -363,64 +686,63 @@ export async function inspectDevice(serial: string): Promise<UiSnapshot> {
   if (!adbPath) return errorSnapshot(serial, "未找到 adb。请安装 Android SDK Platform-Tools 后重试。");
 
   try {
-    let hierarchyDumpMode: HierarchyDumpMode = "full";
-    // Full mode is the useful default for inspection. Compressed mode omits
-    // nodes marked as not important by Android and is only a compatibility
-    // fallback for vendor/older implementations that reject the full dump.
-    let dumpResult = await runDeviceAdb(adbPath, serial, ["shell", "uiautomator", "dump", UI_XML_PATH]);
-    if (dumpResult.code !== 0) {
-      hierarchyDumpMode = "compressed";
-      dumpResult = await runDeviceAdb(adbPath, serial, ["shell", "uiautomator", "dump", "--compressed", UI_XML_PATH]);
-    }
-    if (dumpResult.code !== 0) {
-      return errorSnapshot(serial, commandError("无法导出 UI hierarchy", dumpResult));
-    }
+    const activities = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]);
+    if (activities.code !== 0) return errorSnapshot(serial, commandError("无法读取前台 App", activities));
+    const target = foregroundTarget(activities.stdout.toString("utf8"));
+    if (!target) return errorSnapshot(serial, "未找到正在前台运行的 Android App。");
 
-    let xmlResult = await runDeviceAdb(adbPath, serial, ["exec-out", "cat", UI_XML_PATH]);
-    if (xmlResult.code !== 0) {
-      // exec-out is preferred because it keeps XML bytes intact; shell is the fallback.
-      xmlResult = await runDeviceAdb(adbPath, serial, ["shell", "cat", UI_XML_PATH]);
-    }
-    if (xmlResult.code !== 0) {
-      return errorSnapshot(serial, commandError("无法读取 UI hierarchy XML", xmlResult));
-    }
+    const debugCheck = await runDeviceAdb(adbPath, serial, ["shell", "run-as", target.packageName, "id"]);
+    if (debugCheck.code !== 0) return errorSnapshot(serial, `仅支持 Debug App：${target.packageName} 不可调试。`);
 
-    const xml = xmlResult.stdout.toString("utf8");
-    const { root, rotation } = parseUiHierarchy(xml);
-    const nodeCount = countNodes(root);
-    let screenshotDataUrl: string | null = null;
-    let warning: string | null = hierarchyDumpMode === "compressed"
-      ? "完整 UI hierarchy 获取失败，已回退到压缩模式，部分节点可能被省略。"
-      : null;
-    let captureGeometry: CaptureGeometry | undefined;
+    const top = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", target.packageName]);
+    if (top.code !== 0) return errorSnapshot(serial, commandError("无法读取 Debug App 层级", top));
+    const section = targetActivitySection(top.stdout.toString("utf8"), target);
+    const isQml = section.includes("org.qtproject.qt.android.");
+    let root: UiNode;
+    let inspectionSource: UiSnapshot["inspectionSource"];
+    let warning: string | null = null;
+    let rawHierarchy: string;
 
-    const beforeScreenshot = await readDisplayFrame(adbPath, serial);
-    const screenshotResult = await runDeviceAdb(adbPath, serial, ["exec-out", "screencap", "-p"]);
-    const screenshotSize = pngSize(screenshotResult.stdout);
-    if (screenshotResult.code === 0 && screenshotSize) {
-      screenshotDataUrl = `data:image/png;base64,${screenshotResult.stdout.toString("base64")}`;
-      const afterScreenshot = await readDisplayFrame(adbPath, serial);
-      captureGeometry = { hierarchyRotation: rotation, beforeScreenshot, afterScreenshot, screenshotSize };
-      const integrity = assessCaptureGeometry(captureGeometry);
-      if (integrity.status === "mismatch") warning = integrity.message;
+    if (isQml) {
+      const qml = await qmlDebugTree(adbPath, serial, target);
+      root = qmlUiTree(qml.root, target.packageName, appBounds(section));
+      inspectionSource = "debug-qml";
+      rawHierarchy = JSON.stringify(qml.root);
+      if (qml.restarted) warning = "已重启目标 App 并建立 QML Debug 连接。";
     } else {
-      const screenshotWarning = commandError("UI hierarchy 已读取，但截图失败或不是有效 PNG", screenshotResult);
-      warning = [warning, screenshotWarning].filter(Boolean).join(" ") || null;
+      root = debugViewTree(section, target);
+      inspectionSource = "debug-view";
+      rawHierarchy = section;
+      try {
+        const imageCount = await captureDebugViewImages(adbPath, serial, target.packageName, root);
+        if (imageCount === 0) warning = "未读取到独立 View 画面，缺失画面的控件仅显示边框。";
+        if (root.attributes?.["texture-capture-warning"]) warning = root.attributes["texture-capture-warning"];
+      } catch (error) {
+        warning = `独立 View 画面抓取失败，缺失画面的控件仅显示边框。${error instanceof Error ? error.message : ""}`;
+      }
+    }
+
+    const screenshot = await captureScreen(adbPath, serial);
+    if (!screenshot.screenshotDataUrl) {
+      warning = [warning, commandError("控件树已读取，但截图失败或不是有效 PNG", screenshot.result)].filter(Boolean).join(" ");
+    } else if (screenshot.captureGeometry) {
+      const integrity = assessCaptureGeometry(screenshot.captureGeometry);
+      if (integrity.status === "mismatch") warning = [warning, integrity.message].filter(Boolean).join(" ");
     }
 
     return {
       serial,
       root,
-      nodeCount,
-      xmlSize: Buffer.byteLength(xml, "utf8"),
-      rawXml: xml,
-      screenshotDataUrl,
+      nodeCount: countNodes(root),
+      xmlSize: Buffer.byteLength(rawHierarchy, "utf8"),
+      rawXml: null,
+      screenshotDataUrl: screenshot.screenshotDataUrl,
       error: null,
       warning,
-      hierarchyDumpMode,
-      ...(captureGeometry ? { captureGeometry } : {}),
+      inspectionSource,
+      ...(screenshot.captureGeometry ? { captureGeometry: screenshot.captureGeometry } : {}),
     };
   } catch (error) {
-    return errorSnapshot(serial, error instanceof Error ? error.message : "读取 UI hierarchy 失败。");
+    return errorSnapshot(serial, error instanceof Error ? error.message : "读取 Debug 控件树失败。");
   }
 }

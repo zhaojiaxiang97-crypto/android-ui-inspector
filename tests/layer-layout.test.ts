@@ -164,6 +164,19 @@ test("overview expands every visible descendant and keeps Z slots stable across 
   assert.deepEqual(overview.records.map((record) => record.z), [-192, -128, -64, 0]);
   assert.deepEqual(reselected.records.map((record) => record.z), overview.records.map((record) => record.z));
   assert.deepEqual(collapsed.records.map((record) => record.id), ["behind", "middle", "front"]);
+  assert.equal(collapsed.records.find((record) => record.id === "middle")?.isCollapsed, true);
+  assert.equal(collapsed.records.find((record) => record.id === "behind")?.isCollapsed, false);
   assert.equal(overview.records.find((record) => record.isSelected)?.id, "nested");
   assert.ok((overview.parent?.z ?? 0) < Math.min(...overview.records.map((record) => record.z)));
+});
+
+test("collapsed root becomes a clickable composite layer", () => {
+  const root = node("root", bounds(0, 0, 100, 100));
+  root.children = [node("child", bounds(10, 10, 90, 90))];
+
+  const overview = buildLayerOverview(root, root, size, { expandedIds: new Set() });
+
+  assert.deepEqual(overview.records, []);
+  assert.equal(overview.parent?.isCollapsed, true);
+  assert.equal(overview.parent?.hitTestable, true);
 });

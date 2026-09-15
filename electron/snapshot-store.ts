@@ -59,6 +59,8 @@ function isUiNode(value: unknown, depth = 0, budget = { count: 0 }): value is Ui
     && typeof value.scrollable === "boolean"
     && typeof value.selected === "boolean"
     && typeof value.visibleToUser === "boolean"
+    && (value.layerImageDataUrl === undefined || typeof value.layerImageDataUrl === "string")
+    && (value.layerImageSize === undefined || (isRecord(value.layerImageSize) && typeof value.layerImageSize.width === "number" && typeof value.layerImageSize.height === "number"))
     && (value.attributes === undefined || isStringMap(value.attributes))
     && Array.isArray(value.children)
     && value.children.every((child) => isUiNode(child, depth + 1, budget));
@@ -77,6 +79,7 @@ function isUiSnapshot(value: unknown): value is UiSnapshot {
     && isNullableString(value.screenshotDataUrl)
     && isNullableString(value.error)
     && isNullableString(value.warning)
+    && (value.inspectionSource === undefined || value.inspectionSource === "uiautomator" || value.inspectionSource === "debug-view" || value.inspectionSource === "debug-qml")
     && (value.hierarchyDumpMode === undefined || value.hierarchyDumpMode === "full" || value.hierarchyDumpMode === "compressed")
     && (value.captureGeometry === undefined || isCaptureGeometry(value.captureGeometry));
 }

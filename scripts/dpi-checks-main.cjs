@@ -13,7 +13,6 @@ const output = join(project, ".benchmarks", "dpi-checks");
 mkdirSync(output, { recursive: true });
 const profile = mkdtempSync(join(output, "electron-profile-"));
 app.setPath("userData", profile);
-app.commandLine.appendSwitch("force-device-scale-factor", String(scaleFactor));
 app.disableHardwareAcceleration();
 
 const deadline = setTimeout(() => {

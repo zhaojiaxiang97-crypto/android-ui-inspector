@@ -12,7 +12,7 @@ delete environment.ELECTRON_RUN_AS_NODE;
 let failed = false;
 for (const factor of factors) {
   console.log(`DPI proxy check at ${factor * 100}%`);
-  const child = spawn(require("electron"), [main, `--scale-factor=${factor}`], {
+  const child = spawn(require("electron"), [`--force-device-scale-factor=${factor}`, main, `--scale-factor=${factor}`], {
     cwd: project,
     env: environment,
     stdio: "inherit",
