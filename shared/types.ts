@@ -2,6 +2,7 @@ export type DeviceInfo = {
   serial: string;
   state: string;
   model: string | null;
+  androidVersion: string | null;
   product: string | null;
   transportId: string | null;
 };

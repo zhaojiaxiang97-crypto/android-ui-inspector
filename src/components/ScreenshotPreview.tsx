@@ -255,6 +255,11 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
   function selectAtPoint(event: PointerEvent<HTMLDivElement>) {
     const image = imageRef.current;
     if (event.button !== 0 || !event.isPrimary || !enabled || !size || !image || !image.complete || !image.naturalWidth) return;
+    // The WebGL layer canvas intentionally fans planes beyond the source image
+    // while orbiting. Do not let that visual extension turn padding or browser
+    // chrome into a selectable Android node.
+    const point = clientToScreen(event.clientX, event.clientY, image.getBoundingClientRect(), size);
+    if (!point) return;
     if (viewMode === "layers3d") {
       const layer = layerSceneRef.current?.pick(event.clientX, event.clientY);
       if (layer) {
@@ -264,8 +269,7 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
       }
     }
     if (viewMode === "layers3d" && (event.target as HTMLElement).closest("[data-layer-node-id]")) return;
-    const point = clientToScreen(event.clientX, event.clientY, image.getBoundingClientRect(), size);
-    const node = point ? findNodeAtPoint(root, point.x, point.y, size) : null;
+    const node = findNodeAtPoint(root, point.x, point.y, size);
     if (node) onSelect(node);
   }
 
@@ -361,19 +365,24 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
         <button className="zoom-reset" type="button" onClick={resetView} disabled={!size}>重置</button>
       </div>
       {viewMode === "layers3d" && (
-        <div className="layer-options" aria-label="3D 层级视图参数">
-          <label className="layer-gap-label">
-            <span>层间距 {camera.layerGap}px</span>
-            <input type="range" min="24" max="128" step="8" value={camera.layerGap} onChange={(event) => commitCamera({ ...cameraRef.current, layerGap: Number(event.target.value) })} aria-label="3D 层间距" />
-          </label>
-          <label className="layer-perspective-label">
-            <span>视距 {camera.distance}px</span>
-            <input type="range" min="720" max="1800" step="40" value={camera.distance} onChange={(event) => commitCamera({ ...cameraRef.current, distance: Number(event.target.value) })} aria-label="3D 相机视距" />
-          </label>
-          <span className="orbit-label" aria-hidden="true">Orbit</span>
-          <span className="orbit-readout" aria-live="polite">Yaw {Math.round(camera.azimuth)}° · Pitch {Math.round(camera.elevation)}°</span>
-          <span className="window-stack-label" title="截图中的全部可见层">全量展开总览</span>
-        </div>
+        <details className="layer-settings">
+          <summary aria-label="3D 层级设置">⋯</summary>
+          <div className="layer-settings-body">
+            <div className="layer-options" aria-label="3D 层级视图参数">
+              <label className="layer-gap-label">
+                <span>层间距 {camera.layerGap}px</span>
+                <input type="range" min="24" max="128" step="8" value={camera.layerGap} onChange={(event) => commitCamera({ ...cameraRef.current, layerGap: Number(event.target.value) })} aria-label="3D 层间距" />
+              </label>
+              <label className="layer-perspective-label">
+                <span>视距 {camera.distance}px</span>
+                <input type="range" min="720" max="1800" step="40" value={camera.distance} onChange={(event) => commitCamera({ ...cameraRef.current, distance: Number(event.target.value) })} aria-label="3D 相机视距" />
+              </label>
+              <span className="orbit-label" aria-hidden="true">Orbit</span>
+              <span className="orbit-readout" aria-live="polite">Yaw {Math.round(camera.azimuth)}° · Pitch {Math.round(camera.elevation)}°</span>
+              <span className="window-stack-label" title="截图中的全部可见层">全量展开总览</span>
+            </div>
+          </div>
+        </details>
       )}
     </div>;
 

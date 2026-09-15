@@ -1,26 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import "./styles/tokens.css";
 import "./App.css";
 import type { AdbProbeResult, ExportFormat, StoredSnapshot, UiNode, UiSnapshot } from "../shared/types";
+import { homeStateIsConnected, homeStateIsError, resolveHomeState } from "../shared/device-state";
 import { filterTree, flattenNodes, nodeDisplayLabel } from "../shared/tree-utils";
+import { AppHeader } from "./components/AppHeader";
 import { UiTree } from "./components/UiTree";
 import { ScreenshotPreview } from "./components/ScreenshotPreview";
 import { NodePropertiesPanel } from "./components/NodePropertiesPanel";
-
-function formatCheckedAt(date: Date | null) {
-  if (!date) return "尚未检查";
-  return date.toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
-
-function stateLabel(state: string) {
-  if (state === "device") return "已授权";
-  if (state === "unauthorized") return "待授权";
-  if (state === "offline") return "离线";
-  return state;
-}
+import { DeviceHomeView } from "./components/DeviceHomeView";
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -277,9 +265,12 @@ function changeKindLabel(kind: SnapshotChange["kind"]) {
 function App() {
   const [probe, setProbe] = useState<AdbProbeResult | null>(null);
   const [checkedAt, setCheckedAt] = useState<Date | null>(null);
-  const [loading, setLoading] = useState(false);
+  // The first render happens before the probe effect runs. Start in loading so
+  // the home state never flashes an error while the bridge is being queried.
+  const [loading, setLoading] = useState(true);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [selectedSerial, setSelectedSerial] = useState<string | null>(null);
+  const [preferredSerial, setPreferredSerial] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<UiSnapshot | null>(null);
   const [selectedNode, setSelectedNode] = useState<UiNode | null>(null);
   const [inspectionLoading, setInspectionLoading] = useState(false);
@@ -326,6 +317,7 @@ function App() {
 
   const inspectDevice = useCallback(async (serial: string) => {
     setTreeSession((value) => value + 1);
+    setPreferredSerial(serial);
     setSelectedSerial(serial);
     setSnapshot(null);
     setSelectedNode(null);
@@ -474,7 +466,6 @@ function App() {
     [devices],
   );
   const hasAdb = Boolean(probe?.adbPath);
-  const statusTone = runtimeError || probe?.error ? "danger" : readyDevices.length ? "success" : "neutral";
   const detailNode = selectedNode ?? snapshot?.root ?? null;
   const virtualNodeCount = useMemo(
     () => snapshot?.root ? countVirtualAccessibilityNodes(snapshot.root) : 0,
@@ -635,6 +626,7 @@ function App() {
 
   const viewSavedSnapshot = useCallback((entry: SavedSnapshot) => {
     setTreeSession((value) => value + 1);
+    setPreferredSerial(entry.snapshot.serial);
     setSelectedSerial(entry.snapshot.serial);
     setSnapshot(entry.snapshot);
     setSelectedNode(entry.snapshot.root);
@@ -652,32 +644,28 @@ function App() {
   }, []);
 
   const selectDevice = useCallback((serial: string) => {
-    setSelectedSerial(serial || null);
-    setSnapshot(null);
-    setSelectedNode(null);
-    setTreeExpandedIds(new Set());
-    setInspectionError(null);
-    setCopyStatus(null);
-    setExportStatus(null);
-    setTreeQuery("");
-    setInteractiveOnly(false);
-    setIdentifiedOnly(false);
-    setSnapshotStatus(null);
-    setLatestDiff(null);
-    setDiffExpanded(false);
-  }, []);
+    const nextSerial = serial || null;
+    setPreferredSerial(nextSerial);
+    if (selectedSerial && nextSerial) {
+      void inspectDevice(nextSerial);
+      return;
+    }
+    if (selectedSerial && !nextSerial) {
+      closeInspector();
+    }
+  }, [closeInspector, inspectDevice, selectedSerial]);
 
-  const toolbarSerial = selectedSerial ?? readyDevices[0]?.serial ?? "";
-  const toolbarDevice = devices.find((device) => device.serial === toolbarSerial) ?? null;
-  const primaryDevice = toolbarDevice ?? devices[0] ?? null;
-  const homeConnectionLabel = runtimeError || probe?.error
-    ? "连接异常"
-    : primaryDevice?.state === "device"
-      ? "已授权，可开始检查"
-      : primaryDevice
-        ? stateLabel(primaryDevice.state)
-        : "等待设备连接";
+  const preferredDevice = preferredSerial ? devices.find((device) => device.serial === preferredSerial) ?? null : null;
+  const selectedDevice = selectedSerial ? devices.find((device) => device.serial === selectedSerial) ?? null : null;
+  const defaultDevice = readyDevices[0] ?? devices[0] ?? null;
+  const toolbarDevice = selectedDevice ?? preferredDevice ?? defaultDevice;
+  const toolbarSerial = toolbarDevice?.serial ?? selectedSerial ?? preferredSerial ?? "";
+  const homeState = resolveHomeState({ loading, runtimeError, probe, selectedDevice: toolbarDevice });
+  const statusTone = homeStateIsError(homeState) ? "danger" : homeStateIsConnected(homeState) ? "success" : "neutral";
   const captureSerial = toolbarDevice?.state === "device" ? toolbarDevice.serial : null;
+  const homeDevice = homeStateIsConnected(homeState)
+    ? toolbarDevice?.state === "device" ? toolbarDevice : readyDevices[0] ?? null
+    : null;
   const captureSelected = useCallback(() => {
     if (captureSerial) void inspectDevice(captureSerial);
   }, [captureSerial, inspectDevice]);
@@ -685,180 +673,40 @@ function App() {
 
   return (
     <div className={`app-shell ${selectedSerial ? "inspection-active" : ""}`}>
-      <header className="topbar">
-        <div className="brand-lockup">
-          <div className="brand-mark" aria-hidden="true">
-            <span />
-            <span />
-          </div>
-          <div>
-            <p className="eyebrow">ANDROID TOOLING</p>
-            <h1>Android UI Inspector</h1>
-          </div>
-          <span className="alpha-badge">ALPHA</span>
-        </div>
-
-        <div className="topbar-meta inspector-toolbar">
-          {selectedSerial && (
-            <button className="toolbar-back-button" type="button" onClick={closeInspector} aria-label="返回设备列表">
-              ‹ 返回
-            </button>
-          )}
-          <div className="toolbar-device-control">
-            <span className={`connection-dot ${statusTone}`} aria-hidden="true" />
-            <label className="toolbar-label" htmlFor="device-select">目标设备</label>
-            <select
-              id="device-select"
-              className="device-select"
-              aria-label="选择 Android 设备"
-              value={toolbarSerial}
-              onChange={(event) => selectDevice(event.currentTarget.value)}
-            >
-              <option value="">{devices.length > 0 ? "选择设备" : "未发现设备"}</option>
-              {devices.map((device) => (
-                <option
-                  key={device.serial}
-                  value={device.serial}
-                  data-device-state={device.state}
-                  className="device-option"
-                >
-                  {device.model ?? "Android device"} · {stateLabel(device.state)}
-                </option>
-              ))}
-              {selectedSerial && !toolbarDevice && (
-                <option value={selectedSerial} data-device-state="history">{selectedSerial} · 历史快照</option>
-              )}
-            </select>
-            {toolbarDevice && <span className={`device-state toolbar-device-state ${toolbarDevice.state}`}>{stateLabel(toolbarDevice.state)}</span>}
-          </div>
-          <span className={`toolbar-status ${statusTone}`} title={runtimeError || probe?.error || undefined}>
-            {runtimeError || probe?.error ? "连接异常" : captureSerial ? "设备已连接" : "等待设备"}
-          </span>
-          <span className={`adb-badge ${hasAdb ? "ready" : "missing"}`}>ADB {hasAdb ? "READY" : "MISSING"}</span>
-          <span className="toolbar-checked">{formatCheckedAt(checkedAt)}</span>
-          <button
-            className="refresh-button"
-            type="button"
-            onClick={() => void refreshDevices()}
-            disabled={loading}
-          >
-            <span className={loading ? "refresh-icon spinning" : "refresh-icon"}>↻</span>
-            {loading ? "检查中" : "刷新设备"}
-          </button>
-          <button
-            className="capture-button"
-            type="button"
-            onClick={captureSelected}
-            disabled={!captureSerial || inspectionLoading || loading}
-          >
-            <span className={inspectionLoading ? "capture-icon spinning" : "capture-icon"} aria-hidden="true">●</span>
-            {inspectionLoading ? "采集中…" : "采集截图"}
-          </button>
-          <label className="topbar-search" htmlFor="global-node-search">
-            <span aria-hidden="true">⌕</span>
-            <input
-              id="global-node-search"
-              type="search"
-              value={treeQuery}
-              onChange={(event) => setTreeQuery(event.target.value)}
-              placeholder="搜索节点…"
-              aria-label="搜索 UI 节点"
-            />
-            <kbd>⌘ K</kbd>
-          </label>
-        </div>
-        <div className="scene-toolbar-host" ref={setSceneToolbarHost} />
-      </header>
+      <AppHeader
+        inspectionActive={Boolean(selectedSerial)}
+        selectedSerial={selectedSerial}
+        devices={devices}
+        toolbarSerial={toolbarSerial}
+        toolbarDevice={toolbarDevice}
+        statusTone={statusTone}
+        runtimeError={runtimeError}
+        probeError={probe?.error ?? null}
+        hasAdb={hasAdb}
+        checkedAt={checkedAt}
+        loading={loading}
+        inspectionLoading={inspectionLoading}
+        captureSerial={captureSerial}
+        treeQuery={treeQuery}
+        onBack={closeInspector}
+        onSelectDevice={selectDevice}
+        onRefresh={() => void refreshDevices()}
+        onCapture={captureSelected}
+        onSearchChange={setTreeQuery}
+        setSceneToolbarHost={setSceneToolbarHost}
+      />
 
       <main className="workspace">
-        <section className="home-view" aria-label="设备连接">
-          <div className="home-layout">
-            <section className="home-card connected-device-card">
-              <div className="home-card-heading">
-                <div>
-                  <p className="home-kicker">CONNECTED DEVICE</p>
-                  <h2>已连接设备</h2>
-                </div>
-                <span className={`home-state-pill ${statusTone}`}>
-                  <span className="home-status-dot" aria-hidden="true" />
-                  {homeConnectionLabel}
-                </span>
-              </div>
-
-              {primaryDevice ? (
-                <>
-                  <div className="home-device-hero">
-                    <div className="home-phone-illustration" aria-hidden="true">
-                      <div className="home-phone-speaker" />
-                      <div className="home-phone-screen">
-                        <span />
-                        <span />
-                        <span />
-                      </div>
-                    </div>
-                    <div className="home-device-copy">
-                      <h3>{primaryDevice.model ?? "Android device"}</h3>
-                      <code>{primaryDevice.serial}</code>
-                      <p>{primaryDevice.product ?? "USB / ADB target"}</p>
-                      <div className="home-device-status">
-                        <span className={`home-status-dot ${primaryDevice.state === "device" ? "ready" : ""}`} aria-hidden="true" />
-                        <strong>{stateLabel(primaryDevice.state)}</strong>
-                        <span>{hasAdb ? "ADB READY" : "ADB MISSING"}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="home-device-footer">
-                    <div>
-                      <strong>{readyDevices.length > 0 ? "准备开始检查 UI" : "等待设备授权"}</strong>
-                      <p>{readyDevices.length > 0 ? "使用顶部的“采集截图”读取当前页面。" : "请在手机上允许这台电脑进行 USB 调试。"}</p>
-                    </div>
-                    <span className="home-device-count">{devices.length} 台设备</span>
-                  </div>
-                </>
-              ) : (
-                <div className="home-empty-state">
-                  <div className="home-phone-illustration empty" aria-hidden="true">
-                    <div className="home-phone-screen"><span /><span /><span /></div>
-                  </div>
-                  <h3>{runtimeError || probe?.error ? "ADB 尚未准备好" : "等待 Android 设备"}</h3>
-                  <p>{runtimeError || probe?.error ? "请确认 Platform-Tools 已安装后重新检查。" : "连接 USB 并开启 USB 调试，应用会自动识别设备。"}</p>
-                  <button className="home-secondary-action" type="button" onClick={() => void refreshDevices()} disabled={loading}>
-                    {loading ? "检查中…" : "重新检查设备"}
-                  </button>
-                </div>
-              )}
-            </section>
-
-            <aside className="home-card quick-start-card">
-              <div className="home-card-heading">
-                <div>
-                  <p className="home-kicker">QUICK START</p>
-                  <h2>开始之前</h2>
-                </div>
-                <span className="home-step-count">01 — 03</span>
-              </div>
-              <ol className="home-steps">
-                <li>
-                  <span className="home-step-number">01</span>
-                  <div><strong>打开开发者选项</strong><p>设置 → 关于手机 → 连续点击版本号</p></div>
-                </li>
-                <li>
-                  <span className="home-step-number">02</span>
-                  <div><strong>开启 USB 调试</strong><p>在开发者选项中打开 USB 调试</p></div>
-                </li>
-                <li>
-                  <span className="home-step-number">03</span>
-                  <div><strong>允许这台电脑</strong><p>在手机弹窗中确认 RSA 授权</p></div>
-                </li>
-              </ol>
-              <div className="home-safety-note">
-                <span aria-hidden="true">i</span>
-                <p>当前版本只读取设备信息，不会修改手机数据。</p>
-              </div>
-            </aside>
-          </div>
-          <p className="home-last-checked">最后检查：{formatCheckedAt(checkedAt)}</p>
-        </section>
+        <DeviceHomeView
+          state={homeState}
+          device={homeDevice}
+          devices={devices}
+          loading={loading}
+          inspectionLoading={inspectionLoading}
+          onStart={captureSelected}
+          onRefresh={() => void refreshDevices()}
+          onSelectDevice={selectDevice}
+        />
         {selectedSerial && (
           <section className="panel inspector-panel">
             <div className="inspector-heading">

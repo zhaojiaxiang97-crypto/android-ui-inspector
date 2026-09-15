@@ -13,11 +13,14 @@ android-ui-inspector/
 │  ├─ capture-display.ts     # 截图与显示元数据
 │  └─ snapshot-store.ts      # 本地快照历史
 ├─ src/                      # React renderer，只负责界面和交互
-│  ├─ App.tsx                 # 工作台状态、Toolbar 和左右主布局
-│  ├─ App.css                 # 明亮极简主题、响应式布局和交互状态样式
-│  └─ components/            # 截图预览、3D layer 和节点属性组件
+│  ├─ App.tsx                 # 工作台状态编排、检查会话和快照流程
+│  ├─ App.css                 # 检查工作台布局、组件外观和响应式交互样式
+│  ├─ styles/
+│  │  └─ tokens.css          # 深色参考主题的颜色、字体、间距和阴影 token
+│  └─ components/            # 首页/顶栏、截图预览、3D layer 和节点属性组件
 ├─ shared/                   # 主进程、renderer、测试共用的纯逻辑
 │  ├─ types.ts
+│  ├─ device-state.ts         # 首页连接状态纯函数
 │  ├─ tree-utils.ts
 │  ├─ visible-tree.ts
 │  ├─ screen-coordinates.ts
@@ -73,6 +76,8 @@ scripts/ ─────────────> 构建产物、测试页和 El
 - `tests/` 的 XML 和截图输入应脱敏；新增厂商差异时优先增加 fixture 和解析测试，不要把真实个人页面放进仓库。
 - `benchmarks/` 用于测量和回归，不承载产品功能；基准专用组件不要从 `src/` 反向引用。
 - `scripts/` 只放命令行入口或测试编排；可复用的业务逻辑应下沉到 `shared/` 或可测试的 Electron 模块。
+- 首页状态由 `shared/device-state.ts` 决策，`src/components/DeviceHomeView.tsx` 只负责状态呈现和动作回调；`src/components/AppHeader.tsx` 只负责品牌、设备上下文、顶栏操作和帮助入口。`App.tsx` 保留检查会话、快照和跨组件状态编排，不再承载首页/顶栏的大段 JSX。
+- 新的颜色、字体、圆角、间距和阴影必须先在 `src/styles/tokens.css` 增加或复用 token；`App.css` 负责布局与组件状态，历史样式清理完成前不得再新增同选择器的无说明覆盖。
 
 ## 新功能放置规则
 

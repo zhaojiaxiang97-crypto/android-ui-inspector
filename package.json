@@ -24,6 +24,7 @@
     "smoke:app": "bun run build && node scripts/app-smoke.mjs",
     "visual:baseline": "bun run build && bun scripts/visual-baseline.mjs",
     "visual:home": "bun run build && node scripts/home-visual-baseline.mjs",
+    "visual:home:states": "bun run build && node scripts/home-state-visual-baseline.mjs",
     "smoke:fixture-dpi": "bun run build && node scripts/fixture-dpi-smoke.mjs",
     "benchmark:tree": "bun run scripts/tree-benchmark.ts",
     "benchmark:layers": "bun run scripts/layer-benchmark.ts",

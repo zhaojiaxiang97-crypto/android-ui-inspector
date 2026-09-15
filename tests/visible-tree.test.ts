@@ -76,7 +76,7 @@ test("virtual ranges clamp empty, negative and stale bottom scroll offsets", () 
   assert.equal(treeWindow(3, -100, 450).top, 0);
   const top = treeWindow(25_000, 0, 450);
   assert.equal(top.start, 0);
-  assert.equal(top.end, 23);
+  assert.equal(top.end, 21);
   const bottom = treeWindow(25_000, 1_000_000, 450);
   assert.equal(bottom.end, 25_000);
   assert.equal(bottom.top, 25_000 * TREE_ROW_HEIGHT - 450);
@@ -98,7 +98,7 @@ test("every visible pixel has a mounted row at fractional offsets and viewport s
 
 test("row reveal scrolls minimally and clamps invalid or removed selections", () => {
   assert.equal(scrollToTreeRow(0, 1000, 1000, 320), 0);
-  assert.equal(scrollToTreeRow(999, 1000, 0, 320), 31_680);
+  assert.equal(scrollToTreeRow(999, 1000, 0, 320), 35_680);
   assert.equal(scrollToTreeRow(4, 1000, 0, 320), 0);
   assert.equal(scrollToTreeRow(5000, 1000, 0, 320), 0);
   assert.equal(scrollToTreeRow(-1, 2, 10_000, 320), 0);

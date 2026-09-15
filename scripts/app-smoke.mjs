@@ -14,13 +14,16 @@ const reducedMotion = process.argv.includes("--reduced-motion");
 const fixture = process.argv.includes("--fixture");
 const dragOutside = process.argv.includes("--drag-outside");
 const homeOnly = process.argv.includes("--home-only");
+const fixtureStateArgument = process.argv.find((value) => value.startsWith("--fixture-state="))?.slice("--fixture-state=".length);
+const fixtureState = fixtureStateArgument ?? "connected";
 const viewportArgument = process.argv.find((value) => value.startsWith("--viewport="))?.slice("--viewport=".length);
 const viewportMatch = viewportArgument?.match(/^(\d+)x(\d+)$/i);
 const requestedViewport = viewportMatch ? { width: Number(viewportMatch[1]), height: Number(viewportMatch[2]) } : null;
 const scaleArgument = process.argv.find((value) => value.startsWith("--scale-factor="))?.slice("--scale-factor=".length);
 const requestedScaleFactor = scaleArgument ? Number(scaleArgument) : null;
 const supportedOptions = ["--packaged", "--require-device", "--expect-landscape", "--reduced-motion", "--fixture", "--drag-outside", "--home-only"];
-if (process.argv.slice(2).some((value) => !supportedOptions.includes(value) && !value.startsWith("--viewport=") && !value.startsWith("--scale-factor="))) throw new Error("Supported options: --packaged --require-device --expect-landscape --reduced-motion --fixture --drag-outside --home-only --viewport=WxH --scale-factor=N");
+if (process.argv.slice(2).some((value) => !supportedOptions.includes(value) && !value.startsWith("--viewport=") && !value.startsWith("--scale-factor=") && !value.startsWith("--fixture-state="))) throw new Error("Supported options: --packaged --require-device --expect-landscape --reduced-motion --fixture --drag-outside --home-only --viewport=WxH --scale-factor=N --fixture-state=connected|loading|unauthorized|empty|adb-missing");
+if (!["connected", "loading", "unauthorized", "empty", "adb-missing"].includes(fixtureState)) throw new Error(`Invalid fixture state: ${fixtureState}`);
 if (viewportArgument && (!viewportMatch || requestedViewport.width < 640 || requestedViewport.height < 480)) throw new Error(`Invalid viewport: ${viewportArgument}`);
 if (requestedScaleFactor !== null && (!Number.isFinite(requestedScaleFactor) || requestedScaleFactor < 0.5 || requestedScaleFactor > 3)) throw new Error(`Invalid scale factor: ${scaleArgument}`);
 if (fixture && packaged) throw new Error("The visual fixture is available in development mode only");
@@ -30,7 +33,7 @@ const output = join(project, ".benchmarks", "app-smoke", new Date().toISOString(
 mkdirSync(output, { recursive: true });
 const executable = packaged ? join(project, "release/win-unpacked/Android UI Inspector.exe") : require("electron");
 const args = [
-  ...(fixture ? ["--visual-fixture"] : []),
+  ...(fixture ? ["--visual-fixture", `--visual-fixture-state=${fixtureState}`] : []),
   ...(requestedScaleFactor === null ? [] : [`--force-device-scale-factor=${requestedScaleFactor}`]),
   ...(requestedViewport ? [`--window-size=${requestedViewport.width + 16}x${requestedViewport.height + 65}`] : []),
   ...(packaged ? [] : [project]),
@@ -105,7 +108,7 @@ async function connect(url) {
 }
 
 let connection;
-const report = { generatedAt: new Date().toISOString(), packaged, fixture, homeOnly, reducedMotion, dragOutside, requestedViewport, requestedScaleFactor, success: false, checks: [] };
+const report = { generatedAt: new Date().toISOString(), packaged, fixture, fixtureState: fixture ? fixtureState : null, homeOnly, reducedMotion, dragOutside, requestedViewport, requestedScaleFactor, success: false, checks: [] };
 const recordCheck = (label) => { report.checks.push(label); console.log(`PASS: ${label}`); };
 try {
   await until(() => endpoint, "debugger startup");
@@ -148,10 +151,16 @@ try {
   }
   if (requestedScaleFactor !== null) assert.ok(Math.abs(runtime.devicePixelRatio - requestedScaleFactor) < 0.06, `Requested scale factor ${requestedScaleFactor} was not applied`);
   recordCheck("sandboxed React window and preload");
-  await until(() => evaluate("!document.querySelector('.refresh-button').disabled"), "initial device probe");
-  await evaluate("document.querySelector('.refresh-button').click()");
-  await until(() => evaluate("!document.querySelector('.refresh-button').disabled"), "device refresh");
-  recordCheck("device refresh button");
+  const loadingFixture = homeOnly && fixtureState === "loading";
+  if (loadingFixture) {
+    await delay(120);
+    recordCheck("initial loading state");
+  } else {
+    await until(() => evaluate("!document.querySelector('.refresh-button').disabled"), "initial device probe");
+    await evaluate("document.querySelector('.refresh-button').click()");
+    await until(() => evaluate("!document.querySelector('.refresh-button').disabled"), "device refresh");
+    recordCheck("device refresh button");
+  }
   const captureButtonCount = await evaluate("document.querySelectorAll('.topbar .capture-button').length");
   assert.equal(captureButtonCount, 1, "Expected exactly one screenshot capture button in the top toolbar");
   assert.equal(await evaluate("document.querySelectorAll('.inspect-button').length"), 0, "Legacy inline inspect button must not return");
@@ -182,35 +191,67 @@ try {
       return {
         topbar: box('.topbar'),
         view: box('.home-view'),
-        layout: box('.home-layout'),
-        connected: box('.connected-device-card'),
-        quickStart: box('.quick-start-card'),
-        heading: box('.home-card h2'),
-        step: box('.home-steps strong'),
+        state: box('.home-center-state'),
+        art: box('.home-device-art'),
+        heading: box('.home-center-state h2'),
+        platform: box('.home-device-platform'),
+        primaryAction: box('.home-primary-action'),
+        secondaryAction: box('.home-secondary-action'),
+        stateClass: document.querySelector('.home-center-state')?.className || '',
+        headingText: document.querySelector('.home-center-state h2')?.textContent?.trim() || '',
+        platformText: document.querySelector('.home-device-platform')?.textContent?.trim() || '',
+        primaryText: document.querySelector('.home-primary-action')?.textContent?.trim() || '',
+        secondaryText: document.querySelector('.home-secondary-action')?.textContent?.trim() || '',
+        help: box('.toolbar-help-button'),
         body: box('body'),
         oldHero: Boolean(document.querySelector('.hero-section')),
         oldMetrics: Boolean(document.querySelector('.metrics-grid')),
         oldStatus: Boolean(document.querySelector('.status-banner')),
         oldContentGrid: Boolean(document.querySelector('.content-grid')),
         captureButtons: document.querySelectorAll('.topbar .capture-button').length,
+        captureVisible: Boolean(document.querySelector('.topbar .capture-button')?.getClientRects().length),
         overflowX: document.documentElement.scrollWidth - innerWidth,
       };
     })()`);
-    assert.ok(homeState.view?.width > 0 && homeState.layout?.width > 0, "Minimal home layout is not visible");
-    assert.ok(homeState.connected?.width > 0 && homeState.quickStart?.width > 0, "Home cards are not visible");
-    assert.ok(Number.parseFloat(homeState.heading?.fontSize ?? "0") >= 24, "Home heading is still too small");
-    assert.ok(Number.parseFloat(homeState.step?.fontSize ?? "0") >= 15, "Quick-start typography is still too small");
+    assert.ok(homeState.view?.width > 0 && homeState.state?.width > 0, "Reference home state is not visible");
+    assert.ok(homeState.art?.width > 0 && homeState.primaryAction?.width > 0, "Home device art or primary action is missing");
+    assert.ok(homeState.help?.width > 0, "Home help affordance is missing");
+    assert.ok(Number.parseFloat(homeState.heading?.fontSize ?? "0") >= 28, "Home heading is still too small");
+    const expectedHomeState = fixtureState === "empty" ? "no-device" : fixtureState;
+    assert.ok(homeState.stateClass.includes(`state-${expectedHomeState}`), `Home state class does not expose ${expectedHomeState}`);
+    if (fixtureState === "connected") {
+      assert.ok(Number.parseFloat(homeState.platform?.fontSize ?? "0") >= 16, "Home supporting typography is still too small");
+      assert.equal(homeState.platformText, "Android 15", "Connected home did not expose the Android version");
+      assert.ok(homeState.secondaryAction?.width > 0, "Connected home switch-device action is missing");
+      assert.equal(homeState.secondaryText, "切换设备");
+      await evaluate("document.querySelector('.home-secondary-action').click()");
+      await until(() => evaluate("Boolean(document.querySelector('.home-device-switcher'))"), "home device switcher");
+      assert.ok((await evaluate("document.querySelectorAll('.home-device-option').length")) >= 1, "Home device switcher has no device option");
+      await evaluate("document.querySelector('.home-device-switcher-close').click()");
+      await until(() => evaluate("!document.querySelector('.home-device-switcher')"), "close home device switcher");
+    } else {
+      assert.equal(homeState.platform, null, "Empty home state should not render a stale Android version");
+      assert.equal(homeState.secondaryAction, null, "Empty home state should expose one primary recovery action");
+      assert.equal(homeState.primaryText, fixtureState === "loading" ? "检查中…" : "刷新设备");
+    }
     assert.ok((homeState.topbar?.height ?? 0) <= 100, "Home toolbar wrapped into an oversized header");
     assert.equal(homeState.oldHero, false, "Legacy hero block remains in the home DOM");
     assert.equal(homeState.oldMetrics, false, "Legacy metrics grid remains in the home DOM");
     assert.equal(homeState.oldStatus, false, "Legacy status banner remains in the home DOM");
     assert.equal(homeState.oldContentGrid, false, "Legacy content grid remains in the home DOM");
-    assert.equal(homeState.captureButtons, 1, "Home screen introduced a duplicate toolbar capture entry");
-    assert.ok(homeState.overflowX <= 1, "Minimal home layout introduces horizontal overflow");
+    assert.equal(homeState.captureButtons, 1, "Home screen capture hook should remain unique");
+    assert.equal(homeState.captureVisible, false, "Home screen should keep the inspection capture control out of the visual toolbar");
+    assert.ok(homeState.overflowX <= 1, "Reference home state introduces horizontal overflow");
+    await evaluate("document.querySelector('.toolbar-help-button').click()");
+    const helpText = await evaluate("document.querySelector('.toolbar-help-popover')?.textContent?.trim() || ''");
+    assert.match(helpText, /快速开始/, "Home help popover did not open");
+    await evaluate("document.querySelector('.toolbar-help-button').click()");
+    assert.equal(await evaluate("Boolean(document.querySelector('.toolbar-help-popover'))"), false, "Home help popover did not close");
     report.homeLayout = homeState;
     const homeScreenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
     writeFileSync(join(output, "home.png"), Buffer.from(homeScreenshot.data, "base64"));
-    recordCheck("minimal home layout keeps two readable cards and one toolbar capture action");
+    recordCheck("reference home state keeps one readable device action and no visual toolbar clutter");
+    recordCheck("home help affordance opens and closes a readable popover");
   } else if (deviceCount > 0) {
     await evaluate(`(() => {
       const select = document.querySelector('.device-select');
@@ -357,15 +398,15 @@ try {
         };
       })()`);
       report.workspaceLayout = workspaceLayout;
-      assert.ok(workspaceLayout.frame?.height >= 250, "Screenshot viewport is too short for the light workspace layout");
-      assert.ok(workspaceLayout.hierarchy?.width >= 320, "Hierarchy rail is too narrow for class and resource labels");
+      assert.ok(workspaceLayout.frame?.height >= 250, "Screenshot viewport is too short for the reference workspace layout");
+      assert.ok(workspaceLayout.hierarchy?.width >= 280, "Hierarchy rail is too narrow for class and resource labels");
       assert.ok(workspaceLayout.details?.height >= 200, "Node properties panel is not visible in the initial viewport");
       assert.ok(workspaceLayout.properties?.width > 0 && workspaceLayout.properties?.height > 0, "Node property columns have no visible layout box");
       assert.ok(workspaceLayout.grid?.width > 0 && workspaceLayout.gizmo?.width > 0, "3D viewport decorations are missing");
-      assert.ok(workspaceLayout.windowStack?.width > 0, "3D current-window label is missing");
+      assert.ok(workspaceLayout.windowStack?.width > 0, "3D low-frequency options are missing from the overflow menu");
       assert.ok(workspaceLayout.toolbarHost?.height > 0, "3D view toolbar did not move into the top bar");
       assert.ok(workspaceLayout.toolbar?.bottom <= workspaceLayout.preview?.top + 1, "3D view toolbar still occupies the preview area");
-      if (workspaceLayout.viewport.width >= 1100) assert.ok(workspaceLayout.toolbar?.height <= 56, "Wide inspector toolbar wrapped unexpectedly");
+      if (workspaceLayout.viewport.width >= 1100) assert.ok(workspaceLayout.toolbar?.height <= 80, "Wide inspector toolbar wrapped unexpectedly");
       assert.ok(workspaceLayout.documentOverflowX <= 1, "Inspector layout introduces horizontal document overflow");
       const pivotLayout = await evaluate(`(() => {
         const canvas = document.querySelector('.layer-webgl-canvas');
@@ -390,7 +431,7 @@ try {
       }
       report.layerState = layerState;
       recordCheck("tree selection opens 3D layer scene and highlights selected plane");
-      recordCheck("light workspace layout keeps canvas, properties and 3D viewport decorations visible");
+      recordCheck("dark reference workspace keeps canvas, properties and 3D viewport decorations visible");
       await delay(250);
       const resizeDistance = 120;
       const detailsResize = await evaluate(`(() => {
@@ -559,15 +600,16 @@ try {
         await delay(16);
         await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: dragPoints.end.x, y: dragPoints.end.y, button: "none", buttons: 1, modifiers: 0 });
         await delay(32);
-        const liveDrag = await evaluate(`(() => {
+        const liveDrag = await until(() => evaluate(`(() => {
           const frame = document.querySelector('.screenshot-frame');
           const canvas = document.querySelector('.layer-webgl-canvas');
-          return {
+          const state = {
             dragging: frame?.classList.contains('is-3d-dragging'),
             renderer: canvas?.dataset.layerRenderer,
             renderVersion: Number(canvas?.dataset.layerRenderVersion || 0),
           };
-        })()`);
+          return state.dragging && state.renderer === 'webgl' && state.renderVersion > ${JSON.stringify(renderBeforeDrag)} ? state : null;
+        })()`), "3D live redraw", 5_000);
         assert.equal(liveDrag.dragging, true, "3D drag did not enter its lightweight rendering state");
         assert.equal(liveDrag.renderer, "webgl", "3D drag left the WebGL renderer");
         assert.ok(liveDrag.renderVersion > renderBeforeDrag, "3D drag did not redraw the WebGL scene");
@@ -686,7 +728,30 @@ try {
       return row.top >= frame.top - 1 && row.bottom <= frame.bottom + 1;
     })()`);
     await clickScreenshot();
-    await until(revealed, "screenshot selection reveals its tree row");
+    try {
+      await until(revealed, "screenshot selection reveals its tree row");
+    } catch (error) {
+      const revealDiagnostics = await evaluate(`(() => {
+        const tree = document.querySelector('.ui-tree-scroll');
+        const selected = document.querySelector('.tree-row.selected');
+        const detailId = document.querySelector('.node-id')?.textContent || null;
+        const rect = (element) => element ? (() => { const value = element.getBoundingClientRect(); return { left: value.left, top: value.top, right: value.right, bottom: value.bottom, width: value.width, height: value.height }; })() : null;
+        return {
+          detailId,
+          selectedTreeId: selected?.dataset.treeId || null,
+          selectedRect: rect(selected),
+          treeRect: rect(tree),
+          treeScrollTop: tree?.scrollTop ?? null,
+          treeScrollHeight: tree?.scrollHeight ?? null,
+          treeRowCount: tree?.dataset.rowCount ?? null,
+          treeWindow: { start: tree?.dataset.windowStart ?? null, end: tree?.dataset.windowEnd ?? null },
+          mountedTreeIds: Array.from(document.querySelectorAll('.tree-row')).map((row) => row.dataset.treeId).slice(0, 24),
+          point: ${JSON.stringify(point)},
+          imageRect: rect(document.querySelector('.screenshot-stage img')),
+        };
+      })()`);
+      throw new Error(`${error.message}; screenshot reveal diagnostics=${JSON.stringify(revealDiagnostics)}`);
+    }
     await delay(150);
     const bounds = await evaluate("Array.from(document.querySelectorAll('.node-details dl div')).find(row => row.querySelector('dt').textContent === 'bounds')?.querySelector('dd').textContent");
     const values = bounds?.match(/-?\d+/g)?.map(Number);

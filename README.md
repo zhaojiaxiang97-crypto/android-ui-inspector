@@ -19,8 +19,8 @@
 - 点击有有效 bounds 的树节点后，可在右侧进入基于 hierarchy 深度的 CSS 3D 层级展开视图；支持父子范围、层间距、breadcrumb、360°球面相机、旋转/平移和选中层同步。
 - 截图支持 25%–1600% 缩放、50/100/200/400/800/1600 快速倍率、适应窗口、重置、Ctrl/⌘+滚轮锚点缩放，以及空格/Shift/中键平移和 3D Alt/右键环绕旋转。
 - 选中控件后显示 UIAutomator 常用属性、screen px 几何尺寸、父级内偏移和 CSS 风格盒模型；原生 Android 无法提供的 padding、border、margin 会明确标记为不可用，不伪造 CSS 数值。
-- 采用明亮极简工作台布局：Toolbar 集中设备与采集操作，左侧保留 hierarchy 树，右侧统一承载 2D/3D 画布、缩放控制和节点属性；顶部搜索可用 `Ctrl/⌘+K` 快速聚焦。
-- 首页采用极简双卡片布局：左侧聚焦当前设备，右侧提供三步连接指引；设备采集动作只保留在顶部 Toolbar，主标题、正文和属性文字使用更易读的系统字体与字号层级。
+- 采用深色极简工作台布局：Toolbar 集中设备与采集操作，左侧保留 hierarchy 树，右侧统一承载 2D/3D 画布、缩放控制和节点属性；顶部搜索可用 `Ctrl/⌘+K` 快速聚焦。
+- 首页采用参考图风格的单一居中状态容器，覆盖加载、ADB 缺失、无设备、待授权和已连接状态；设备采集动作只保留在顶部 Toolbar，首页“切换设备”使用轻量设备选择层。
 - 提供树逻辑、真实 DOM、坐标、启动和实体设备冒烟测试，以及 Windows electron-builder 打包链路。
 
 ## 重要边界
@@ -96,6 +96,7 @@ bun run start
 | `bun run test:dpi` | Electron 100%/125%/150% device-scale-factor 代理矩阵 | `.benchmarks/dpi-checks/` |
 | `bun run visual:baseline` | 固定脱敏 hierarchy 在 1264×816/1440×900/1587×1000 生成视觉基线 | `.benchmarks/visual-baseline/` |
 | `bun run visual:home` | 首页极简布局在 1264×816/1440×900/1587×1000 生成视觉基线 | `.benchmarks/home-visual-baseline/` |
+| `bun run visual:home:states` | 首页 connected/loading/unauthorized/empty/adb-missing 五状态视觉基线 | `.benchmarks/home-state-visual-baseline/` |
 | `bun run smoke:fixture-dpi` | 固定 fixture 的 100%/125%/150% 完整应用与窗口外拖动回归 | `.benchmarks/fixture-dpi-smoke/` |
 | `bun run benchmark:tree` | 纯逻辑大树基准 | `.benchmarks/tree-*.json` |
 | `bun run benchmark:layers` | 3D LayerRecord 大树布局基准 | `.benchmarks/layer-layout.json` |
@@ -117,7 +118,7 @@ bun run test:coordinates
 bun run test:dpi
 ```
 
-当前已验证的基线是：56 项单元测试通过；树 UI 回归覆盖旧基线和虚拟树行为；坐标回归在 100%/125%/150% 页面缩放下共覆盖 75 组，并包含高倍率截图反查；DPI 代理回归在 devicePixelRatio 1/1.25/1.5 下各覆盖 25 组。3D LayerRecord 基准覆盖 1,000～25,000 节点，性能方法和结果见 [树性能报告](docs/TREE_PERFORMANCE.md)，坐标边界见 [截图坐标验收](docs/SCREEN_COORDINATES.md)。
+当前已验证的基线是：66 项单元测试通过；树 UI 回归覆盖旧基线和虚拟树行为；坐标回归在 100%/125%/150% 页面缩放下共覆盖 75 组，并包含高倍率截图反查；DPI 代理回归在 devicePixelRatio 1/1.25/1.5 下各覆盖 25 组。3D LayerRecord 基准覆盖 1,000～25,000 节点，性能方法和结果见 [树性能报告](docs/TREE_PERFORMANCE.md)，坐标边界见 [截图坐标验收](docs/SCREEN_COORDINATES.md)。
 
 连接授权手机后，运行完整 Windows 冒烟：
 
@@ -135,7 +136,7 @@ node scripts/app-smoke.mjs --packaged --require-device
 
 `bun run test:dpi` 会用独立 Electron 进程依次注入 `force-device-scale-factor=1/1.25/1.5`，复用生产 `ScreenshotPreview` 坐标 harness，并断言 `devicePixelRatio`、布局框和反查矩阵。它是可重复的 DPI 代理，不等价于 Windows 设置里的系统缩放、多显示器 Per-Monitor DPI 或实体设备显示输出。
 
-本轮首页设计稿：[main-interface-redesign-v2.png](docs/design/main-interface-redesign-v2.png)。它是视觉参考资产，实际布局由 `src/App.tsx` 和 `src/App.css` 实现。
+本轮首页设计稿：[main-interface-redesign-v2.png](docs/design/main-interface-redesign-v2.png)。它是视觉参考资产；实际布局由 `src/components/DeviceHomeView.tsx`、`src/components/AppHeader.tsx`、`src/styles/tokens.css` 和 `src/App.css` 实现。
 
 ## 打包
 
@@ -176,7 +177,7 @@ dist*/release/  构建生成目录，不手动编辑、不提交
 
 更详细的职责、依赖方向和新文件放置规则见 [开发目录约定](docs/DEVELOPMENT_STRUCTURE.md)。核心原则是：renderer 只能通过 preload 白名单访问桌面能力；主进程校验 IPC 输入；共享算法保持纯 TypeScript；测试 fixture 必须脱敏；生成产物不得回写源码目录。
 
-本轮 Windows 版视觉对齐改造已完成；固定脱敏 fixture、Windows OS DPI、窗口外拖动以及 macOS/Linux 原生打包等环境验收项仍按计划文档逐步补齐。差距清单、目标布局、实施记录和验收标准见 [UI 设计稿对齐改造计划](docs/UI_REDESIGN_REFACTOR_PLAN.md)。
+本轮 Windows 版视觉重构已完成主要代码和真机回归；固定脱敏 fixture、Windows OS DPI、多显示器以及 macOS/Linux 原生打包等环境验收项仍按计划文档逐步补齐。差距清单、目标布局、实施记录和验收标准见 [UI 设计稿对齐改造计划](docs/UI_REDESIGN_REFACTOR_PLAN.md)。
 
 ## 贡献流程
 

@@ -153,7 +153,7 @@ function parseDeviceLine(line: string): DeviceInfo | null {
     if (key === "transport_id") transportId = value;
   }
 
-  return { serial, state, model, product, transportId };
+  return { serial, state, model, androidVersion: null, product, transportId };
 }
 
 function attributeValue(raw: XmlNode, key: string) {
@@ -265,6 +265,19 @@ async function readDisplayFrame(adbPath: string, serial: string) {
   }
 }
 
+async function readAndroidVersion(adbPath: string, serial: string) {
+  try {
+    const result = await runCommand(adbPath, ["-s", serial, "shell", "getprop", "ro.build.version.release"], 5_000);
+    if (result.code !== 0) return null;
+    const value = result.stdout.toString("utf8").trim();
+    return value || null;
+  } catch {
+    // Version is display metadata. A slow or restricted getprop must not make
+    // an otherwise usable device disappear from the connection screen.
+    return null;
+  }
+}
+
 function countNodes(node: UiNode): number {
   let count = 0;
   const pending = [node];
@@ -318,14 +331,19 @@ export async function probeAdb(): Promise<AdbProbeResult> {
       };
     }
 
+    const devices = devicesResult.stdout
+      .toString("utf8")
+      .split(/\r?\n/)
+      .map(parseDeviceLine)
+      .filter((device): device is DeviceInfo => device !== null);
+    const enrichedDevices = await Promise.all(devices.map(async (device) => device.state === "device"
+      ? { ...device, androidVersion: await readAndroidVersion(adbPath, device.serial) }
+      : device));
+
     return {
       adbPath,
       adbVersion,
-      devices: devicesResult.stdout
-        .toString("utf8")
-        .split(/\r?\n/)
-        .map(parseDeviceLine)
-        .filter((device): device is DeviceInfo => device !== null),
+      devices: enrichedDevices,
       error: null,
     };
   } catch (error) {

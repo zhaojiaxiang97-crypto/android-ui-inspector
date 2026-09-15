@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu } from "electron";
 import type { SaveDialogOptions } from "electron";
 import { writeFile } from "node:fs/promises";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
@@ -9,6 +9,15 @@ import type { DeviceInfo, ExportFormat, ExportSnapshotRequest, ExportSnapshotRes
 
 const rendererUrl = process.env.ELECTRON_RENDERER_URL;
 const visualFixtureMode = process.argv.includes("--visual-fixture");
+type VisualFixtureState = "connected" | "loading" | "unauthorized" | "empty" | "adb-missing";
+
+function requestedFixtureState(): VisualFixtureState {
+  const value = process.argv.find((argument) => argument.startsWith("--visual-fixture-state="))?.slice("--visual-fixture-state=".length);
+  if (value === "loading" || value === "unauthorized" || value === "empty" || value === "adb-missing") return value;
+  return "connected";
+}
+
+const visualFixtureState = requestedFixtureState();
 let mainWindow: BrowserWindow | null = null;
 let quitting = false;
 
@@ -32,18 +41,32 @@ function countNodes(node: UiNode | null) {
   return count;
 }
 
-function fixtureProbe() {
+async function fixtureProbe() {
+  if (visualFixtureState === "loading") {
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+  }
+
+  if (visualFixtureState === "adb-missing") {
+    return {
+      adbPath: null,
+      adbVersion: null,
+      devices: [],
+      error: "未找到 ADB。请安装 Android SDK Platform-Tools。",
+    };
+  }
+
   const device: DeviceInfo = {
     serial: "visual-fixture",
-    state: "device",
+    state: visualFixtureState === "unauthorized" ? "unauthorized" : "device",
     model: "Fixture Pixel",
+    androidVersion: "15",
     product: "android-ui-inspector-fixture",
     transportId: null,
   };
   return {
     adbPath: "visual-fixture",
     adbVersion: "Android Debug Bridge visual fixture",
-    devices: [device],
+    devices: visualFixtureState === "empty" ? [] : [device],
     error: null,
   };
 }
@@ -81,7 +104,7 @@ function createWindow() {
     minWidth: 960,
     minHeight: 700,
     title: "Android UI Inspector",
-    backgroundColor: "#f7fafb",
+    backgroundColor: "#111419",
     show: false,
     webPreferences: {
       // Resolve at runtime: Bun may inline the source directory for __dirname.
@@ -209,6 +232,10 @@ ipcMain.handle("save-snapshot", (_event, input: unknown) => saveSnapshot(input))
 ipcMain.handle("clear-snapshots", () => clearSnapshots());
 
 app.whenReady().then(() => {
+  // Keep the native title bar/window controls for reliable desktop behavior,
+  // but remove the unused default application menu on Windows/Linux so it
+  // does not create a second visual toolbar above the reference shell.
+  if (process.platform !== "darwin") Menu.setApplicationMenu(null);
   createWindow();
 
   app.on("activate", () => {
