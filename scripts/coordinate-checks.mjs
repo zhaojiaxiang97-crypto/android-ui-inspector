@@ -8,6 +8,9 @@ require("./prepare-windows-runtime.cjs").prepareWindowsRuntime();
 const project = fileURLToPath(new URL("../", import.meta.url));
 await build({ configFile: false, root: project, define: { "process.env.NODE_ENV": JSON.stringify("production") },
   build: { outDir: ".benchmarks/coordinates", emptyOutDir: false, lib: { entry: fileURLToPath(new URL("../benchmarks/coordinates-entry.tsx", import.meta.url)), name: "CoordinateChecks", formats: ["iife"], fileName: () => "renderer.js", cssFileName: "style" } } });
+await build({ configFile: false, root: project, build: { outDir: ".benchmarks/coordinates", emptyOutDir: false,
+  lib: { entry: fileURLToPath(new URL("../tests/layer-images-electron.ts", import.meta.url)), formats: ["cjs"], fileName: () => "layer-images.cjs" },
+  rollupOptions: { external: [/^node:/, "electron"] } } });
 const environment = { ...process.env };
 delete environment.ELECTRON_RUN_AS_NODE;
 const child = spawn(require("electron"), [fileURLToPath(new URL("./coordinate-checks-main.cjs", import.meta.url))], { cwd: project, env: environment, stdio: "inherit", windowsHide: true });

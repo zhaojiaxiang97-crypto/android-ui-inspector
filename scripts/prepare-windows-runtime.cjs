@@ -20,6 +20,8 @@ function windowsPowerShellEnvironment() {
 function prepareWindowsRuntime(target = "Development") {
   if (process.platform !== "win32") return;
   if (!["Development", "Unpacked"].includes(target)) throw new Error("Unexpected runtime target");
+  // Electron may download its executable on first require, not during install.
+  if (target === "Development") require("electron");
   const powershell = join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const output = execFileSync(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", join(__dirname, "windows-runtime-access.ps1"), "-Target", target], {
     encoding: "utf8", windowsHide: true, timeout: 30_000, env: windowsPowerShellEnvironment(),

@@ -16,6 +16,7 @@ type Props = {
   geometry?: CaptureGeometry;
   toolbarHost?: HTMLElement | null;
   onSelect: (node: UiNode) => void;
+  onExpand?: (node: UiNode) => void;
 };
 
 type FrameSize = { width: number; height: number };
@@ -31,14 +32,17 @@ type Gesture = {
   startAzimuth: number;
   startElevation: number;
   moved: boolean;
+  contextClick: boolean;
+  pressedNode: UiNode | null;
 };
 
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 16;
 const ZOOM_STEP = 0.25;
+const DRAG_THRESHOLD = 4;
 const ZOOM_PRESETS = [0.5, 1, 2, 4, 8, 16] as const;
-// A restrained oblique opening makes the layer order visible before the first drag.
-const DEFAULT_CAMERA: OrbitCamera = { distance: 1100, azimuth: -32, elevation: 16, roll: 0, layerGap: 64, panX: 0, panY: 0 };
+// Open from the front-left: controls fan left, with the page stack behind them.
+const DEFAULT_CAMERA: OrbitCamera = { distance: 1100, azimuth: 40, elevation: 12, roll: 0, layerGap: 96, panX: 0, panY: 0 };
 
 function clampZoom(value: number) {
   return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.round(value * 100) / 100));
@@ -50,19 +54,24 @@ export function ScreenshotPreview(props: Props) {
   return <LoadedScreenshot key={props.src} {...props} />;
 }
 
-function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, toolbarHost, onSelect }: Props) {
+function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, toolbarHost, onSelect, onExpand }: Props) {
   const frameRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const layerSceneRef = useRef<LayerSceneHandle>(null);
   const gestureRef = useRef<Gesture | null>(null);
+  const layerClickRef = useRef<{ node: UiNode; sameNode: boolean } | null>(null);
   const zoomAnchorRef = useRef<ZoomAnchor | null>(null);
   const previousSelectedIdRef = useRef<string | null>(null);
+  const menuRequestRef = useRef(0);
+  const [hiddenNodeIds, setHiddenNodeIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [menuError, setMenuError] = useState<string | null>(null);
   const [size, setSize] = useState<PixelSize | null>(null);
   const [frameSize, setFrameSize] = useState<FrameSize>({ width: 0, height: 0 });
   const [failed, setFailed] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("flat");
   const [zoom, setZoom] = useState(1);
+  const [sceneFitScale, setSceneFitScale] = useState<number | null>(null);
   const zoomRef = useRef(1);
   const [camera, setCamera] = useState<OrbitCamera>(DEFAULT_CAMERA);
   const cameraRef = useRef<OrbitCamera>(DEFAULT_CAMERA);
@@ -75,6 +84,32 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
   const canRender3d = Boolean(enabled && root.visibleToUser && root.bounds && root.children.length > 0);
   const overlay = enabled && size && selectedNode?.visibleToUser && selectedNode.bounds ? boundsPercent(selectedNode.bounds, size) : null;
   const rootSelected = selectedNode?.id === root.id;
+
+  useEffect(() => {
+    layerClickRef.current = null;
+    setHiddenNodeIds(new Set());
+    setMenuError(null);
+    return () => { menuRequestRef.current++; };
+  }, [root]);
+
+  async function openLayerMenu(clientX?: number, clientY?: number) {
+    if (viewMode !== "layers3d" || !enabled) return;
+    const node = clientX !== undefined && clientY !== undefined ? layerSceneRef.current?.pick(clientX, clientY) : selectedNode;
+    const canHide = Boolean(node && !hiddenNodeIds.has(node.id));
+    if (!canHide && hiddenNodeIds.size === 0) return;
+    if (node && canHide) onSelect(node);
+    const request = ++menuRequestRef.current;
+    setMenuError(null);
+    try {
+      const action = await window.electronApi.showLayerMenu(canHide, hiddenNodeIds.size > 0);
+      if (request !== menuRequestRef.current || !frameRef.current) return;
+      layerSceneRef.current?.clearHover();
+      if (action === "hide" && node && canHide) setHiddenNodeIds((current) => new Set([...current, node.id]));
+      if (action === "restore") setHiddenNodeIds(new Set());
+    } catch {
+      if (request === menuRequestRef.current && frameRef.current) setMenuError("无法打开图层菜单，请重新启动程序后重试。");
+    }
+  }
 
   function paintCamera(next: OrbitCamera) {
     const stage = stageRef.current;
@@ -164,12 +199,15 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
       if (event.code === "Space") setSpacePressed(false);
     };
     const onWindowBlur = () => {
+      layerClickRef.current = null;
       const gesture = gestureRef.current;
       const frame = frameRef.current;
+      gestureRef.current = null;
       if (gesture && frame?.hasPointerCapture(gesture.pointerId)) frame.releasePointerCapture(gesture.pointerId);
       if (gesture?.moved) commitCamera(cameraRef.current);
-      gestureRef.current = null;
       frame?.classList.remove("is-3d-dragging");
+      if (frame) delete frame.dataset.gesture;
+      layerSceneRef.current?.clearHover();
       setSpacePressed(false);
     };
     window.addEventListener("keydown", onKeyDown);
@@ -192,13 +230,14 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
     previousSelectedIdRef.current = selectedId;
   }, [canRender3d, selectedNode?.id]);
 
-  const fitScale = useMemo(() => {
+  const flatFitScale = useMemo(() => {
     if (!size || !validSize(size)) return 0;
     const availableWidth = frameSize.width > 0 ? Math.max(1, frameSize.width - 30) : Number.POSITIVE_INFINITY;
     // Keep the established inspector maximum so a portrait phone remains
     // legible while the new zoom controls can grow beyond it deliberately.
     return Math.min(1, 400 / size.height, availableWidth / size.width);
   }, [frameSize.width, size]);
+  const fitScale = viewMode === "layers3d" ? sceneFitScale ?? flatFitScale : flatFitScale;
   const renderScale = fitScale * zoom;
   const stageWidth = size ? Math.max(1, size.width * renderScale) : 0;
   const stageHeight = size ? Math.max(1, size.height * renderScale) : 0;
@@ -244,6 +283,7 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
     zoomRef.current = 1;
     setZoom(1);
     commitCamera({ ...cameraRef.current, panX: 0, panY: 0, azimuth: DEFAULT_CAMERA.azimuth, elevation: DEFAULT_CAMERA.elevation, roll: DEFAULT_CAMERA.roll });
+    layerSceneRef.current?.fit();
     frameRef.current?.scrollTo({ left: 0, top: 0, behavior: "auto" });
   }
 
@@ -252,28 +292,24 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
     commitCamera(DEFAULT_CAMERA);
   }
 
-  function selectAtPoint(event: PointerEvent<HTMLDivElement>) {
+  function selectAtPoint(event: PointerEvent<HTMLDivElement>, pressedNode?: UiNode | null) {
     const image = imageRef.current;
-    if (event.button !== 0 || !event.isPrimary || !enabled || !size || !image || !image.complete || !image.naturalWidth) return;
-    // The WebGL layer canvas intentionally fans planes beyond the source image
-    // while orbiting. Do not let that visual extension turn padding or browser
-    // chrome into a selectable Android node.
-    const point = clientToScreen(event.clientX, event.clientY, image.getBoundingClientRect(), size);
-    if (!point) return;
+    if (event.button !== 0 || !event.isPrimary || !enabled || !size || !image || !image.complete || !image.naturalWidth) return null;
     if (viewMode === "layers3d") {
-      const layer = layerSceneRef.current?.pick(event.clientX, event.clientY);
-      if (layer) {
-        layerSceneRef.current?.clearHover();
-        onSelect(layer);
-        return;
-      }
+      const layer = pressedNode === undefined ? layerSceneRef.current?.pick(event.clientX, event.clientY) : pressedNode;
+      if (layer) onSelect(layer);
+      // Never fall back to the flattened screen: it still contains hidden layers.
+      return layer ?? null;
     }
-    if (viewMode === "layers3d" && (event.target as HTMLElement).closest("[data-layer-node-id]")) return;
+    const point = clientToScreen(event.clientX, event.clientY, image.getBoundingClientRect(), size);
+    if (!point) return null;
     const node = findNodeAtPoint(root, point.x, point.y, size);
     if (node) onSelect(node);
+    return node;
   }
 
   function startGesture(event: PointerEvent<HTMLDivElement>) {
+    if (!event.isPrimary || gestureRef.current) return;
     const shouldPan = event.button === 1 || (event.button === 0 && spacePressed) || (event.button === 0 && event.shiftKey);
     const shouldRotate = viewMode === "layers3d" && (event.button === 2 || event.button === 0);
     if (!shouldPan && !shouldRotate) return;
@@ -290,9 +326,11 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
       startAzimuth: currentCamera.azimuth,
       startElevation: currentCamera.elevation,
       moved: false,
+      contextClick: event.button === 2 || (event.button === 0 && event.ctrlKey),
+      pressedNode: viewMode === "layers3d" ? layerSceneRef.current?.pick(event.clientX, event.clientY) ?? null : null,
     };
     gestureRef.current = gesture;
-    if (viewMode === "layers3d") frame.classList.add("is-3d-dragging");
+    if (viewMode === "layers3d" && !shouldPan) layerSceneRef.current?.hover(event.clientX, event.clientY);
     frame.setPointerCapture(event.pointerId);
   }
 
@@ -301,7 +339,13 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     const dx = event.clientX - gesture.startX;
     const dy = event.clientY - gesture.startY;
-    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) gesture.moved = true;
+    if (!gesture.moved) {
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+      gesture.moved = true;
+      event.currentTarget.dataset.gesture = gesture.kind;
+      if (viewMode === "layers3d") event.currentTarget.classList.add("is-3d-dragging");
+      layerSceneRef.current?.clearHover();
+    }
     if (gesture.kind === "pan") {
       scheduleCameraPaint({ ...cameraRef.current, panX: gesture.startPanX + dx, panY: gesture.startPanY + dy });
     } else {
@@ -321,11 +365,16 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
     const gesture = gestureRef.current;
     if (!gesture || gesture.pointerId !== event.pointerId) return false;
     const frame = frameRef.current;
-    if (frame?.hasPointerCapture(event.pointerId)) frame.releasePointerCapture(event.pointerId);
     gestureRef.current = null;
+    if (frame?.hasPointerCapture(event.pointerId)) frame.releasePointerCapture(event.pointerId);
     frame?.classList.remove("is-3d-dragging");
+    if (frame) delete frame.dataset.gesture;
     if (gesture.moved) commitCamera(cameraRef.current);
-    return gesture.moved;
+    if (event.type !== "pointerup") {
+      layerClickRef.current = null;
+      layerSceneRef.current?.clearHover();
+    } else if (gesture.moved && frame?.contains(document.elementFromPoint(event.clientX, event.clientY))) layerSceneRef.current?.hover(event.clientX, event.clientY);
+    return gesture.moved || gesture.kind === "pan" || Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) >= DRAG_THRESHOLD;
   }
 
   function handleWheel(event: WheelEvent) {
@@ -358,11 +407,12 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
         <select className="zoom-preset-select" aria-label="截图倍率预设" value={zoomPresetValue ? String(zoomPresetValue) : "custom"} onChange={(event) => {
           if (event.target.value !== "custom") changeZoom(Number(event.target.value));
         }} disabled={!size}>
-          <option value="custom">自定义</option>
+          <option value="custom">{Math.round(zoom * 100)}%</option>
           {ZOOM_PRESETS.map((preset) => <option value={preset} key={preset}>{Math.round(preset * 100)}%</option>)}
         </select>
         <button className="zoom-fit" type="button" onClick={fitView} disabled={!size}>适应</button>
         <button className="zoom-reset" type="button" onClick={resetView} disabled={!size}>重置</button>
+        {viewMode === "layers3d" && hiddenNodeIds.size > 0 && <button className="restore-layers" type="button" onClick={() => setHiddenNodeIds(new Set())} aria-label="恢复所有隐藏图层">恢复图层 ({hiddenNodeIds.size})</button>}
       </div>
       {viewMode === "layers3d" && (
         <details className="layer-settings">
@@ -389,10 +439,39 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
   return <>
     {toolbarHost ? createPortal(toolbar, toolbarHost) : toolbar}
     <div className={`screenshot-frame ${viewMode === "layers3d" ? "layers3d-active" : ""}`} ref={frameRef} tabIndex={0} aria-label="截图工作区" onContextMenu={(event) => { if (viewMode === "layers3d") event.preventDefault(); }}
+      onKeyDown={(event) => {
+        if (viewMode === "layers3d" && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
+          event.preventDefault();
+          void openLayerMenu();
+        }
+      }}
       onPointerDown={startGesture}
       onPointerMove={handlePointerMove}
-      onPointerUp={(event) => { if (finishGesture(event)) return; selectAtPoint(event); }}
+      onPointerUp={(event) => {
+        const previousClick = layerClickRef.current;
+        layerClickRef.current = null;
+        const pressedNode = gestureRef.current?.pressedNode;
+        const contextClick = gestureRef.current?.contextClick || event.button === 2;
+        if (finishGesture(event)) return;
+        // Open on release, not contextmenu: Windows emits contextmenu on press,
+        // which would otherwise interrupt the existing right-button orbit drag.
+        if (contextClick && viewMode === "layers3d") { void openLayerMenu(event.clientX, event.clientY); return; }
+        const node = selectAtPoint(event, pressedNode);
+        if (viewMode === "layers3d" && node) layerClickRef.current = { node, sameNode: previousClick?.node.id === node.id };
+      }}
+      onDoubleClick={(event) => {
+        const click = layerClickRef.current;
+        layerClickRef.current = null;
+        if (viewMode !== "layers3d" || event.button !== 0 || event.ctrlKey || event.shiftKey || event.altKey || event.metaKey || spacePressed) return;
+        // Every plane shares one canvas: two clicks must hit the same node,
+        // and neither may be a drag, pan, context click or empty-space click.
+        if (click?.sameNode && click.node.children.length > 0 && !expandedNodeIds.has(click.node.id)) {
+          event.preventDefault();
+          onExpand?.(click.node);
+        }
+      }}
       onPointerCancel={finishGesture}
+      onLostPointerCapture={finishGesture}
       onPointerLeave={() => layerSceneRef.current?.clearHover()}>
       {viewMode === "layers3d" && canRender3d && size && (
         <>
@@ -431,11 +510,13 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
             root={root}
             selectedNode={selectedNode}
             expandedNodeIds={expandedNodeIds}
+            hiddenNodeIds={hiddenNodeIds}
             size={size}
             renderScale={renderScale}
             origin={sceneOrigin}
             camera={camera}
             onSelect={onSelect}
+            onFitScale={setSceneFitScale}
           />
         )}
       </div>
@@ -445,6 +526,7 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
       {size.width}×{size.height} · {size.width > size.height ? "横屏" : size.width < size.height ? "竖屏" : "方形"} · {integrity.message}
       {viewMode === "layers3d" && canRender3d ? ` · 3D 全量展开 · 间距 ${camera.layerGap}px` : ""}
     </p>}
-    {enabled && <p className="screenshot-hint">点击截图可定位节点；鼠标滚轮缩放，空格/Shift/中键拖动平移，3D 模式下左键或右键拖动环绕旋转。</p>}
+    {menuError && <p className="screenshot-status mismatch" role="alert">{menuError}</p>}
+    {enabled && <p className="screenshot-hint">点击选中，双击父层级展开；悬停另一层测距（原始外框 px，不含展开层距）；滚轮缩放，空格/Shift/中键平移；3D 左/右键拖动旋转，右键单击隐藏。</p>}
   </>;
 }

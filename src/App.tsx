@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import "./styles/tokens.css";
 import "./App.css";
 import type { AdbProbeResult, ExportFormat, StoredSnapshot, UiNode, UiSnapshot } from "../shared/types";
@@ -123,23 +124,6 @@ type SavedSnapshot = StoredSnapshot & {
   diff: SnapshotDiff | null;
 };
 
-type DetailsResizeDrag = {
-  pointerId: number;
-  startY: number;
-  startHeight: number;
-  height: number;
-  minimum: number;
-  maximum: number;
-};
-
-const MIN_DETAILS_HEIGHT = 0;
-const MIN_SCREENSHOT_HEIGHT = 260;
-const DETAILS_COLLAPSE_SNAP_HEIGHT = 32;
-
-function clamp(value: number, minimum: number, maximum: number) {
-  return Math.max(minimum, Math.min(maximum, value));
-}
-
 function diffValue(value: string | boolean | null) {
   return value === null ? null : String(value);
 }
@@ -260,6 +244,28 @@ function App() {
   const [snapshot, setSnapshot] = useState<UiSnapshot | null>(null);
   const [selectedNode, setSelectedNode] = useState<UiNode | null>(null);
   const [inspectionLoading, setInspectionLoading] = useState(false);
+  const activeInspectionRef = useRef<string | null>(null);
+  const inspectionStartedRef = useRef(0);
+  const [inspectionStage, setInspectionStage] = useState("连接 Debug App");
+  const [inspectionElapsed, setInspectionElapsed] = useState(0);
+  useEffect(() => window.electronApi.onInspectionProgress((progress) => {
+    if (progress.requestId === activeInspectionRef.current) setInspectionStage(progress.stage);
+  }), []);
+  useEffect(() => {
+    if (!inspectionLoading) return;
+    const timer = setInterval(() => setInspectionElapsed(Math.floor((performance.now() - inspectionStartedRef.current) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [inspectionLoading]);
+  useEffect(() => () => {
+    if (activeInspectionRef.current) void window.electronApi.cancelInspection(activeInspectionRef.current);
+  }, []);
+  const cancelInspection = useCallback(() => {
+    const requestId = activeInspectionRef.current;
+    activeInspectionRef.current = null;
+    if (requestId) void window.electronApi.cancelInspection(requestId);
+    setInspectionLoading(false);
+    if (requestId) setInspectionError("已取消采集，可以重新开始。");
+  }, []);
   const [inspectionError, setInspectionError] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
@@ -269,9 +275,6 @@ function App() {
   const [treeSession, setTreeSession] = useState(0);
   const [treeExpandedIds, setTreeExpandedIds] = useState<ReadonlySet<string>>(new Set());
   const [treeRevealRequest, setTreeRevealRequest] = useState(0);
-  const [detailsHeight, setDetailsHeight] = useState<number | null>(null);
-  const [detailsResizing, setDetailsResizing] = useState(false);
-  const detailsResizeRef = useRef<DetailsResizeDrag | null>(null);
   const [sceneToolbarHost, setSceneToolbarHost] = useState<HTMLDivElement | null>(null);
   const [savedSnapshots, setSavedSnapshots] = useState<SavedSnapshot[]>([]);
   const [snapshotsLoading, setSnapshotsLoading] = useState(true);
@@ -302,6 +305,12 @@ function App() {
   }, []);
 
   const inspectDevice = useCallback(async (serial: string) => {
+    if (activeInspectionRef.current) void window.electronApi.cancelInspection(activeInspectionRef.current);
+    const requestId = crypto.randomUUID();
+    activeInspectionRef.current = requestId;
+    inspectionStartedRef.current = performance.now();
+    setInspectionStage("连接 Debug App");
+    setInspectionElapsed(0);
     setTreeSession((value) => value + 1);
     setPreferredSerial(serial);
     setSelectedSerial(serial);
@@ -320,7 +329,8 @@ function App() {
     setInspectionLoading(true);
 
     try {
-      const result = await window.electronApi.inspectDevice(serial);
+      const result = await window.electronApi.inspectDevice(serial, requestId);
+      if (activeInspectionRef.current !== requestId) return;
       setSnapshot(result);
       setSelectedNode(result.root);
       setTreeExpandedIds(result.root ? expandedTreeNodeIds(result.root) : new Set());
@@ -328,15 +338,20 @@ function App() {
         setInspectionError(result.error);
       }
     } catch (error) {
+      if (activeInspectionRef.current !== requestId) return;
       setInspectionError(
         typeof error === "string" ? error : "读取 UI hierarchy 失败，请确认设备仍保持连接。",
       );
     } finally {
-      setInspectionLoading(false);
+      if (activeInspectionRef.current === requestId) {
+        activeInspectionRef.current = null;
+        setInspectionLoading(false);
+      }
     }
   }, []);
 
   const closeInspector = useCallback(() => {
+    cancelInspection();
     setSelectedSerial(null);
     setSnapshot(null);
     setSelectedNode(null);
@@ -347,7 +362,7 @@ function App() {
     setSnapshotStatus(null);
     setLatestDiff(null);
     setDiffExpanded(false);
-  }, []);
+  }, [cancelInspection]);
 
   const handleScreenshotSelect = useCallback((node: UiNode) => {
     setSelectedNode(node);
@@ -357,55 +372,10 @@ function App() {
     setTreeRevealRequest((value) => value + 1);
   }, []);
 
-  const detailsResizeBounds = useCallback((handle: HTMLElement) => {
-    const preview = handle.closest<HTMLElement>(".preview-pane");
-    const details = preview?.querySelector<HTMLElement>(".node-details");
-    const frame = preview?.querySelector<HTMLElement>(".screenshot-frame");
-    if (!preview || !details || !frame) return { minimum: MIN_DETAILS_HEIGHT, maximum: MIN_DETAILS_HEIGHT };
-    const staticHeight = Math.max(0, preview.clientHeight - details.offsetHeight - frame.offsetHeight);
-    return {
-      minimum: MIN_DETAILS_HEIGHT,
-      maximum: Math.max(MIN_DETAILS_HEIGHT, preview.clientHeight - staticHeight - MIN_SCREENSHOT_HEIGHT),
-    };
+  const handleLayerExpand = useCallback((node: UiNode) => {
+    if (node.children.length === 0) return;
+    setTreeExpandedIds((previous) => previous.has(node.id) ? previous : new Set([...previous, node.id]));
   }, []);
-
-  const beginDetailsResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-    const details = event.currentTarget.closest<HTMLElement>(".preview-pane")?.querySelector<HTMLElement>(".node-details");
-    if (!details) return;
-    const { minimum, maximum } = detailsResizeBounds(event.currentTarget);
-    detailsResizeRef.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: details.offsetHeight, height: details.offsetHeight, minimum, maximum };
-    setDetailsResizing(true);
-    event.preventDefault();
-  }, [detailsResizeBounds]);
-
-  const moveDetailsResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = detailsResizeRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    const nextHeight = Math.round(clamp(drag.startHeight + drag.startY - event.clientY, drag.minimum, drag.maximum));
-    drag.height = nextHeight <= DETAILS_COLLAPSE_SNAP_HEIGHT ? 0 : nextHeight;
-    event.currentTarget.closest<HTMLElement>(".preview-pane")?.style.setProperty("--node-details-height", `${drag.height}px`);
-  }, []);
-
-  const endDetailsResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    const drag = detailsResizeRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    detailsResizeRef.current = null;
-    setDetailsHeight(drag.height);
-    setDetailsResizing(false);
-  }, []);
-
-  const resizeDetailsByKeyboard = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
-    const adjustment = event.key === "ArrowUp" ? 24 : event.key === "ArrowDown" ? -24 : 0;
-    if (!adjustment && event.key !== "Home" && event.key !== "End") return;
-    const details = event.currentTarget.closest<HTMLElement>(".preview-pane")?.querySelector<HTMLElement>(".node-details");
-    if (!details) return;
-    const { minimum, maximum } = detailsResizeBounds(event.currentTarget);
-    const current = detailsHeight ?? details.offsetHeight;
-    const next = event.key === "Home" ? minimum : event.key === "End" ? maximum : clamp(current + adjustment, minimum, maximum);
-    setDetailsHeight(Math.round(next));
-    event.preventDefault();
-  }, [detailsHeight, detailsResizeBounds]);
 
   useEffect(() => {
     void refreshDevices();
@@ -415,7 +385,7 @@ function App() {
     const focusSearch = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "k") return;
       event.preventDefault();
-      document.getElementById("global-node-search")?.focus();
+      document.querySelector<HTMLInputElement>(".inspection-active .tree-search, #global-node-search")?.focus();
     };
     window.addEventListener("keydown", focusSearch);
     return () => window.removeEventListener("keydown", focusSearch);
@@ -651,7 +621,6 @@ function App() {
   const captureSelected = useCallback(() => {
     if (captureSerial) void inspectDevice(captureSerial);
   }, [captureSerial, inspectDevice]);
-  const previewStyle = detailsHeight === null ? undefined : { "--node-details-height": `${detailsHeight}px` } as CSSProperties;
 
   return (
     <div className={`app-shell ${selectedSerial ? "inspection-active" : ""}`}>
@@ -711,8 +680,9 @@ function App() {
                   </div>
                   <div className="workspace-empty-copy">
                     <span className="loading-orbit" />
-                    <h4>正在读取 UI hierarchy</h4>
-                    <p>正在连接 Debug App 并读取真实控件树。</p>
+                    <h4 role="status" aria-live="polite">{inspectionStage}</h4>
+                    <p>已用时 {inspectionElapsed} 秒 · 完成后自动展开全部控件</p>
+                    <button className="tree-clear" type="button" onClick={cancelInspection}>取消采集</button>
                   </div>
                 </div>
                 <div className="preview-pane inspector-state-pane">
@@ -797,18 +767,14 @@ function App() {
                     />
                   </div>
 
-                  <div className={`preview-pane ${detailsHeight === 0 ? "details-collapsed" : ""}`} style={previewStyle} onPointerMove={moveDetailsResize} onPointerUp={endDetailsResize} onPointerCancel={endDetailsResize}>
+                  <div className="preview-pane">
                     <div className="subpanel-heading">
                       <span>设备画面</span>
                       <span className="tree-hint">{selectedSerial}</span>
                     </div>
-                    <details className="snapshot-drawer">
-                      <summary>
-                        <span>快照与历史</span>
-                        <span className="snapshot-drawer-summary">
-                          {savedSnapshots.length} 份
-                          {latestDiff ? ` · ${diffSummary(latestDiff)}` : " · 保存当前页面"}
-                        </span>
+                    {sceneToolbarHost && createPortal(<details className="snapshot-drawer">
+                      <summary aria-label="快照与历史" title={`快照与历史 · ${savedSnapshots.length} 份`}>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.5 7M3 4v7h7M12 7v5l3 2" /></svg>
                       </summary>
                       <div className="snapshot-drawer-body">
                         <div className="snapshot-toolbar">
@@ -882,37 +848,22 @@ function App() {
                           </div>
                         )}
                       </div>
-                    </details>
+                    </details>, sceneToolbarHost)}
                     {snapshot.screenshotDataUrl ? (
                       <ScreenshotPreview key={treeSession} src={snapshot.screenshotDataUrl} root={snapshot.root}
-                        selectedNode={selectedNode} expandedNodeIds={treeExpandedIds} geometry={snapshot.captureGeometry} toolbarHost={sceneToolbarHost} onSelect={handleScreenshotSelect} />
+                        selectedNode={selectedNode} expandedNodeIds={treeExpandedIds} geometry={snapshot.captureGeometry} toolbarHost={sceneToolbarHost} onSelect={handleScreenshotSelect} onExpand={handleLayerExpand} />
                     ) : <div className="screenshot-frame"><div className="no-screenshot">截图不可用</div></div>}
                     {detailNode && (
-                      <>
-                      <div
-                        className={`node-details-resizer ${detailsResizing ? "is-dragging" : ""}`}
-                        role="separator"
-                        tabIndex={0}
-                        aria-label="调整属性栏高度；向下拖到底可隐藏，可上下拖拽或使用方向键"
-                        aria-orientation="horizontal"
-                        onPointerDown={beginDetailsResize}
-                        onKeyDown={resizeDetailsByKeyboard}
-                      />
-                      <div className="node-details">
-                        <div className="node-detail-heading">
-                          <div>
-                            <p className="section-kicker">SELECTED NODE</p>
-                            <h4>{nodeDisplayLabel(detailNode)}</h4>
-                          </div>
-                          <span className="node-id">#{detailNode.id}</span>
-                        </div>
-                        <NodePropertiesPanel
-                          root={snapshot.root!}
-                          node={detailNode}
-                          screenshotSize={snapshot.captureGeometry?.screenshotSize ?? null}
-                        />
+                      <NodePropertiesPanel
+                        root={snapshot.root}
+                        node={detailNode}
+                        screenshotSize={snapshot.captureGeometry?.screenshotSize ?? null}
+                        toolbarHost={sceneToolbarHost}
+                        onCopy={() => void copyValue("节点 JSON", selectorData?.json ?? nodeJson(detailNode))}
+                        copyStatus={copyStatus}
+                      >
                         {detailAttributes.length > 0 ? (
-                          <details className="node-attributes" open>
+                          <details className="node-attributes">
                             <summary>全部调试属性 · {detailAttributes.length}</summary>
                             <dl className="node-attributes-list">
                               {detailAttributes.map(([name, value]) => (
@@ -953,8 +904,7 @@ function App() {
                             {exportStatus && <p className="export-status">{exportStatus}</p>}
                           </div>
                         )}
-                      </div>
-                      </>
+                      </NodePropertiesPanel>
                     )}
                   </div>
                 </div>

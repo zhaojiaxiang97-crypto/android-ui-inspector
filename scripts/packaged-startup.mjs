@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const project = fileURLToPath(new URL("../", import.meta.url));
 const output = join(project, ".benchmarks", "native-packaged", new Date().toISOString().replace(/[:.]/g, "-"));
@@ -12,7 +13,7 @@ function executableCandidates() {
   const explicit = process.env.INSPECTOR_PACKAGED_EXECUTABLE;
   if (explicit) return [explicit];
   if (process.platform === "win32") return [join(project, "release", "win-unpacked", "Android UI Inspector.exe")];
-  if (process.platform === "darwin") return [join(project, "release", "mac", "Android UI Inspector.app", "Contents", "MacOS", "Android UI Inspector")];
+  if (process.platform === "darwin") return [...new Set([process.arch === "arm64" ? "mac-arm64" : "mac", "mac-universal", "mac"])].map((directory) => join(project, "release", directory, "Android UI Inspector.app", "Contents", "MacOS", "Android UI Inspector"));
   return [
     join(project, "release", "linux-unpacked", "Android UI Inspector"),
     join(project, "release", "linux-unpacked", "android-ui-inspector"),
@@ -21,6 +22,7 @@ function executableCandidates() {
 
 const executable = executableCandidates().find(existsSync);
 if (!executable) throw new Error(`找不到当前平台的打包可执行文件：${executableCandidates().join(", ")}`);
+createRequire(import.meta.url)("./prepare-ci-runtime.cjs").prepareLinuxSandbox(executable);
 
 const environment = { ...process.env };
 delete environment.ELECTRON_RUN_AS_NODE;
@@ -114,14 +116,17 @@ try {
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
     return result.result.value;
   };
-  const state = await until(() => evaluate(`(() => ({
+  const state = await until(() => evaluate(`(() => {
+    if (!document.querySelector('.app-shell h1') || !window.electronApi?.runtime) return null;
+    return {
     title: document.title,
     heading: document.querySelector('h1')?.textContent || null,
     appShell: Boolean(document.querySelector('.app-shell')),
     runtime: window.electronApi?.runtime || null,
     nodeExposed: typeof window.require !== 'undefined',
     viewport: { width: innerWidth, height: innerHeight },
-  }))()`), "React 和 preload 加载");
+    };
+  })()`), "React 和 preload 加载");
   assert.equal(state.title, "Android UI Inspector");
   assert.equal(state.heading, "Android UI Inspector");
   assert.equal(state.appShell, true);

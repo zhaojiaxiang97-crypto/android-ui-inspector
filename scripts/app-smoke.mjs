@@ -394,8 +394,8 @@ try {
           toolbarHost: box('.scene-toolbar-host'),
           snapshot: box('.snapshot-drawer'),
           frame: box('.screenshot-frame'),
-          details: box('.node-details'),
-          properties: box('.node-properties-panel'),
+          details: box('.floating-inspector'),
+          properties: box('.inspector-geometry'),
           grid: box('.viewport-grid'),
           gizmo: box('.viewport-gizmo'),
           windowStack: box('.window-stack-label'),
@@ -406,7 +406,8 @@ try {
       assert.ok(workspaceLayout.frame?.height >= 250, "Screenshot viewport is too short for the reference workspace layout");
       assert.ok(workspaceLayout.hierarchy?.width >= 280, "Hierarchy rail is too narrow for class and resource labels");
       assert.ok(workspaceLayout.details?.height >= 200, "Node properties panel is not visible in the initial viewport");
-      assert.ok(workspaceLayout.properties?.width > 0 && workspaceLayout.properties?.height > 0, "Node property columns have no visible layout box");
+      assert.ok(workspaceLayout.properties?.width > 0 && workspaceLayout.properties?.height > 0, "Compact geometry has no visible layout box");
+      assert.ok(workspaceLayout.details.left >= workspaceLayout.frame.left && workspaceLayout.details.bottom <= workspaceLayout.frame.bottom, "Floating inspector is outside the canvas");
       assert.ok(workspaceLayout.grid?.width > 0 && workspaceLayout.gizmo?.width > 0, "3D viewport decorations are missing");
       assert.ok(workspaceLayout.windowStack?.width > 0, "3D low-frequency options are missing from the overflow menu");
       assert.ok(workspaceLayout.toolbarHost?.height > 0, "3D view toolbar did not move into the top bar");
@@ -437,62 +438,54 @@ try {
       report.layerState = layerState;
       recordCheck("tree selection opens 3D layer scene and highlights selected plane");
       recordCheck("dark reference workspace keeps canvas, properties and 3D viewport decorations visible");
+      await evaluate("document.querySelector('.layer-settings').open = false");
       await delay(250);
-      const resizeDistance = 120;
-      const detailsResize = await evaluate(`(() => {
-        const handle = document.querySelector('.node-details-resizer');
-        const details = document.querySelector('.node-details');
+      const detailsDrag = await evaluate(`(() => {
+        const handle = document.querySelector('.inspector-drag-handle');
+        const details = document.querySelector('.floating-inspector');
         if (!handle || !details) return null;
         const rect = handle.getBoundingClientRect();
         return {
-          before: details.getBoundingClientRect().height,
+          left: details.getBoundingClientRect().left,
+          top: details.getBoundingClientRect().top,
+          frameHeight: document.querySelector('.screenshot-frame').getBoundingClientRect().height,
           x: rect.left + rect.width / 2,
           y: rect.top + rect.height / 2,
         };
       })()`);
-      assert.ok(detailsResize, "Property panel resize handle is missing");
-      await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: detailsResize.x, y: detailsResize.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
+      assert.ok(detailsDrag, "Floating inspector drag handle is missing");
+      await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: detailsDrag.x, y: detailsDrag.y, button: "none", buttons: 0 });
+      await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: detailsDrag.x, y: detailsDrag.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
       await delay(80);
-      await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: detailsResize.x, y: detailsResize.y - resizeDistance, button: "none", buttons: 1, modifiers: 0 });
+      await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: detailsDrag.x - 100, y: detailsDrag.y + 60, button: "left", buttons: 1, modifiers: 0 });
       await delay(80);
-      await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: detailsResize.x, y: detailsResize.y - resizeDistance, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
-      await until(() => evaluate(`document.querySelector('.node-details')?.getBoundingClientRect().height > ${JSON.stringify(detailsResize.before + 10)}`), "property panel resize");
-      report.detailsResize = await evaluate("document.querySelector('.node-details')?.getBoundingClientRect().height || 0");
-      const resizedHandle = await evaluate(`(() => {
-        const rect = document.querySelector('.node-details-resizer')?.getBoundingClientRect();
-        return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
+      await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: detailsDrag.x - 100, y: detailsDrag.y + 60, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
+      await until(() => evaluate(`document.querySelector('.floating-inspector').getBoundingClientRect().left < ${detailsDrag.left - 80}`), "property panel drag");
+      await evaluate("document.querySelector('.inspector-collapse').click()");
+      await until(() => evaluate("document.querySelector('.floating-inspector').getBoundingClientRect().height <= 48"), "property panel collapse");
+      await evaluate("document.querySelector('.inspector-collapse').click()");
+      await until(() => evaluate("document.querySelector('.floating-inspector').getBoundingClientRect().height > 200"), "property panel expand");
+      await evaluate("document.querySelector('.inspector-close').click()");
+      await until(() => evaluate("document.querySelector('.floating-inspector').hidden"), "property panel close");
+      await evaluate("document.querySelector('.inspector-toggle').click()");
+      await until(() => evaluate("!document.querySelector('.floating-inspector').hidden"), "property panel restore");
+      await evaluate("document.querySelector('.inspector-drag-handle').dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }))");
+      assert.equal(await evaluate("document.querySelector('.screenshot-frame').getBoundingClientRect().height"), detailsDrag.frameHeight, "Floating inspector changes resized the camera viewport");
+      recordCheck("floating property tab drags, collapses, closes and restores without resizing the canvas");
+      const boxModel = await evaluate(`(() => {
+        document.querySelector('.inspector-more').open = true;
+        const card = document.querySelector('.box-model-card');
+        const section = card.closest('section');
+        section.scrollIntoView({ block: 'center' });
+        const rect = section.getBoundingClientRect();
+        return { text: section.textContent, overflow: card.scrollWidth - card.clientWidth, clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 2 } };
       })()`);
-      assert.ok(resizedHandle, "Property panel resize handle disappeared after dragging");
-      await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: resizedHandle.x, y: resizedHandle.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
-      await delay(80);
-      await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: resizedHandle.x, y: resizedHandle.y + resizeDistance, button: "none", buttons: 1, modifiers: 0 });
-      await delay(80);
-      await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: resizedHandle.x, y: resizedHandle.y + resizeDistance, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
-      await until(() => evaluate(`document.querySelector('.node-details')?.getBoundingClientRect().height <= ${JSON.stringify(detailsResize.before + 10)}`), "property panel resize reset");
-      const collapseTarget = await evaluate(`(() => {
-        const handle = document.querySelector('.node-details-resizer');
-        const preview = document.querySelector('.preview-pane');
-        if (!handle || !preview) return null;
-        const handleRect = handle.getBoundingClientRect();
-        const previewRect = preview.getBoundingClientRect();
-        return { x: handleRect.left + handleRect.width / 2, y: handleRect.top + handleRect.height / 2, targetY: previewRect.bottom - 2 };
-      })()`);
-      assert.ok(collapseTarget, "Property panel collapse handle is missing");
-      await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: collapseTarget.x, y: collapseTarget.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
-      await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: collapseTarget.x, y: collapseTarget.targetY, button: "none", buttons: 1, modifiers: 0 });
-      await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: collapseTarget.x, y: collapseTarget.targetY, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
-      await until(() => evaluate("document.querySelector('.preview-pane')?.classList.contains('details-collapsed') && document.querySelector('.node-details')?.getBoundingClientRect().height <= 1"), "property panel collapse");
-      const collapsedHandle = await evaluate(`(() => {
-        const rect = document.querySelector('.node-details-resizer')?.getBoundingClientRect();
-        return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
-      })()`);
-      assert.ok(collapsedHandle, "Property panel resize handle disappeared after collapsing");
-      await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: collapsedHandle.x, y: collapsedHandle.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
-      await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: collapsedHandle.x, y: collapsedHandle.y - 120, button: "none", buttons: 1, modifiers: 0 });
-      await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: collapsedHandle.x, y: collapsedHandle.y - 120, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
-      await until(() => evaluate("document.querySelector('.node-details')?.getBoundingClientRect().height > 80"), "property panel expand");
-      await delay(250);
-      recordCheck("dragging the property divider resizes, hides and restores the bottom panel");
+      assert.ok(boxModel.overflow <= 1, "Box model overflows the floating inspector");
+      const boxScreenshot = await connection.send("Page.captureScreenshot", { format: "png", clip: boxModel.clip });
+      writeFileSync(join(output, "box-model.png"), Buffer.from(boxScreenshot.data, "base64"));
+      report.boxModel = { ...boxModel, screenshot: "box-model.png" };
+      await evaluate("document.querySelector('.inspector-more').open = false; document.querySelector('.inspector-body').scrollTop = 0");
+      recordCheck("compact box model remains readable inside the floating inspector");
       const hoverPoints = await evaluate(`(() => {
         const rect = document.querySelector('.layer-webgl-canvas')?.getBoundingClientRect();
         if (!rect) return [];
@@ -521,6 +514,40 @@ try {
         recordCheck("3D layer hover resolves a blue-highlight target");
       } else {
         report.layerHover = "skipped: no overview layer intersects the fixed hover grid";
+      }
+      if (fixture) {
+        await evaluate("document.querySelector('.inspector-close').click()");
+        const anchorId = await evaluate("document.querySelector('.tree-row.selected').dataset.treeId");
+        let measurement = null;
+        for (const point of hoverPoints) {
+          await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "none", buttons: 0 });
+          await delay(80);
+          const result = await evaluate(`(() => {
+            const overlay = document.querySelector('.layer-measurement');
+            if (!overlay) return null;
+            const label = document.querySelector('.layer-hover-label');
+            return { anchor: overlay.dataset.measureAnchor, target: overlay.dataset.measureTarget, relation: overlay.dataset.measureRelation, text: overlay.textContent, hoverId: label?.dataset.nodeId, hoverText: label?.textContent, cursor: getComputedStyle(document.querySelector('.layer-webgl-canvas')).cursor };
+          })()`);
+          if (result) { measurement = { ...result, point }; break; }
+        }
+        assert.ok(measurement, "Real pointer hover did not show measurements");
+        assert.equal(measurement.anchor, anchorId, "Hover replaced the selected anchor");
+        assert.equal(measurement.hoverId, measurement.target, "Hover label names a different node than the hit test");
+        assert.ok(measurement.hoverText.includes("指向"), "Hover label does not distinguish the candidate from the selection");
+        assert.equal(measurement.cursor, "crosshair", "Idle canvas shows a drag hand instead of a precise cursor");
+        assert.equal(await evaluate("document.querySelector('.tree-row.selected').dataset.treeId"), anchorId, "Measurement changed the selected tree node");
+        const screenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+        writeFileSync(join(output, "layers3d-measurement.png"), Buffer.from(screenshot.data, "base64"));
+        const { x, y } = measurement.point;
+        await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: 1 });
+        await until(() => evaluate(`document.querySelector('.tree-row.selected').dataset.treeId === ${JSON.stringify(measurement.target)} && !document.querySelector('.layer-measurement')`), "click measurement target becomes anchor");
+        assert.equal(await evaluate("document.querySelector('.layer-hover-label.is-selected')?.dataset.nodeId"), measurement.target, "Clicked target does not show selected feedback");
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 100, y: 40, button: "none", buttons: 0 });
+        assert.equal(await evaluate("Boolean(document.querySelector('.layer-measurement'))"), false, "Leaving the canvas retained measurement labels");
+        await evaluate("document.querySelector('.inspector-toggle').click()");
+        report.layerMeasurement = { ...measurement, screenshot: "layers3d-measurement.png" };
+        recordCheck("real pointer measures without changing selection, click target replaces anchor, leave clears guides");
       }
       const branchId = await evaluate(`(() => {
         const rows = Array.from(document.querySelectorAll('.tree-row'));
@@ -599,6 +626,7 @@ try {
         };
       })()`);
       if (dragPoints) {
+        const selectionBeforeDrag = await evaluate("document.querySelector('.tree-row.selected')?.dataset.treeId");
         const renderBeforeDrag = await evaluate("Number(document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderVersion || 0)");
         await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: dragPoints.start.x, y: dragPoints.start.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
         await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: (dragPoints.start.x + dragPoints.end.x) / 2, y: (dragPoints.start.y + dragPoints.end.y) / 2, button: "none", buttons: 1, modifiers: 0 });
@@ -612,14 +640,20 @@ try {
             dragging: frame?.classList.contains('is-3d-dragging'),
             renderer: canvas?.dataset.layerRenderer,
             renderVersion: Number(canvas?.dataset.layerRenderVersion || 0),
+            cursor: canvas && getComputedStyle(canvas).cursor,
+            hoverLabel: Boolean(document.querySelector('.layer-hover-label')),
           };
           return state.dragging && state.renderer === 'webgl' && state.renderVersion > ${JSON.stringify(renderBeforeDrag)} ? state : null;
         })()`), "3D live redraw", 5_000);
         assert.equal(liveDrag.dragging, true, "3D drag did not enter its lightweight rendering state");
         assert.equal(liveDrag.renderer, "webgl", "3D drag left the WebGL renderer");
+        assert.equal(liveDrag.cursor, "move", "Orbit drag still shows a grab hand");
+        assert.equal(liveDrag.hoverLabel, false, "Orbit drag retained a stale hover label");
         assert.ok(liveDrag.renderVersion > renderBeforeDrag, "3D drag did not redraw the WebGL scene");
         await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: dragPoints.end.x, y: dragPoints.end.y, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
         await delay(600);
+        assert.equal(await evaluate("document.querySelector('.tree-row.selected')?.dataset.treeId"), selectionBeforeDrag, "Orbit drag changed the selected node");
+        assert.equal(await evaluate("getComputedStyle(document.querySelector('.layer-webgl-canvas')).cursor"), "crosshair", "Orbit release retained the drag cursor");
         const dragState = await evaluate("Number(document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderVersion || 0)");
         const rotatedScreenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
         writeFileSync(join(output, "layers3d-rotated.png"), Buffer.from(rotatedScreenshot.data, "base64"));
@@ -713,6 +747,21 @@ try {
       await until(() => evaluate("document.querySelector('.layer-scene')?.dataset.layerRootComposite === 'true' && Number(document.querySelector('.layer-scene')?.dataset.layerCompositeCount || 0) >= 1"), "collapsed root composite layer");
       assert.equal(await evaluate("document.querySelectorAll('.layer-plane.surface').length"), 0, "A snapshot without independent bitmaps must not substitute a full-screen crop for its subtree");
       recordCheck("collapsed legacy snapshot avoids unrelated screenshot pixels when independent images are unavailable");
+      await evaluate("document.querySelector('.zoom-reset').click(); document.querySelector('.inspector-close').click()");
+      const parentPoint = await until(() => evaluate(`(() => {
+        const c = document.querySelector('.layer-webgl-canvas');
+        if (!c?.dataset.layerProbeX) return null;
+        const r = c.getBoundingClientRect();
+        return { x: r.left + Number(c.dataset.layerProbeX), y: r.top + Number(c.dataset.layerProbeY) };
+      })()`), "collapsed parent hit point");
+      for (const clickCount of [1, 2]) {
+        await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", ...parentPoint, button: "left", buttons: 1, clickCount });
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...parentPoint, button: "left", buttons: 0, clickCount });
+        if (clickCount === 1) assert.equal(await evaluate("document.querySelector('.tree-row').getAttribute('aria-expanded')"), "false", "Single click expanded the parent");
+      }
+      await until(() => evaluate("document.querySelector('.tree-row')?.getAttribute('aria-expanded') === 'true' && document.querySelectorAll('.tree-row').length > 1 && document.querySelector('.layer-scene')?.dataset.layerRootComposite === 'false'"), "double-click expands the 3D parent and tree together");
+      recordCheck("real pointer double-click expands a collapsed parent in both the 3D scene and tree; single click only selects");
+      await evaluate("document.querySelector('.tree-collapse-all').click(); document.querySelector('.inspector-toggle').click()");
     }
     // In 3D a click intentionally picks the front-most projected layer. Switch
     // to 2D before checking source-image coordinate reverse lookup.
@@ -763,7 +812,7 @@ try {
       throw new Error(`${error.message}; screenshot reveal diagnostics=${JSON.stringify(revealDiagnostics)}`);
     }
     await delay(150);
-    const bounds = await evaluate("Array.from(document.querySelectorAll('.node-details dl div')).find(row => row.querySelector('dt').textContent === 'bounds')?.querySelector('dd').textContent");
+    const bounds = await evaluate("Array.from(document.querySelectorAll('.floating-inspector dl div')).find(row => row.querySelector('dt').textContent === 'bounds')?.querySelector('dd').textContent");
     const values = bounds?.match(/-?\d+/g)?.map(Number);
     assert.equal(values?.length, 4, "Selected node has no bounds");
     assert.ok(values[0] <= point.deviceX && values[2] > point.deviceX && values[1] <= point.deviceY && values[3] > point.deviceY, "Screenshot reverse lookup bounds do not contain the clicked point");
@@ -848,6 +897,9 @@ try {
     await connection.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Home", code: "Home", windowsVirtualKeyCode: 36 });
     await until(() => evaluate("document.querySelector('.tree-row.selected')?.dataset.treeId === '0'"), "keyboard Home selection");
     recordCheck("expand-all and keyboard End/Home navigation");
+    await evaluate("document.querySelector('.snapshot-drawer > summary').click()");
+    const historyBounds = await evaluate("document.querySelector('.snapshot-drawer-body').getBoundingClientRect().toJSON()");
+    assert.ok(historyBounds.left >= 0 && historyBounds.right <= runtime.viewport.width && historyBounds.bottom <= runtime.viewport.height, "History popover is clipped after moving into the header");
     await evaluate("Array.from(document.querySelectorAll('.snapshot-actions button')).find(button => button.textContent === '保存快照').click()");
     await until(() => evaluate("document.querySelectorAll('.snapshot-history-item').length === 1"), "save isolated snapshot");
     const storedGeometry = await evaluate("window.electronApi.loadSnapshots().then(result => { if (result.error) throw new Error(result.error); return result.snapshots[0]?.snapshot.captureGeometry; })");
@@ -856,6 +908,7 @@ try {
     await evaluate("document.querySelector('.snapshot-history-item').click()");
     await until(() => evaluate(`document.querySelector('.screenshot-stage')?.dataset.coordinateStatus === ${JSON.stringify(geometry.status)} && Boolean(document.querySelector('.selection-overlay'))`), "restored snapshot geometry");
     report.storedGeometry = storedGeometry;
+    await evaluate("document.querySelector('.snapshot-drawer').open = false");
     recordCheck("snapshot save/load and history preview retain capture geometry");
     await evaluate("document.querySelector('.inspector-panel').scrollIntoView({block:'start', behavior:'instant'})");
   } else {

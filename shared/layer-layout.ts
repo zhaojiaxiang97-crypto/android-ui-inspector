@@ -1,8 +1,8 @@
 import type { PixelSize, UiBounds, UiNode } from "./types";
 import { clipBounds, type ScreenRect } from "./screen-coordinates";
+import { compareSiblingNodes, layerOrdering } from "./layer-textures";
 
 const MAX_EXPLODED_DEPTH_SLOTS = 12;
-const MAX_OVERVIEW_DEPTH_SLOTS = 24;
 
 export type LayerScope = "focus" | "branch" | "all";
 
@@ -25,11 +25,12 @@ export type LayerRecord = {
   renderBounds: ScreenRect;
   z: number;
   zOrder: number;
-  zOrderSource: "drawing-order" | "index" | "xml-order";
+  zOrderSource: "z" | "drawing-order" | "index" | "xml-order";
   isSelected: boolean;
   isAncestor: boolean;
   isDescendant: boolean;
   isCollapsed: boolean;
+  isCompact?: boolean;
   isVirtual: boolean;
   hitTestable: boolean;
 };
@@ -77,41 +78,18 @@ function hasVirtualClass(node: UiNode) {
   return node.className?.includes("$VirtualChild") ?? false;
 }
 
-function numericOrdering(node: UiNode, keys: readonly string[]) {
-  for (const key of keys) {
-    const value = Number(node.attributes?.[key]);
-    if (Number.isFinite(value)) return value;
-  }
-  return Number.POSITIVE_INFINITY;
-}
-
 function compareLayerEntries(left: NodeEntry, right: NodeEntry) {
   if (left.depth !== right.depth) return left.order - right.order;
-  const drawingOrder = numericOrdering(left.node, ["drawing-order", "drawingOrder", "drawing_order"])
-    - numericOrdering(right.node, ["drawing-order", "drawingOrder", "drawing_order"]);
-  if (drawingOrder !== 0 && Number.isFinite(drawingOrder)) return drawingOrder;
-  const index = (left.node.index ?? Number.POSITIVE_INFINITY) - (right.node.index ?? Number.POSITIVE_INFINITY);
-  if (index !== 0 && Number.isFinite(index)) return index;
-  return left.order - right.order;
+  return compareSiblingNodes(left.node, right.node, left.order, right.order) || left.order - right.order;
 }
 
 function zOrderFor(entry: NodeEntry) {
-  const drawingOrder = numericOrdering(entry.node, ["drawing-order", "drawingOrder", "drawing_order"]);
-  if (Number.isFinite(drawingOrder)) return { value: drawingOrder, source: "drawing-order" as const };
-  if (entry.node.index !== null) return { value: entry.node.index, source: "index" as const };
-  return { value: entry.order, source: "xml-order" as const };
+  if (entry.node.attributes?.z?.trim() && Number.isFinite(Number(entry.node.attributes.z))) return { value: Number(entry.node.attributes.z), source: "z" as const };
+  return layerOrdering(entry.node, entry.order);
 }
 
 function compareSiblingEntries(left: NodeEntry, right: NodeEntry) {
-  const leftDrawingOrder = numericOrdering(left.node, ["drawing-order", "drawingOrder", "drawing_order"]);
-  const rightDrawingOrder = numericOrdering(right.node, ["drawing-order", "drawingOrder", "drawing_order"]);
-  if (Number.isFinite(leftDrawingOrder) && Number.isFinite(rightDrawingOrder)) return leftDrawingOrder - rightDrawingOrder || left.order - right.order;
-  if (Number.isFinite(leftDrawingOrder) !== Number.isFinite(rightDrawingOrder)) return Number.isFinite(leftDrawingOrder) ? -1 : 1;
-  const leftIndex = left.node.index;
-  const rightIndex = right.node.index;
-  if (leftIndex !== null && rightIndex !== null) return leftIndex - rightIndex || left.order - right.order;
-  if (leftIndex !== null || rightIndex !== null) return leftIndex !== null ? -1 : 1;
-  return left.order - right.order;
+  return compareSiblingNodes(left.node, right.node) || left.order - right.order;
 }
 
 function indexTree(root: UiNode) {
@@ -281,7 +259,7 @@ export function buildLayerRecords(root: UiNode, selectedNode: UiNode | null, siz
  * Selection changes only the highlight; it never changes the Z stack.
  */
 export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, size: PixelSize, options: LayerOverviewOptions = {}): LayerOverviewResult {
-  if (!root || !size.width || !size.height) return { parent: null, parentId: null, records: [], candidateCount: 0, truncated: false, omittedCount: 0 };
+  if (!root || !root.visibleToUser || !size.width || !size.height) return { parent: null, parentId: null, records: [], candidateCount: 0, truncated: false, omittedCount: 0 };
 
   const { entries, target, path } = layerPath(root, selectedNode?.id ?? root.id);
   const rootEntry = entries.get(root.id);
@@ -291,54 +269,89 @@ export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, si
   const selectedPath = new Set(path);
   const selectedDescendants = new Set(descendantsOf(entries, target, Number.MAX_SAFE_INTEGER).map((entry) => entry.node.id));
   const candidates: NodeEntry[] = [];
-  const stack = options.expandedIds && !options.expandedIds.has(rootEntry.node.id)
+  const stack: Array<{ entry: NodeEntry; emitOnly?: boolean }> = options.expandedIds && !options.expandedIds.has(rootEntry.node.id)
     ? []
     : rootEntry.node.children
     .map((child) => entries.get(child.id))
     .filter((entry): entry is NodeEntry => Boolean(entry))
     .sort(compareSiblingEntries)
-    .reverse();
+    .reverse().map((entry) => ({ entry }));
 
   while (stack.length > 0) {
-    const entry = stack.pop()!;
+    const { entry, emitOnly } = stack.pop()!;
+    if (!entry.node.visibleToUser) continue;
     const clipped = entry.node.bounds ? clipBounds(entry.node.bounds, size) : null;
-    if (entry.node.visibleToUser && clipped) candidates.push(entry);
-    if (options.expandedIds && !options.expandedIds.has(entry.node.id)) continue;
-    const children = entry.node.children
+    const children = emitOnly || (options.expandedIds && !options.expandedIds.has(entry.node.id)) ? [] : entry.node.children
       .map((child) => entries.get(child.id))
       .filter((child): child is NodeEntry => Boolean(child))
       .sort(compareSiblingEntries);
-    for (let index = children.length - 1; index >= 0; index -= 1) stack.push(children[index]);
+    if (!emitOnly && entry.node.attributes?.["inspection-source"] === "debug-qml") {
+      const behind = children.filter((child) => Number(child.node.attributes?.z ?? 0) < 0);
+      const above = children.filter((child) => Number(child.node.attributes?.z ?? 0) >= 0);
+      for (let index = above.length - 1; index >= 0; index--) stack.push({ entry: above[index] });
+      stack.push({ entry, emitOnly: true });
+      for (let index = behind.length - 1; index >= 0; index--) stack.push({ entry: behind[index] });
+    } else {
+      if (clipped) candidates.push(entry);
+      for (let index = children.length - 1; index >= 0; index--) stack.push({ entry: children[index] });
+    }
   }
 
   const maxLayers = clampInteger(options.maxLayers, 512, 1, 1024);
   const limited = candidates.slice(0, maxLayers);
+  if (candidates.includes(selectedEntry) && !limited.includes(selectedEntry)) {
+    limited[limited.length - 1] = selectedEntry;
+    const order = new Map(candidates.map((entry, index) => [entry, index]));
+    limited.sort((a, b) => order.get(a)! - order.get(b)!);
+  }
   const layerGap = clampNumber(options.layerGap, 64, 16, 160);
-  // ponytail: compress only Z spacing above 24 layers; add an explicit overview filter if real captures regularly exceed the 1024-layer rendering ceiling.
-  const depthStep = limited.length > MAX_OVERVIEW_DEPTH_SLOTS
-    ? layerGap * MAX_OVERVIEW_DEPTH_SLOTS / Math.max(1, limited.length - 1)
-    : layerGap;
-  const records = limited.map((entry, index): LayerRecord => {
+  const records: LayerRecord[] = [];
+  const emptyBounds = new Set<string>();
+  let frontDepth = 0;
+  for (const entry of limited) {
     const renderBounds = clipBounds(entry.node.bounds!, size)!;
     const zOrder = zOrderFor(entry);
-    return {
+    const isCollapsed = Boolean(entry.node.children.length && options.expandedIds && !options.expandedIds.has(entry.node.id));
+    // Only confirmed empty/skip-draw nodes are compacted. Missing or failed
+    // captures, real backgrounds and collapsed composites keep full spacing.
+    const isEmpty = !isCollapsed && (entry.node.layerImageEmpty === true || (!entry.node.layerImageDataUrl && entry.node.attributes?.["skip-draw"] === "true"));
+    const boundsKey = `${renderBounds.left},${renderBounds.top},${renderBounds.right},${renderBounds.bottom}`;
+    const isCompact = isEmpty && emptyBounds.has(boundsKey);
+    if (isEmpty) emptyBounds.add(boundsKey);
+    const step = layerGap * (isCompact ? 0.16 : 1);
+    let depth = step;
+    // Only overlapping regions need another plane. Disjoint controls share
+    // depth without losing their individual images, outlines or hit targets.
+    // ponytail: bounded O(n²) packing (at most 1024 records); use a spatial index only if this rendering cap grows.
+    for (const previous of records) {
+      const b = previous.renderBounds;
+      if (renderBounds.left < b.right && renderBounds.right > b.left && renderBounds.top < b.bottom && renderBounds.bottom > b.top) {
+        depth = Math.max(depth, previous.z + step);
+      }
+    }
+    frontDepth = Math.max(frontDepth, depth);
+    records.push({
       id: entry.node.id,
       parentId: entry.parentId,
       node: entry.node,
       depth: entry.depth,
       sourceBounds: entry.node.bounds!,
       renderBounds,
-      z: (index - limited.length + 1) * depthStep,
+      z: depth,
       zOrder: zOrder.value,
       zOrderSource: zOrder.source,
       isSelected: entry.node.id === target,
       isAncestor: entry.node.id !== target && selectedPath.has(entry.node.id),
       isDescendant: selectedDescendants.has(entry.node.id),
-      isCollapsed: Boolean(entry.node.children.length && options.expandedIds && !options.expandedIds.has(entry.node.id)),
+      isCollapsed,
+      isCompact,
       isVirtual: hasVirtualClass(entry.node),
       hitTestable: true,
-    };
-  });
+    });
+  }
+  // Keep the requested content spacing even in deep trees. The camera fits
+  // the full stack; more nodes must not silently squeeze every existing gap.
+  for (const record of records) record.z -= frontDepth;
   const rootBounds = rootEntry.node.bounds ? clipBounds(rootEntry.node.bounds, size) : null;
   const parent = rootBounds && rootEntry.node.visibleToUser
     ? {
@@ -348,7 +361,7 @@ export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, si
         depth: 0,
         sourceBounds: rootEntry.node.bounds!,
         renderBounds: rootBounds,
-        z: -limited.length * depthStep,
+        z: -frontDepth,
         zOrder: 0,
         zOrderSource: "xml-order" as const,
         isSelected: rootEntry.node.id === target,

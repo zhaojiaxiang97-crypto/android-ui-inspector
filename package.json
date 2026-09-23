@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Cross-platform Android UI hierarchy inspector",
   "author": "Android UI Inspector contributors",
+  "homepage": "https://github.com/zhaojiaxiang97-crypto/android-ui-inspector",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
@@ -31,10 +32,10 @@
     "benchmark:render": "bun run scripts/render-benchmark.mjs",
     "preview": "vite preview",
     "start": "node scripts/start-electron.cjs",
-    "package": "bun run build && electron-builder",
-    "package:win": "bun run build && electron-builder --win --publish never --config.electronDist=./node_modules/electron/dist",
-    "package:mac": "bun run build && electron-builder --mac",
-    "package:linux": "bun run build && electron-builder --linux"
+    "package": "bun run build && electron-builder --publish never",
+    "package:win": "bun run build && electron-builder --win --publish never",
+    "package:mac": "bun run build && electron-builder --mac --publish never",
+    "package:linux": "bun run build && electron-builder --linux --publish never"
   },
   "build": {
     "appId": "com.androiduiinspector.desktop",
@@ -61,6 +62,7 @@
     },
     "linux": {
       "category": "Development",
+      "maintainer": "Android UI Inspector contributors",
       "target": ["AppImage", "deb"]
     }
   },

@@ -129,9 +129,9 @@ export function AppHeader({
           <span className={loading ? "refresh-icon spinning" : "refresh-icon"}>↻</span>
           {loading ? "检查中" : "刷新设备"}
         </button>
-        <button className="capture-button" type="button" onClick={onCapture} disabled={!captureSerial || inspectionLoading || loading}>
+        <button className="capture-button" type="button" aria-label={inspectionLoading ? "采集中…" : "采集截图"} onClick={onCapture} disabled={!captureSerial || inspectionLoading || loading}>
           <span className={inspectionLoading ? "capture-icon spinning" : "capture-icon"} aria-hidden="true">●</span>
-          {inspectionLoading ? "采集中…" : "采集截图"}
+          {inspectionLoading ? "采集中…" : inspectionActive ? "采集" : "采集截图"}
         </button>
         <label className="topbar-search" htmlFor="global-node-search">
           <span aria-hidden="true">⌕</span>

@@ -1,9 +1,393 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:net";
-import { applyViewProperties, attachViewLayerImages } from "../electron/adb";
-import { captureTextureViewBitmaps, parseCapturedViewLayers } from "../electron/view-debug";
+import { inflateSync } from "node:zlib";
+import { applyViewProperties, attachViewLayerImages, debugViewTree } from "../electron/adb";
+import { captureViewBitmaps, captureViewLayers, matchesViewRoot, parseCapturedViewLayers } from "../electron/view-debug";
+import { inspectQmlHierarchy } from "../electron/qml-debug";
+import { makeNode } from "../benchmarks/fixtures";
 import type { UiNode } from "../shared/types";
+
+const activityTarget = { packageName: "example.app", activityName: "example.app.MainActivity", component: "example.app/example.app.MainActivity" };
+const activityHierarchy = `mAppBounds=Rect(0, 104 - 1080, 2355)
+    View Hierarchy:
+      DecorView@9c5dabe[MainActivity]
+        android.widget.LinearLayout{65440cf V.E...... ........ 0,0-1080,2355}
+          android.widget.TextView{abc V.ED..... ........ 10,20-110,60 #7f001 app:id/title}
+    Looper (main)
+`;
+
+test("Activity hierarchy retains shorthand DecorView and fills its measured geometry from DDMS", () => {
+  const root = debugViewTree(activityHierarchy, activityTarget);
+  const decor = root.children[0];
+  assert.equal(root.children.length, 1);
+  assert.equal(decor.className, "DecorView");
+  assert.equal(decor.attributes?.["view-ref"], "DecorView@9c5dabe");
+  assert.equal(decor.bounds, null);
+  assert.equal(decor.visibleToUser, true);
+  assert.equal(decor.children[0].className, "android.widget.LinearLayout");
+  assert.equal(decor.children[0].children[0].bounds?.raw, "[10,20][110,60]");
+  const ref = "com.android.internal.policy.DecorView@9c5dabe";
+  applyViewProperties(root, `${ref} layout:getLocationOnScreen_x()=1,0 layout:getLocationOnScreen_y()=1,0 layout:getWidth()=4,1080 layout:getHeight()=4,2355 \n`);
+  assert.equal(decor.className, "com.android.internal.policy.DecorView");
+  assert.equal(decor.attributes?.["view-ref"], ref);
+  assert.deepEqual(decor.bounds, { left: 0, top: 0, right: 1080, bottom: 2355, raw: "[0,0][1080,2355]" });
+  assert.equal(attachViewLayerImages(root, [{ name: "DecorView", x: 0, y: 0, width: 1080, height: 2355, visible: true, pngDataUrl: "data:image/png;base64,AA==" }]), 1);
+  assert.equal(decor.layerImageStatus, "captured");
+
+  const ordinary = debugViewTree(activityHierarchy.replace("DecorView@9c5dabe[MainActivity]", "com.android.internal.policy.DecorView{9c5dabe V.E...... ........ 0,0-1080,2355}"), activityTarget);
+  assert.equal(ordinary.children[0].attributes?.["view-ref"], ref);
+  assert.equal(ordinary.children[0].children[0].className, "android.widget.LinearLayout");
+});
+
+test("only DecorView shorthand is accepted as an alias of a qualified root identity", () => {
+  assert.equal(matchesViewRoot("DecorView@abc", "com.android.internal.policy.DecorView@abc"), true);
+  assert.equal(matchesViewRoot("DecorView@abc", "com.android.internal.policy.impl.PhoneWindow$DecorView@abc"), true);
+  assert.equal(matchesViewRoot("DecorView@abc", "com.android.internal.policy.DecorView@def"), false);
+  assert.equal(matchesViewRoot("DecorView@abc", "com.example.NotDecorView@abc"), false);
+  assert.equal(matchesViewRoot("LinearLayout@abc", "android.widget.LinearLayout@abc"), false);
+  assert.equal(matchesViewRoot("one.DecorView@abc", "two.DecorView@abc"), false);
+});
+
+test("DDMS restores omitted custom parents and images, preserving identity and native properties", () => {
+  const root = debugViewTree(activityHierarchy, activityTarget);
+  const row = (ref: string, values: Record<string, string>) => `${ref} ${Object.entries(values).map(([key, value]) => `${key}=${value.length},${value}`).join(" ")} \n`;
+  const geometry = { "layout:getLocationOnScreen_x()": "10", "layout:getLocationOnScreen_y()": "124", "layout:getWidth()": "100", "layout:getHeight()": "40" };
+  const dump = row("com.android.internal.policy.DecorView@9c5dabe", { "getVisibility()": "VISIBLE" })
+    + row(" example.CustomContainer@123", { ...geometry, mPrivateFlags: "0x1000080" })
+    + row("  android.widget.TextView@abc", { ...geometry, "text:mText": "Text = 😀", "isClickable()": "true" })
+    + row("  example.CustomImage@456", { ...geometry, mID: "id/avatar", "isEnabled()": "false" })
+    + row(" example.CustomImage@789", { ...geometry, "getVisibility()": "GONE" }) + "DONE.\n";
+  applyViewProperties(root, dump, true);
+  const decor = root.children[0], container = decor.children[0];
+  assert.equal(decor.children.length, 2);
+  assert.equal(container.className, "example.CustomContainer");
+  assert.equal(container.attributes?.["skip-draw"], "true");
+  assert.equal(container.children[0].id, "0/0/0/0");
+  assert.equal(container.children[0].text, "Text = 😀");
+  assert.equal(container.children[0].resourceId, "app:id/title");
+  assert.equal(container.children[0].clickable, true);
+  const image = container.children[1];
+  assert.equal(image.resourceId, "id/avatar");
+  assert.equal(image.enabled, false);
+  assert.equal(image.bounds?.raw, "[10,124][110,164]");
+  assert.equal(decor.children[1].visibleToUser, false);
+  assert.equal(attachViewLayerImages(root, [{ name: "id/avatar", visible: true, x: 10, y: 20, width: 100, height: 40, pngDataUrl: "own-image" }], { x: 0, y: 104 }), 1);
+  assert.equal(image.layerImageDataUrl, "own-image");
+  const children = root.children;
+  for (const invalid of [dump.replace("example.CustomImage@789", "example.CustomImage@456"), dump.replace("id/avatar", "id/a"), dump.replace(" example.CustomImage@789", "unparsed"), dump.replace("example.CustomImage@789", "other.Window@1").replace(" other.Window@1", "other.Window@1")]) {
+    assert.throws(() => applyViewProperties(root, invalid, true), /Debug/);
+    assert.equal(root.children, children, "invalid data must not replace the existing hierarchy");
+  }
+});
+
+test("identity fallback captures only each view itself, survives one failed draw and releases resources", async () => {
+  const int = (n: number) => { const b = Buffer.alloc(4); b.writeInt32BE(n); return b; };
+  const string = (s: string) => Buffer.concat([int(Buffer.byteLength(s)), Buffer.from(s)]);
+  const tagged = (tag: string, value: number) => Buffer.concat([Buffer.from(tag), int(value)]);
+  const result = (tag: string, value = 0, exception = 0) => Buffer.concat([tag === "V" ? Buffer.from("V") : tagged(tag, value), tagged("L", exception)]);
+  const methods = [
+    [1, "hashCode", "()I"], [2, "findView", "(Landroid/view/View;Ljava/lang/String;)Landroid/view/View;"],
+    [3, "getWidth", "()I"], [4, "getHeight", "()I"], [5, "getPixels", "([IIIIIII)V"],
+    [6, "<init>", "()V"], [7, "createSnapshot", "(Landroid/view/ViewDebug$CanvasProvider;Z)Landroid/graphics/Bitmap;"],
+    [8, "valueOf", "(Ljava/lang/String;)Landroid/graphics/Bitmap$Config;"], [9, "copy", "(Landroid/graphics/Bitmap$Config;Z)Landroid/graphics/Bitmap;"],
+    [10, "recycle", "()V"], [11, "getBitmap", "()Landroid/graphics/Bitmap;"],
+    [12, "next", "()Landroid/os/Message;"],
+    [13, "getInstance", "()Landroid/view/WindowManagerGlobal;"], [14, "getRootView", "(Ljava/lang/String;)Landroid/view/View;"],
+  ] as const;
+  const strings = new Map<number, string>(), classes = new Map<string, number>(), arrays = new Map<number, number>();
+  const pins: number[] = [], released: number[] = [], recycled: number[] = [], drawn: number[] = [];
+  let next = 1000, disposed = false, suspendCount = 0;
+  const refs = ["example.Image@aaa", "example.Image@bbb", "example.Image@ccc", "android.view.TextureView@ddd"];
+  const args = (data: Buffer, start: number, count: number) => {
+    const values: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const tag = data[start++];
+      values.push(tag === 90 ? data[start] : data.readInt32BE(start)); start += tag === 90 ? 1 : 4;
+    }
+    return values;
+  };
+  const server = createServer((socket) => {
+    let buffer = Buffer.alloc(0), handshaken = false;
+    socket.on("data", (data) => {
+      buffer = Buffer.concat([buffer, data]);
+      if (!handshaken) {
+        if (buffer.length < 14) return;
+        socket.write(buffer.subarray(0, 14)); buffer = buffer.subarray(14); handshaken = true;
+      }
+      while (buffer.length >= 11 && buffer.length >= buffer.readUInt32BE()) {
+        const packet = buffer.subarray(0, buffer.readUInt32BE()); buffer = buffer.subarray(packet.length);
+        const body = packet.subarray(11), command = `${packet[9]}/${packet[10]}`;
+        let payload = Buffer.alloc(0), event = false;
+        switch (command) {
+          case "1/7": payload = Buffer.concat(Array.from({ length: 5 }, () => int(4))); break;
+          case "1/4": payload = Buffer.concat([int(1), int(3)]); break;
+          case "11/1": payload = string("main"); break;
+          case "11/2": suspendCount++; break;
+          case "15/1":
+            assert.deepEqual([...body.subarray(0, 2)], [2, 1]);
+            assert.equal(body.readInt32BE(2), 2);
+            assert.equal(body[6], 3); assert.equal(body.readInt32BE(7), 3);
+            assert.equal(body.readInt32BE(13), classes.get("Landroid/os/MessageQueue;"));
+            assert.equal(body.readInt32BE(17), 12);
+            assert.equal(body.readBigInt64BE(21), 0n);
+            payload = int(7); event = true; break;
+          case "15/2": break;
+          case "199/1": assert.equal(body.subarray(0, 4).toString(), "VUOP"); assert.equal(body.readInt32BE(8), 2); break;
+          case "1/2": {
+            const name = body.subarray(4).toString();
+            if (!classes.has(name)) classes.set(name, classes.size + 1);
+            payload = Buffer.concat([int(1), Buffer.from([1]), int(classes.get(name)!), int(7)]); break;
+          }
+          case "3/1":
+            if (!classes.has("Landroid/view/View;")) classes.set("Landroid/view/View;", classes.size + 1);
+            payload = int(classes.get("Landroid/view/View;")!); break;
+          case "2/1": payload = string("Landroid/view/View;"); break;
+          case "2/5": payload = Buffer.concat([int(methods.length), ...methods.flatMap(([id, name, sig]) => [int(id), string(name), string(sig), int(0)])]); break;
+          case "9/7": pins.push(body.readInt32BE()); break;
+          case "9/8": released.push(body.readInt32BE()); break;
+          case "1/11": strings.set(++next, body.subarray(4).toString()); payload = int(next); break;
+          case "3/4": payload = result("L", 200); break;
+          case "3/3": {
+            const method = body.readInt32BE(8), values = args(body, 16, body.readInt32BE(12));
+            if (method === 2) {
+              assert.equal(values[0], 100, "only search within the identified window");
+              const index = refs.indexOf(strings.get(values[1])!);
+              payload = result("L", strings.get(values[1]) === "example.DecorView@abc" ? 100 : index < 0 ? 0 : 501 + index);
+            } else if (method === 13) payload = result("L", 400);
+            else { assert.equal(method, 8); payload = result("L", 300); }
+            break;
+          }
+          case "9/6": {
+            const object = body.readInt32BE(), method = body.readInt32BE(12), values = args(body, 20, body.readInt32BE(16));
+            switch (method) {
+              case 1: payload = result("I", 0xabc); break;
+              case 3: case 4: payload = result("I", 1); break;
+              case 7:
+                assert.deepEqual(values, [200, 1], "snapshot must skip children"); drawn.push(object);
+                payload = object === 502 ? result("L", 0, 999) : result("L", object + 100); break;
+              case 9: assert.deepEqual(values, [300, 0]); payload = result("L", object + 100); break;
+              case 11: payload = result("L", object + 200); break;
+              case 14: assert.equal(strings.get(values[0]), "activity-window"); payload = result("L", 100); break;
+              case 5: arrays.set(values[0], object); payload = result("V"); break;
+              case 10: recycled.push(object); payload = result("V"); break;
+              default: assert.fail(`unknown method ${method}`);
+            }
+            break;
+          }
+          case "4/1": payload = tagged("[", ++next); break;
+          case "13/2": payload = Buffer.concat([Buffer.from("I"), int(1), Buffer.from([255, arrays.get(body.readInt32BE())! - 700, 0, 0])]); break;
+          case "1/6": disposed = true; break;
+          default: assert.fail(`unexpected command ${command}`);
+        }
+        const header = Buffer.alloc(11); header.writeUInt32BE(11 + payload.length); packet.copy(header, 4, 4, 8); header[8] = 0x80;
+        socket.write(Buffer.concat([header, payload]));
+        if (event) {
+          const eventData = Buffer.concat([Buffer.from([1]), int(1), Buffer.from([2]), int(7), int(3)]);
+          const header = Buffer.alloc(11); header.writeUInt32BE(11 + eventData.length); header[9] = 64; header[10] = 100;
+          socket.write(Buffer.concat([header, eventData]));
+        }
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address(); assert.ok(address && typeof address !== "string");
+    const captured = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, refs.map((ref) => ({ ref, captureOwn: true })), AbortSignal.timeout(5000));
+    assert.deepEqual(drawn, [501, 502, 503]);
+    assert.deepEqual([...captured.images.keys()], [refs[3], refs[0], refs[2]]);
+    assert.match(captured.failures.get(refs[1])!, /exception/);
+    for (const [ref, image] of captured.images) {
+      const png = Buffer.from(image.pngDataUrl.split(",")[1], "base64");
+      const pixels = inflateSync(png.subarray(41, 41 + png.readUInt32BE(33)));
+      assert.deepEqual([...pixels], [0, refs.indexOf(ref) + 1, 0, 0, 255], "pixels stay with their object, even for same-name views");
+    }
+    assert.equal(suspendCount, 0, "never forcibly interrupt a draw/layout operation");
+    assert.equal(disposed, true);
+    assert.deepEqual(released.sort(), pins.sort());
+    assert.deepEqual(recycled.sort(), [601, 701, 603, 703, 704].sort());
+    disposed = false;
+    await assert.rejects(captureViewBitmaps(address.port, { rootRef: "example.DecorView@stale", windowName: "activity-window" }, [], AbortSignal.timeout(5000)), /窗口身份已变化/);
+    assert.equal(disposed, true);
+    assert.deepEqual(drawn, [501, 502, 503], "a stale window never captures another view's pixels");
+    assert.deepEqual(released.sort(), pins.sort());
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
+
+for (const legacy of [false, true]) test(`Surface capture isolates the actual buffer and respects protection (${legacy ? "PixelCopy backend" : "Android 14 backend"})`, async () => {
+  const int = (n: number) => { const b = Buffer.alloc(4); b.writeInt32BE(n); return b; };
+  const string = (s: string) => Buffer.concat([int(Buffer.byteLength(s)), Buffer.from(s)]);
+  const tagged = (tag: string, n: number) => {
+    const value = tag === "Z" ? Buffer.from([n]) : tag === "J" ? Buffer.alloc(8) : int(n);
+    if (tag === "J") value.writeBigInt64BE(BigInt(n));
+    return Buffer.concat([Buffer.from(tag), value]);
+  };
+  const result = (tag: string, n = 0) => Buffer.concat([tag === "V" ? Buffer.from(tag) : tagged(tag, n), tagged("L", 0)]);
+  const definitions = [
+    ["next", "()Landroid/os/Message;"], ["findView", "(Landroid/view/View;Ljava/lang/String;)Landroid/view/View;"],
+    ["getWidth", "()I"], ["getHeight", "()I"], ["getPixels", "([IIIIIII)V"], ["recycle", "()V"],
+    ["getInstance", "()Landroid/view/WindowManagerGlobal;"], ["getRootView", "(Ljava/lang/String;)Landroid/view/View;"],
+    ["valueOf", "(Ljava/lang/String;)Landroid/graphics/Bitmap$Config;"], ["copy", "(Landroid/graphics/Bitmap$Config;Z)Landroid/graphics/Bitmap;"],
+    ["getLayoutParams", "()Landroid/view/ViewGroup$LayoutParams;"], ["isValid", "()Z"],
+    ["forName", "(Ljava/lang/String;)Ljava/lang/Class;"], ["createBitmap", "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;"],
+    ["<init>", "(Landroid/view/SurfaceControl;)V"], ["<init>", "(IIII)V"], ["myUid", "()I"],
+    ["setUid", "(J)Landroid/window/ScreenCapture$CaptureArgs$Builder;"],
+    ["setCaptureSecureLayers", "(Z)Landroid/window/ScreenCapture$CaptureArgs$Builder;"],
+    ["setAllowProtected", "(Z)Landroid/window/ScreenCapture$CaptureArgs$Builder;"],
+    ["setChildrenOnly", "(Z)Landroid/window/ScreenCapture$LayerCaptureArgs$Builder;"],
+    ["setSourceCrop", "(Landroid/graphics/Rect;)Landroid/window/ScreenCapture$CaptureArgs$Builder;"],
+    ["setFrameScale", "(FF)Landroid/window/ScreenCapture$CaptureArgs$Builder;"],
+    ["build", "()Landroid/window/ScreenCapture$LayerCaptureArgs;"],
+    ["captureLayers", "(Landroid/window/ScreenCapture$LayerCaptureArgs;)Landroid/window/ScreenCapture$ScreenshotHardwareBuffer;"],
+    ["getHardwareBuffer", "()Landroid/hardware/HardwareBuffer;"], ["containsSecureLayers", "()Z"],
+    ["asBitmap", "()Landroid/graphics/Bitmap;"], ["close", "()V"], ["getBitmap", "()Landroid/graphics/Bitmap;"],
+    ...(legacy ? [["copySurfaceInto", "(Landroid/view/Surface;Landroid/graphics/Rect;Landroid/graphics/Bitmap;)I"]] : []),
+  ];
+  const fields = [["mSurfaceFlags", "I"], ["flags", "I"], ["mSurface", "Landroid/view/Surface;"], ["mSurfacePackage", "Landroid/view/SurfaceControlViewHost$SurfacePackage;"], ["mBlastSurfaceControl", "Landroid/view/SurfaceControl;"], ["mSurfaceWidth", "I"], ["mSurfaceHeight", "I"]];
+  const refs = ["example.Video@a", "example.Video@b", "example.Video@c", "example.Video@d", "example.Video@e", "example.LivePlayTextureView@f", "example.CanvasHost@g"];
+  const classes = new Map<string, number>(), strings = new Map<number, string>(), objects = new Map<number, number>();
+  const pins: number[] = [], released: number[] = [], recycled: number[] = [], closed: number[] = [], copied: number[] = [];
+  const classId = (name: string) => { if (!classes.has(name)) classes.set(name, classes.size + 1); return classes.get(name)!; };
+  const className = (id: number) => [...classes].find(([, value]) => value === id)![0];
+  let next = 10000, secureWindow = false, disposed = 0;
+  const args = (data: Buffer, start: number, count: number) => {
+    const values: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const tag = data[start++];
+      values.push(tag === 90 ? data[start] : tag === 74 ? Number(data.readBigInt64BE(start)) : tag === 70 ? data.readFloatBE(start) : data.readInt32BE(start));
+      start += tag === 90 ? 1 : tag === 74 ? 8 : 4;
+    }
+    return values;
+  };
+  const server = createServer((socket) => {
+    let buffer = Buffer.alloc(0), handshaken = false;
+    socket.on("data", (data) => {
+      buffer = Buffer.concat([buffer, data]);
+      if (!handshaken) {
+        if (buffer.length < 14) return;
+        socket.write(buffer.subarray(0, 14)); buffer = buffer.subarray(14); handshaken = true;
+      }
+      while (buffer.length >= 11 && buffer.length >= buffer.readUInt32BE()) {
+        const packet = buffer.subarray(0, buffer.readUInt32BE()); buffer = buffer.subarray(packet.length);
+        const body = packet.subarray(11), command = `${packet[9]}/${packet[10]}`;
+        let payload = Buffer.alloc(0), event = false;
+        switch (command) {
+          case "1/7": payload = Buffer.concat(Array.from({ length: 5 }, () => int(4))); break;
+          case "1/2": payload = Buffer.concat([int(1), Buffer.from([1]), int(classId(body.subarray(4).toString())), int(7)]); break;
+          case "3/1": {
+            const name = className(body.readInt32BE());
+            payload = int(classId(name === "Lexample/Video;" ? "Landroid/opengl/GLSurfaceView;" : name === "Landroid/opengl/GLSurfaceView;" ? "Landroid/view/SurfaceView;" : name === "Lexample/CanvasHost;" ? "Landroid/view/TextureView;" : "Landroid/view/View;")); break;
+          }
+          case "2/1": payload = string(className(body.readInt32BE())); break;
+          case "2/4": case "2/5": {
+            const entries = command === "2/4" ? fields : definitions;
+            payload = Buffer.concat([int(entries.length), ...entries.flatMap(([name, sig], i) => [int(i + 1), string(name), string(sig), int(0)])]); break;
+          }
+          case "1/4": payload = Buffer.concat([int(1), int(3)]); break;
+          case "11/1": payload = string("main"); break;
+          case "15/1": payload = int(7); break;
+          case "15/2": break;
+          case "199/1":
+            assert.equal(body.subarray(0, 4).toString(), "VUOP");
+            assert.equal(body.readInt32BE(8), 2, "wake idle UI with a non-blocking read, not invoke or layout mutation");
+            event = true; break;
+          case "1/11": strings.set(++next, body.subarray(4).toString()); payload = int(next); break;
+          case "9/7": pins.push(body.readInt32BE()); break;
+          case "9/8": released.push(body.readInt32BE()); break;
+          case "17/1": payload = Buffer.concat([Buffer.from([1]), int(body.readInt32BE() - 9000)]); break;
+          case "9/2": {
+            const object = body.readInt32BE(), [name, signature] = fields[body.readInt32BE(8) - 1];
+            const value = name === "mSurfaceFlags" ? (object === 504 ? 0x80 : 0) : name === "flags" ? (secureWindow ? 0x2000 : 0) : name === "mSurface" ? object + 2000 : name === "mBlastSurfaceControl" ? object + 1000 : name === "mSurfacePackage" ? 0 : 2;
+            payload = Buffer.concat([int(1), tagged(signature[0], value)]); break;
+          }
+          case "3/3": case "3/4": case "9/6": {
+            const instance = command === "9/6", object = instance ? body.readInt32BE() : 0;
+            const [name, signature] = definitions[body.readInt32BE(instance ? 12 : 8) - 1];
+            const values = args(body, instance ? 20 : 16, body.readInt32BE(instance ? 16 : 12));
+            let value = 0, tag = "L";
+            switch (name) {
+              case "findView": assert.equal(values[0], 100); value = strings.get(values[1]) === "example.Root@1" ? 100 : 501 + refs.indexOf(strings.get(values[1])!); break;
+              case "getInstance": value = 101; break;
+              case "getRootView": assert.equal(strings.get(values[0]), "window"); value = 100; break;
+              case "valueOf": value = 300; break;
+              case "getLayoutParams": assert.equal(object, 100); value = 102; break;
+              case "isValid": tag = "Z"; value = object === 2503 ? 0 : 1; break;
+              case "getWidth": case "getHeight": tag = "I"; value = 1; break;
+              case "forName": value = 9000 + classId(`L${strings.get(values[0])!.replace(/\./g, "/")};`); break;
+              case "<init>":
+                value = ++next;
+                if (signature.includes("SurfaceControl")) { assert.ok([1501, 1502, 1505].includes(values[0])); objects.set(value, values[0] - 1000); }
+                else assert.deepEqual(values, [0, 0, 2, 2]);
+                break;
+              case "myUid": tag = "I"; value = 10329; break;
+              case "setUid": assert.deepEqual(values, [10329]); value = object; break;
+              case "setCaptureSecureLayers": case "setAllowProtected": case "setChildrenOnly": assert.deepEqual(values, [0]); value = object; break;
+              case "setFrameScale": assert.ok(values.every((value) => Math.abs(value - 0.505) < 0.0001)); value = object; break;
+              case "setSourceCrop": value = object; break;
+              case "build": value = object; break;
+              case "captureLayers": { const owner = objects.get(values[0])!; copied.push(owner); value = owner === 505 || owner === 502 ? 0 : owner + 3000; break; }
+              case "getHardwareBuffer": value = object + 1000; break;
+              case "containsSecureLayers": tag = "Z"; break;
+              case "asBitmap": value = object + 2000; break;
+              case "copy": assert.deepEqual(values, [300, 0]); value = object + 1000; break;
+              case "createBitmap": assert.deepEqual(values, [1, 1, 300]); value = ++next; break;
+              case "copySurfaceInto":
+                assert.equal(values[1], 0, "copy the source Surface, never a window crop");
+                objects.set(values[2], values[0] - 2000); copied.push(values[0] - 2000);
+                tag = "I"; value = values[0] === 2505 ? 4 : values[0] === 2502 ? 3 : 0; break;
+              case "getBitmap": value = object + 6000; break;
+              case "getPixels": objects.set(values[0], legacy && objects.has(object) ? objects.get(object)! : object - 6000); tag = "V"; break;
+              case "recycle": recycled.push(object); tag = "V"; break;
+              case "close": closed.push(object); tag = "V"; break;
+              default: assert.fail(`Unexpected method ${name}`);
+            }
+            payload = result(tag, value); break;
+          }
+          case "4/1": payload = tagged("[", ++next); break;
+          case "13/2": payload = Buffer.concat([Buffer.from("I"), int(1), Buffer.from([255, objects.get(body.readInt32BE())! - 500, 23, 42])]); break;
+          case "1/6": disposed++; break;
+          default: assert.fail(`Unexpected command ${command}`);
+        }
+        const header = Buffer.alloc(11); header.writeUInt32BE(11 + payload.length); packet.copy(header, 4, 4, 8); header[8] = 0x80;
+        socket.write(Buffer.concat([header, payload]));
+        if (event) {
+          const payload = Buffer.concat([Buffer.from([1]), int(1), Buffer.from([2]), int(7), int(3)]);
+          const header = Buffer.alloc(11); header.writeUInt32BE(11 + payload.length); header[9] = 64; header[10] = 100;
+          socket.write(Buffer.concat([header, payload]));
+        }
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address(); assert.ok(address && typeof address !== "string");
+    const capture = (refs: string[]) => captureViewBitmaps(address.port, { rootRef: "example.Root@1", windowName: "window" }, refs.map((ref) => ({ ref, captureOwn: false })), AbortSignal.timeout(5000));
+    const captured = await capture(refs);
+    assert.deepEqual([...captured.images.keys()], [refs[0], refs[6]]);
+    assert.equal(captured.kinds.get(refs[0]), "surface", "custom GLSurfaceView subclass is recognized");
+    assert.equal(captured.kinds.get(refs[5]), "own", "a name containing TextureView is not a TextureView");
+    assert.equal(captured.kinds.get(refs[6]), "texture", "custom TextureView subclass is recognized");
+    assert.match(captured.failures.get(refs[1])!, legacy ? /尚未提交/ : /无画面/);
+    assert.match(captured.failures.get(refs[2])!, /已经销毁/);
+    assert.match(captured.failures.get(refs[3])!, /保护/);
+    assert.match(captured.failures.get(refs[4])!, /保护/);
+    for (const [ref, image] of captured.images) {
+      const png = Buffer.from(image.pngDataUrl.split(",")[1], "base64");
+      assert.deepEqual([...inflateSync(png.subarray(41, 41 + png.readUInt32BE(33)))], [0, refs.indexOf(ref) + 1, 23, 42, 255]);
+    }
+    assert.deepEqual(copied, [501, 502, 505], "invalid/secure surfaces never reach the copy API; frame availability is checked by the copy backend");
+    assert.deepEqual(closed, legacy ? [] : [4501]);
+    assert.equal(recycled.length, legacy ? 4 : 3);
+    assert.deepEqual(released.sort(), pins.sort());
+    secureWindow = true;
+    const blocked = await capture([refs[0]]);
+    assert.equal(blocked.images.size, 0);
+    assert.match(blocked.failures.get(refs[0])!, /FLAG_SECURE/);
+    assert.deepEqual(copied, [501, 502, 505]);
+    assert.equal(disposed, 2);
+    assert.deepEqual(released.sort(), pins.sort());
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
 
 test("failed video capture disposes the debugger session", async () => {
   const commands: number[][] = [];
@@ -29,7 +413,7 @@ test("failed video capture disposes the debugger session", async () => {
   try {
     const address = server.address();
     assert.ok(address && typeof address !== "string");
-    await assert.rejects(captureTextureViewBitmaps(address.port, ["TextureView@123"]), /JDWP 1\/7/);
+    await assert.rejects(captureViewBitmaps(address.port, { rootRef: "DecorView@a", windowName: "activity-window" }, [{ ref: "TextureView@123", captureOwn: true }]), /JDWP 1\/7/);
     assert.deepEqual(commands, [[1, 7], [1, 6]]);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -108,4 +492,116 @@ test("real alpha hides transparent overlays and descendants; screen coordinates 
   assert.equal(root.bounds?.raw, "[10,20][110,220]");
   assert.equal(shadow.visibleToUser, false);
   assert.equal(child.visibleToUser, false);
+});
+
+test("same-name/same-bounds layers are ambiguous, but an explicit view identity is unique", () => {
+  const a = { ...makeNode("0/0"), resourceId: null, attributes: { "view-ref": "ViewGroup@a" } };
+  const b = { ...makeNode("0/1"), resourceId: null, attributes: { "view-ref": "ViewGroup@b" } };
+  const root = { ...makeNode("0"), children: [a, b] };
+  const layer = { name: "ViewGroup", visible: true, x: 0, y: 0, width: 360, height: 48, pngDataUrl: "data:image/png;base64,AA==" };
+  assert.equal(attachViewLayerImages(root, [layer]), 0);
+  assert.equal(root.children[0].layerImageStatus, "ambiguous");
+  assert.equal(root.children[1].layerImageDataUrl, undefined);
+  assert.equal(attachViewLayerImages(root, [{ ...layer, viewRef: "ViewGroup@b" }]), 1);
+  assert.equal(root.children[1].layerImageStatus, "captured");
+  assert.equal(root.children[0].layerImageStatus, "unavailable");
+});
+
+test("duplicate bitmap records do not silently attach the first image", () => {
+  const child: UiNode = { ...makeNode("0/0"), resourceId: null };
+  const root = { ...makeNode("0"), children: [child] };
+  const layer = { name: "ViewGroup", visible: true, x: 0, y: 0, width: 360, height: 48, pngDataUrl: "data:image/png;base64,AA==" };
+  assert.equal(attachViewLayerImages(root, [layer, { ...layer, pngDataUrl: "other" }]), 0);
+  assert.equal(child.layerImageStatus, "ambiguous");
+  assert.equal(child.layerImageDataUrl, undefined);
+});
+
+test("skip-draw containers do not compete with anonymous drawable images, but retain explicit identity", () => {
+  const child: UiNode = { ...makeNode("0/0/0"), resourceId: null, attributes: { "view-ref": "ViewGroup@b", "skip-draw": "false" } };
+  const parent: UiNode = { ...makeNode("0/0"), resourceId: null, attributes: { "view-ref": "ViewGroup@a", "skip-draw": "true" }, children: [child], layerImageEmpty: true };
+  const root = { ...makeNode("0"), children: [parent] };
+  const layer = { name: "ViewGroup", visible: true, x: 0, y: 0, width: 360, height: 48, pngDataUrl: "child-own-image" };
+  assert.equal(attachViewLayerImages(root, [layer]), 1);
+  assert.equal(parent.layerImageStatus, "unavailable");
+  assert.equal(parent.layerImageDataUrl, undefined);
+  assert.equal(parent.layerImageEmpty, undefined, "new capture clears stale transparency");
+  assert.equal(child.layerImageDataUrl, "child-own-image");
+  assert.equal(attachViewLayerImages(root, [{ ...layer, viewRef: "ViewGroup@a" }]), 1);
+  assert.equal(parent.layerImageStatus, "captured");
+  delete parent.attributes!["skip-draw"];
+  assert.equal(attachViewLayerImages(root, [layer]), 0, "an unknown draw flag must not hide genuine ambiguity");
+  assert.equal(child.layerImageStatus, "ambiguous");
+});
+
+test("exported native z, clipping and padding are preserved without inventing missing values", () => {
+  const root: UiNode = { ...makeNode("root"), attributes: { "view-ref": "View@a" } };
+  const values = { "drawing:getZ()": "7.5", "drawing:getElevation()": "5", "drawing:getClipChildren()": "true", "drawing:getClipToPadding()": "false", "padding:mPaddingLeft": "12" };
+  applyViewProperties(root, `View@a ${Object.entries(values).map(([k, v]) => `${k}=${v.length},${v}`).join(" ")} `);
+  assert.equal(root.attributes?.["z"], "7.5");
+  assert.equal(root.attributes?.["clip-children"], "true");
+  assert.equal(root.attributes?.["padding-left"], "12");
+  assert.equal(root.attributes?.["padding-right"], undefined);
+});
+
+test("Debug capture chooses the window whose root identity matches, not the first window", async () => {
+  const captured: string[] = [];
+  let duplicateRoot = false;
+  const int = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+  const utf16 = (s: string) => Buffer.from(s, "utf16le").swap16();
+  const server = createServer((socket) => {
+    let buffer = Buffer.alloc(0), handshaken = false;
+    socket.on("data", (data) => {
+      buffer = Buffer.concat([buffer, data]);
+      if (!handshaken) {
+        if (buffer.length < 14) return;
+        socket.write(buffer.subarray(0, 14)); buffer = buffer.subarray(14); handshaken = true;
+      }
+      while (buffer.length >= 11 && buffer.length >= buffer.readUInt32BE()) {
+        const packet = buffer.subarray(0, buffer.readUInt32BE()); buffer = buffer.subarray(packet.length);
+        const type = packet.subarray(11, 15).toString();
+        let data: Buffer;
+        if (type === "VULW") data = Buffer.concat([int(2), ...["dialog", "activity"].flatMap((name) => [int(name.length), utf16(name)])]);
+        else {
+          const operation = packet.readUInt32BE(19), length = packet.readUInt32BE(23);
+          const name = Buffer.from(packet.subarray(27, 27 + length * 2)).swap16().toString("utf16le");
+          if (operation === 1) data = Buffer.from(name === "activity" || duplicateRoot ? "com.android.internal.policy.DecorView@9c5dabe properties\n" : "com.android.internal.policy.DecorView@1b9116c properties\n");
+          else { captured.push(name); data = Buffer.concat([int(1080), int(2400), Buffer.from([2])]); }
+        }
+        const payload = Buffer.concat([Buffer.from(type), int(data.length), data]);
+        const reply = Buffer.alloc(11); reply.writeUInt32BE(11 + payload.length); packet.copy(reply, 4, 4, 8); reply[8] = 0x80;
+        socket.write(Buffer.concat([reply, payload]));
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address(); assert.ok(address && typeof address !== "string");
+    let dump = "";
+    const root = debugViewTree(activityHierarchy, activityTarget);
+    const rootRefs = root.children.map((node) => node.attributes!["view-ref"]);
+    await captureViewLayers(address.port, { rootRefs, onHierarchy: (value) => { dump = value; } });
+    assert.deepEqual(captured, ["activity"]);
+    assert.match(dump, /^com\.android\.internal\.policy\.DecorView@9c5dabe/);
+    await assert.rejects(captureViewLayers(address.port, { rootRefs: ["stale"], onHierarchy: () => assert.fail("wrong window properties") }), /窗口与当前控件树不一致/);
+    assert.deepEqual(captured, ["activity"]);
+    duplicateRoot = true;
+    await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchy: () => assert.fail("ambiguous window properties") }), /多个 Debug 窗口匹配/);
+    assert.deepEqual(captured, ["activity"]);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
+
+test("cancel closes stalled native and QML connections promptly", async () => {
+  for (const capture of [
+    (port: number, signal: AbortSignal) => captureViewBitmaps(port, { rootRef: "DecorView@a", windowName: "activity-window" }, [], signal),
+    (port: number, signal: AbortSignal) => inspectQmlHierarchy(port, signal),
+  ]) {
+    const controller = new AbortController();
+    const server = createServer((socket) => { socket.on("data", () => controller.abort()); });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const timeout = setTimeout(() => controller.abort(), 1000);
+    try {
+      const address = server.address(); assert.ok(address && typeof address !== "string");
+      await assert.rejects(capture(address.port, controller.signal));
+    } finally { clearTimeout(timeout); await new Promise<void>((resolve) => server.close(() => resolve())); }
+  }
 });

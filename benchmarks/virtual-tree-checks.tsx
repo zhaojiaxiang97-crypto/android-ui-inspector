@@ -51,6 +51,10 @@ export async function verifyVirtualTreeBehavior() {
     check(chevron, `missing chevron ${id}`);
     flushSync(() => chevron.click());
   };
+  const doubleClick = (element: HTMLElement) => {
+    for (const detail of [1, 2]) flushSync(() => element.dispatchEvent(new MouseEvent("click", { bubbles: true, detail })));
+    flushSync(() => element.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, detail: 2 })));
+  };
   const scroll = async (top: number) => {
     const element = viewport();
     flushSync(() => { element.scrollTop = top; element.dispatchEvent(new Event("scroll", { bubbles: true })); });
@@ -89,6 +93,17 @@ export async function verifyVirtualTreeBehavior() {
     click(".tree-empty .tree-clear");
     check(count() === 9, "empty filter discarded manual expansion");
     checks.push("small tree, expand without selecting, empty filter restores expansion");
+
+    toggle("0/0");
+    doubleClick(row("0/0")!);
+    check(count() === 9 && row("0/0")!.getAttribute("aria-expanded") === "true" && selectedId === "0/0", "double-click did not select and expand the parent");
+    const expandedBefore = expanded;
+    doubleClick(row("0/0")!);
+    doubleClick(row("0/0/0")!);
+    check(expanded === expandedBefore && !expanded.has("0/0/0"), "double-click collapsed an open parent or expanded a leaf");
+    doubleClick(row("0/0")!.querySelector<HTMLElement>(".tree-chevron")!);
+    check(row("0/0")!.getAttribute("aria-expanded") === "true", "chevron double-click bubbled into row expansion");
+    checks.push("double-click selects and expands parents only, stays open on repeat and preserves chevron behavior");
 
     query = "Node 6"; draw();
     check(count() === 3 && host.querySelector<HTMLButtonElement>(".tree-collapse-all")!.disabled, "filter auto expansion");

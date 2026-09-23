@@ -50,9 +50,12 @@ export type UiNode = {
   scrollable: boolean;
   selected: boolean;
   visibleToUser: boolean;
-  // Exact transparent bitmap captured from a debuggable native View.
+  // Native transparent bitmap, or self-contained SVG rebuilt from measured QML style.
   layerImageDataUrl?: string;
   layerImageSize?: PixelSize;
+  // Only set after checking the full bitmap; absent means not measured.
+  layerImageEmpty?: boolean;
+  layerImageStatus?: "captured" | "style" | "unavailable" | "ambiguous" | "hidden" | "failed";
   // Source-specific attributes not promoted to typed properties.
   attributes?: Record<string, string>;
   children: UiNode[];
@@ -73,7 +76,11 @@ export type UiSnapshot = {
   hierarchyDumpMode?: HierarchyDumpMode;
   // Optional so snapshots saved before display checks remain readable.
   captureGeometry?: CaptureGeometry;
+  captureTimings?: Record<string, number>;
+  captureDurationMs?: number;
 };
+
+export type InspectionProgress = { requestId: string; stage: string; elapsedMs: number };
 
 export type ExportFormat = "json" | "xml" | "png";
 

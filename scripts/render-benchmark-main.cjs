@@ -42,8 +42,10 @@ app.whenReady().then(async () => {
     const virtualZoomChecks = await window.webContents.executeJavaScript("window.verifyVirtualTreeBehavior()");
     window.webContents.setZoomFactor(1);
     console.log("Virtual tree checks at 125% zoom:", virtualZoomChecks.checks.length, "passed");
+    const inspectionChecks = await window.webContents.executeJavaScript("window.verifyInspectionBehavior()");
+    console.log("Inspection lifecycle checks:", JSON.stringify(inspectionChecks));
     if (checksOnly) {
-      writeFileSync(join(outputDirectory, diagnosticUnsandboxed ? "tree-behavior-diagnostic.json" : "tree-behavior.json"), JSON.stringify({ generatedAt: new Date().toISOString(), sandbox: !diagnosticUnsandboxed, correctness, virtualCorrectness, virtualZoomChecks }, null, 2) + "\n");
+      writeFileSync(join(outputDirectory, diagnosticUnsandboxed ? "tree-behavior-diagnostic.json" : "tree-behavior.json"), JSON.stringify({ generatedAt: new Date().toISOString(), sandbox: !diagnosticUnsandboxed, correctness, virtualCorrectness, virtualZoomChecks, inspectionChecks }, null, 2) + "\n");
       clearTimeout(deadline);
       app.exit(0);
       return;

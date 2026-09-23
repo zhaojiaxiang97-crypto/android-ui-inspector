@@ -17,9 +17,15 @@ jobs:
         uses: actions/checkout@v4
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - name: Install dependencies
         run: bun install --frozen-lockfile
         shell: bash
+      - name: Prepare Electron runtime
+        run: node scripts/prepare-ci-runtime.cjs
       - name: Run renderer checks
         shell: bash
         env:

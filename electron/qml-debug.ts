@@ -1,11 +1,38 @@
 import { createConnection, type Socket } from "node:net";
+import { qmlStyleFrom, type QmlRectStyle } from "../shared/qml-style";
 
 const QML_DEBUG_PLUGIN = "QmlDebugger";
 const MAX_PACKET_BYTES = 32 * 1024 * 1024;
 const MAX_OBJECTS = 20_000;
 const PACKET_TIMEOUT_MS = 15_000;
 const GEOMETRY_BATCH_SIZE = 200;
-const GEOMETRY_EXPRESSION = `typeof this.width === "number" && typeof this.height === "number" ? [
+export const GEOMETRY_EXPRESSION = `(function() {
+  if (typeof this.width !== "number" || typeof this.height !== "number") return null;
+  function rgba(c) { return c && typeof c.r === "number" ? [c.r, c.g, c.b, c.a] : null; }
+  var style = null;
+  var rectangle = this.border && typeof this.border.width === "number" && typeof this.radius === "number";
+  var window = typeof this.mapToItem !== "function" && this.contentItem;
+  if ((rectangle || window) && rgba(this.color)) {
+    var radius = rectangle ? this.radius : 0;
+    var corners = ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"];
+    var radii = [];
+    for (var c = 0; c < 4; c++) radii.push(typeof this[corners[c]] === "number" ? Math.max(0, this[corners[c]]) : Math.max(0, radius));
+    var gradient = null, unsupportedGradient = false;
+    if (rectangle && this.gradient !== undefined && this.gradient !== null) {
+      if (this.gradient.stops && this.gradient.stops.length <= 256) {
+        var stops = [];
+        for (var i = 0; i < this.gradient.stops.length; i++) stops.push([this.gradient.stops[i].position, rgba(this.gradient.stops[i].color)]);
+        gradient = [this.gradient.orientation === Qt.Horizontal, stops];
+      } else unsupportedGradient = true;
+    }
+    style = [rgba(this.color), rectangle ? rgba(this.border.color) : null, rectangle ? this.border.width : 0, radii, !rectangle || this.border.pixelAligned !== false, gradient, unsupportedGradient];
+  }
+  var effectiveOpacity = 1, ancestor = this;
+  for (var depth = 0; ancestor && depth < 200; depth++) {
+    if (typeof ancestor.opacity === "number") effectiveOpacity *= ancestor.opacity;
+    ancestor = ancestor.parent;
+  }
+  return [
   typeof this.mapToItem === "function" ? this.mapToItem(null, 0, 0).x : (typeof this.x === "number" ? this.x : 0),
   typeof this.mapToItem === "function" ? this.mapToItem(null, 0, 0).y : (typeof this.y === "number" ? this.y : 0),
   this.width,
@@ -14,8 +41,13 @@ const GEOMETRY_EXPRESSION = `typeof this.width === "number" && typeof this.heigh
   typeof this.enabled === "boolean" ? this.enabled : true,
   typeof this.opacity === "number" ? this.opacity : 1,
   typeof this.z === "number" ? this.z : 0,
-  typeof this.text === "string" ? this.text : ""
-] : null`;
+  typeof this.text === "string" ? this.text : "",
+  style,
+  this.clip === true,
+  effectiveOpacity,
+  this.layer && this.layer.enabled === true
+  ];
+}).call(this)`;
 
 export type QmlGeometry = {
   x: number;
@@ -27,6 +59,10 @@ export type QmlGeometry = {
   opacity: number;
   z: number;
   text: string;
+  style: QmlRectStyle | null;
+  clip: boolean;
+  effectiveOpacity: number;
+  layerEnabled: boolean;
 };
 
 export type QmlDebugNode = {
@@ -168,9 +204,11 @@ class PacketTransport {
     socket.on("close", () => this.reject(new Error("QML 调试连接已断开。")));
   }
 
-  static connect(port: number) {
+  static connect(port: number, signal?: AbortSignal) {
     return new Promise<PacketTransport>((resolve, reject) => {
-      const socket = createConnection(port, "127.0.0.1");
+      signal?.throwIfAborted();
+      const socket = createConnection({ port, host: "127.0.0.1", signal });
+      socket.setTimeout(PACKET_TIMEOUT_MS, () => socket.destroy(new Error("QML 调试连接超时。")));
       socket.once("connect", () => resolve(new PacketTransport(socket)));
       socket.once("error", reject);
     });
@@ -328,9 +366,9 @@ async function readReply(transport: PacketTransport, type: string, queryId: numb
   }
 }
 
-function geometryFrom(value: unknown): QmlGeometry | null {
+export function geometryFrom(value: unknown): QmlGeometry | null {
   if (!Array.isArray(value) || value.length < 9) return null;
-  const [x, y, width, height, visible, enabled, opacity, z, text] = value;
+  const [x, y, width, height, visible, enabled, opacity, z, text, style, clip, effectiveOpacity, layerEnabled] = value;
   if (![x, y, width, height].every((entry) => typeof entry === "number" && Number.isFinite(entry))) return null;
   return {
     x: x as number,
@@ -342,6 +380,10 @@ function geometryFrom(value: unknown): QmlGeometry | null {
     opacity: typeof opacity === "number" ? opacity : 1,
     z: typeof z === "number" ? z : 0,
     text: typeof text === "string" ? text : "",
+    style: qmlStyleFrom(style),
+    clip: clip === true,
+    effectiveOpacity: typeof effectiveOpacity === "number" && Number.isFinite(effectiveOpacity) ? Math.max(0, Math.min(1, effectiveOpacity)) : 1,
+    layerEnabled: layerEnabled === true,
   };
 }
 
@@ -376,8 +418,8 @@ async function populateGeometry(transport: PacketTransport, root: QmlDebugNode, 
   }
 }
 
-export async function inspectQmlHierarchy(port: number): Promise<QmlDebugNode> {
-  const transport = await PacketTransport.connect(port);
+export async function inspectQmlHierarchy(port: number, signal?: AbortSignal): Promise<QmlDebugNode> {
+  const transport = await PacketTransport.connect(port, signal);
   const nextId = { value: 1 };
   try {
     transport.send(Buffer.concat([

@@ -63,6 +63,7 @@ const UiTreeRow = memo(function UiTreeRow({ row, domId, selected, active, expand
       title={`${nodeDisplayLabel(node)} · #${node.id} · 第 ${depth + 1} 层`}
       onMouseDown={(event) => event.preventDefault()}
       onClick={() => onSelect(node.id)}
+      onDoubleClick={() => { if (hasChildren && !expanded) onToggle(node.id); }}
     >
       <span
         aria-hidden="true"
@@ -73,6 +74,7 @@ const UiTreeRow = memo(function UiTreeRow({ row, domId, selected, active, expand
           event.stopPropagation();
           onToggle(node.id);
         }}
+        onDoubleClick={(event) => event.stopPropagation()}
       >{hasChildren ? (expanded ? "▾" : "▸") : ""}</span>
       <span className="tree-node-icon" aria-hidden="true" />
       <span className="tree-class">{shortClass}</span>
@@ -206,7 +208,7 @@ export const UiTree = memo(function UiTree({ root, filteredRoot, filterActive, f
           <button className="tree-clear tree-collapse-all" type="button" disabled={filterActive || rows.length === 0} onClick={() => onExpandedChange(new Set())}>全部折叠</button>
           <button className="tree-clear tree-locate" type="button" disabled={!selectedId || !index.has(selectedId)} onClick={() => { onClearFilter(); setLocalReveal((value) => value + 1); }}>定位选中</button>
         </div>
-        <span className="tree-hint" title="方向键浏览和展开/折叠，Home/End 跳转首末行">{rows.length} 行{virtual ? " · 按需渲染" : ""}{filterActive ? " · 筛选展开" : ""}</span>
+        <span className="tree-hint" title="双击父节点展开；方向键浏览和展开/折叠，Home/End 跳转首末行">{rows.length} 行{virtual ? " · 按需渲染" : ""}{filterActive ? " · 筛选展开" : ""}</span>
       </div>
       <div
         className="tree-scroll ui-tree-scroll"

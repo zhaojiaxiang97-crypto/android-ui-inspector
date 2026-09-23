@@ -13,12 +13,12 @@
 
 | App 状态 | 处理方式 | 页面提示 |
 | --- | --- | --- |
-| Debug 原生 View | `dumpsys activity top` 真实 View 树 | View Debug |
-| Debug Qt/QML | QmlDebugger 真实对象树 | QML Debug |
+| Debug 原生 View | 前台 Activity 的 `dumpsys activity <package>` + DDMS/JDWP 独立位图 | View Debug |
+| Debug Qt/QML | QmlDebugger 真实对象树 + Rectangle/Window 样式重建 | QML Debug |
 | Debug 但深度工具不可用 | 停止采集 | 深度检查工具不可用 |
 | Release | 停止采集 | 仅支持 Debug App |
 
-不再使用 UIAutomator 的 `VirtualChild` 作为产品控件树。只有深度采集返回的 View / Compose 节点才进入界面。
+不再使用 UIAutomator 的 `VirtualChild` 作为产品控件树。当前仅接入原生 View 与 QML；Compose 尚不支持。
 
 ## 实施步骤
 
@@ -45,7 +45,7 @@
 - 稳定节点 ID、父子关系和真实类名；
 - alpha、visibility、elevation / Z、transform；
 - padding、margin、background 等深度属性；
-- QML 的源文件、行号、对象 ID、几何区域、visible、opacity 和 z。
+- QML 的源文件、行号、对象 ID、几何区域、visible、opacity 和 z；Rectangle/Window 的背景色、圆角、边框与基础线性渐变。
 
 现有树、属性栏和 WebGL 3D 展开继续读取同一个 `UiNode`，避免重写整套前端。
 
@@ -59,8 +59,8 @@
 ### 5. 适配 3D 层级
 
 - 使用深度树提供的真实父子关系和 Z / elevation；
-- 展开的父节点只显示结构轮廓；
-- 真正绘制内容的子节点承载颜色；
+- 展开的节点保留自己的独立位图，没有独立位图则显示轮廓；
+- 子节点只承载自己的绘制内容，不能复制父层或兄弟层的像素；
 - 收起父节点时恢复该分支的合成画面；
 - 无独立位图的控件只显示结构轮廓，不使用整屏截图裁切，避免混入其他层内容。
 
@@ -82,3 +82,5 @@
 ## 推荐实施顺序
 
 先保证当前 Qt/QML Debug App 和原生 View Debug App 稳定，需要 Compose 时再接 AOSP App Inspection 通道。
+
+后续实施和仍未覆盖的边界见 [采集与图层稳定性改良](INSPECTION_RELIABILITY.md)。

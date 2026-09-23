@@ -5,6 +5,7 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { inspectDevice, parseUiHierarchy, probeAdb } from "./adb";
 import { clearSnapshots, loadSnapshots, saveSnapshot } from "./snapshot-store";
+import { measureLayerImages } from "./layer-images";
 import type { DeviceInfo, ExportFormat, ExportSnapshotRequest, ExportSnapshotResult, UiNode, UiSnapshot } from "../shared/types";
 
 const rendererUrl = process.env.ELECTRON_RENDERER_URL;
@@ -20,6 +21,7 @@ function requestedFixtureState(): VisualFixtureState {
 const visualFixtureState = requestedFixtureState();
 let mainWindow: BrowserWindow | null = null;
 let quitting = false;
+const inspections = new Map<number, { requestId: string; controller: AbortController; done: Promise<UiSnapshot> }>();
 
 function requestedWindowSize() {
   const value = process.argv.find((argument) => argument.startsWith("--window-size="))?.slice("--window-size=".length);
@@ -217,11 +219,53 @@ async function exportSnapshot(input: unknown): Promise<ExportSnapshotResult> {
 }
 
 ipcMain.handle("probe-adb", () => visualFixtureMode ? fixtureProbe() : probeAdb());
-ipcMain.handle("inspect-device", (_event, serial: unknown) => {
+ipcMain.handle("inspect-device", async (event, serial: unknown, requestId: unknown) => {
   if (typeof serial !== "string" || !serial.trim()) {
     throw new Error("设备序列号不能为空。");
   }
-  return visualFixtureMode ? fixtureSnapshot(serial) : inspectDevice(serial);
+  if (typeof requestId !== "string" || !requestId || requestId.length > 128) throw new Error("采集请求标识无效。");
+  const sender = event.sender;
+  const ownerId = sender.id;
+  const previous = inspections.get(ownerId);
+  previous?.controller.abort();
+  const controller = new AbortController();
+  const onDestroyed = () => controller.abort();
+  sender.once("destroyed", onDestroyed);
+  const done = (async () => {
+    // Release the previous debugger/port before starting another capture.
+    await previous?.done.catch(() => undefined);
+    controller.signal.throwIfAborted();
+    const snapshot = visualFixtureMode ? fixtureSnapshot(serial) : await inspectDevice(serial, {
+      signal: controller.signal,
+      onProgress: (stage, elapsedMs) => {
+        if (!sender.isDestroyed()) sender.send("inspection-progress", { requestId, stage, elapsedMs });
+      },
+    });
+    await measureLayerImages(snapshot.root, controller.signal);
+    return snapshot;
+  })();
+  inspections.set(ownerId, { requestId, controller, done });
+  try { return await done; }
+  finally {
+    sender.removeListener("destroyed", onDestroyed);
+    if (inspections.get(ownerId)?.controller === controller) inspections.delete(ownerId);
+  }
+});
+ipcMain.handle("cancel-inspection", (event, requestId: unknown) => {
+  const active = inspections.get(event.sender.id);
+  if (typeof requestId === "string" && active?.requestId === requestId) active.controller.abort();
+});
+ipcMain.handle("layer-context-menu", (event, canHide: unknown, canRestore: unknown) => {
+  if (typeof canHide !== "boolean" || typeof canRestore !== "boolean") throw new Error("图层菜单参数无效。");
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window || window.isDestroyed()) return null;
+  return new Promise<"hide" | "restore" | null>((resolve) => {
+    Menu.buildFromTemplate([
+      { label: "隐藏此图层", enabled: canHide, click: () => resolve("hide") },
+      { type: "separator" },
+      { label: "恢复所有隐藏图层", enabled: canRestore, click: () => resolve("restore") },
+    ]).popup({ window, callback: () => resolve(null) });
+  });
 });
 ipcMain.handle("copy-text", (_event, value: unknown) => {
   if (typeof value !== "string") throw new Error("复制内容无效。");
@@ -247,4 +291,13 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
-app.on("before-quit", () => { quitting = true; });
+app.on("before-quit", (event) => {
+  if (quitting) return;
+  quitting = true;
+  const captures = [...inspections.values()];
+  for (const capture of captures) capture.controller.abort();
+  if (captures.length) {
+    event.preventDefault();
+    void Promise.allSettled(captures.map((capture) => capture.done)).then(() => app.quit());
+  }
+});

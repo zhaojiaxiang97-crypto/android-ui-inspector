@@ -4,6 +4,7 @@ import { UiTreeNode } from "../src/components/UiTreeNode";
 import { UiTree } from "../src/components/UiTree";
 import { TREE_ROW_HEIGHT, treeWindow } from "../shared/visible-tree";
 import { verifyVirtualTreeBehavior } from "./virtual-tree-checks";
+import { verifyInspectionBehavior } from "./inspection-checks";
 import { flattenNodes, nodeDisplayLabel } from "../shared/tree-utils";
 import { createTree, type TreeShape } from "./fixtures";
 import { statistics } from "./statistics";
@@ -190,4 +191,4 @@ function verifyTreeBehavior() {
   }
 }
 
-Object.assign(window, { runTreeRenderCase, verifyTreeBehavior, verifyVirtualTreeBehavior });
+Object.assign(window, { runTreeRenderCase, verifyTreeBehavior, verifyVirtualTreeBehavior, verifyInspectionBehavior });

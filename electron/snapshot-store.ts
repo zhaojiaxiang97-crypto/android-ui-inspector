@@ -60,6 +60,8 @@ function isUiNode(value: unknown, depth = 0, budget = { count: 0 }): value is Ui
     && typeof value.selected === "boolean"
     && typeof value.visibleToUser === "boolean"
     && (value.layerImageDataUrl === undefined || typeof value.layerImageDataUrl === "string")
+    && (value.layerImageEmpty === undefined || typeof value.layerImageEmpty === "boolean")
+    && (value.layerImageStatus === undefined || ["captured", "style", "unavailable", "ambiguous", "hidden", "failed"].includes(value.layerImageStatus as string))
     && (value.layerImageSize === undefined || (isRecord(value.layerImageSize) && typeof value.layerImageSize.width === "number" && typeof value.layerImageSize.height === "number"))
     && (value.attributes === undefined || isStringMap(value.attributes))
     && Array.isArray(value.children)
@@ -81,6 +83,8 @@ function isUiSnapshot(value: unknown): value is UiSnapshot {
     && isNullableString(value.warning)
     && (value.inspectionSource === undefined || value.inspectionSource === "uiautomator" || value.inspectionSource === "debug-view" || value.inspectionSource === "debug-qml")
     && (value.hierarchyDumpMode === undefined || value.hierarchyDumpMode === "full" || value.hierarchyDumpMode === "compressed")
+    && (value.captureDurationMs === undefined || (typeof value.captureDurationMs === "number" && Number.isFinite(value.captureDurationMs) && value.captureDurationMs >= 0))
+    && (value.captureTimings === undefined || (isRecord(value.captureTimings) && Object.values(value.captureTimings).every((duration) => typeof duration === "number" && Number.isFinite(duration) && duration >= 0)))
     && (value.captureGeometry === undefined || isCaptureGeometry(value.captureGeometry));
 }
 

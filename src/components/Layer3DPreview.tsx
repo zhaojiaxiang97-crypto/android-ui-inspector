@@ -1,7 +1,9 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import type { PixelSize, UiNode } from "../../shared/types";
 import { buildLayerOverview, type LayerRecord } from "../../shared/layer-layout";
-import { subtreeImageNodes } from "../../shared/layer-textures";
+import { composeSubtreeImage, subtreeImageNodes, textureDimensions } from "../../shared/layer-textures";
+import { measureBounds, type BoundsMeasurement } from "../../shared/node-metrics";
+import { nodeDisplayLabel, nodeShortClass } from "../../shared/tree-utils";
 
 export type LayerCamera = {
   distance: number;
@@ -15,6 +17,7 @@ export type LayerCamera = {
 
 export type LayerSceneHandle = {
   paintCamera: (camera: LayerCamera) => void;
+  fit: () => void;
   pick: (clientX: number, clientY: number) => UiNode | null;
   hover: (clientX: number, clientY: number) => void;
   clearHover: () => void;
@@ -25,11 +28,13 @@ type Props = {
   root: UiNode;
   selectedNode: UiNode | null;
   expandedNodeIds: ReadonlySet<string>;
+  hiddenNodeIds?: ReadonlySet<string>;
   size: PixelSize;
   renderScale: number;
   origin: Pick<Rect, "left" | "top">;
   camera: LayerCamera;
   onSelect: (node: UiNode) => void;
+  onFitScale?: (scale: number) => void;
 };
 
 type LayerPlaneRole = "surface" | "outline";
@@ -48,6 +53,7 @@ type Renderer = {
   lineBuffer: WebGLBuffer;
   texture: WebGLTexture;
   layerTextures: Map<string, WebGLTexture>;
+  layerTextureBytes: Map<string, number>;
   unitLocation: number;
   uniforms: Record<string, WebGLUniformLocation>;
   textureReady: boolean;
@@ -57,6 +63,8 @@ type Renderer = {
 };
 
 const MAX_CANVAS_PIXELS = 4_000_000;
+const NO_HIDDEN_NODES: ReadonlySet<string> = new Set();
+const MAX_LAYER_TEXTURE_PIXELS = 16_000_000;
 const CONTENT_CLASS_PATTERN = /(TextView|ImageView|ImageButton|Button|EditText|CheckBox|RadioButton|Switch|ToggleButton|ProgressBar|SeekBar|WebView|SurfaceView|TextureView|VideoView)/i;
 const STRUCTURAL_CLASS_PATTERN = /(FrameLayout|LinearLayout|RelativeLayout|ConstraintLayout|ViewGroup|ViewPager|SlidingPaneLayout|RecyclerView|ScrollView|DrawerLayout|CoordinatorLayout)/i;
 const TEXT_ONLY_CLASS_PATTERN = /TextView$/i;
@@ -128,9 +136,8 @@ const FRAGMENT_SHADER = `
       return;
     }
     if (u_kind > 3.5) {
-      float edge_distance = min(min(v_uv.x, v_uv.y), min(1.0 - v_uv.x, 1.0 - v_uv.y));
-      float edge_size = min(0.20, 2.4 / max(1.0, min(u_rect_size.x, u_rect_size.y)));
-      float edge = 1.0 - smoothstep(edge_size, edge_size * 1.8, edge_distance);
+      vec2 edge_pixels = min(v_uv, 1.0 - v_uv) * u_rect_size;
+      float edge = 1.0 - smoothstep(0.7, 1.5, min(edge_pixels.x, edge_pixels.y));
       gl_FragColor = vec4(u_color.rgb, edge * u_opacity);
       return;
     }
@@ -142,10 +149,11 @@ function radians(value: number) {
   return value * Math.PI / 180;
 }
 
-function hasOwnVisualStyle(record: LayerRecord, size: PixelSize) {
+function hasOwnVisualStyle(record: LayerRecord, size: PixelSize, hiddenNodeIds?: ReadonlySet<string>) {
   const node = record.node;
   // Collapsed branches combine independent images; expanded nodes keep their own.
-  if (record.isCollapsed) return subtreeImageNodes(node).length > 0;
+  if (record.isCollapsed) return subtreeImageNodes(node, hiddenNodeIds).length > 0;
+  if (node.layerImageEmpty) return false;
   if (node.layerImageDataUrl && node.layerImageSize) return true;
   // Without an independent bitmap, keep structural nodes as outlines.
   if (node.children.length > 0 || isNearFullScreen(record, size) || STRUCTURAL_CLASS_PATTERN.test(node.className ?? "")) return false;
@@ -174,10 +182,10 @@ function isNearFullScreen(record: LayerRecord, size: PixelSize) {
   return (widthRatio >= 0.9 && heightRatio >= 0.75) || (widthRatio >= 0.75 && heightRatio >= 0.9);
 }
 
-function layerPlaneRoles(records: readonly LayerRecord[], size: PixelSize) {
+function layerPlaneRoles(records: readonly LayerRecord[], size: PixelSize, hiddenNodeIds?: ReadonlySet<string>) {
   const roles = new Map<string, LayerPlaneRole>();
   for (const record of records) {
-    roles.set(record.id, hasOwnVisualStyle(record, size) ? "surface" : "outline");
+    roles.set(record.id, hasOwnVisualStyle(record, size, hiddenNodeIds) ? "surface" : "outline");
   }
   return roles;
 }
@@ -192,11 +200,11 @@ function sourceRect(record: LayerRecord): Rect {
   return { left, top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) };
 }
 
-function visualFor(record: LayerRecord, screenshotSize: PixelSize) {
+function visualFor(record: LayerRecord, screenshotSize: PixelSize, visibilityKey: string) {
   if (record.isCollapsed) {
     const rect = sourceRect(record);
     const textureSize = { width: Math.ceil(rect.width), height: Math.ceil(rect.height) };
-    return { kind: "composite" as const, textureSrc: `subtree:${record.id}`, textureSize, source: { left: 0, top: 0, ...textureSize } };
+    return { kind: "composite" as const, textureSrc: `subtree:${record.id}:${visibilityKey}`, textureSize, source: { left: 0, top: 0, ...textureSize } };
   }
   if (record.node.layerImageDataUrl && record.node.layerImageSize) {
     const textureSize = record.node.layerImageSize;
@@ -269,7 +277,7 @@ function createRenderer(canvas: HTMLCanvasElement): Renderer | null {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  return { canvas, gl, program, quadBuffer, lineBuffer, texture, layerTextures: new Map(), unitLocation, uniforms: uniforms as Record<string, WebGLUniformLocation>, textureReady: false, cssWidth: 0, cssHeight: 0, renderVersion: 0 };
+  return { canvas, gl, program, quadBuffer, lineBuffer, texture, layerTextures: new Map(), layerTextureBytes: new Map(), unitLocation, uniforms: uniforms as Record<string, WebGLUniformLocation>, textureReady: false, cssWidth: 0, cssHeight: 0, renderVersion: 0 };
 }
 
 function disposeRenderer(renderer: Renderer) {
@@ -306,8 +314,17 @@ function uploadTexture(renderer: Renderer, image: HTMLImageElement) {
   return renderer.textureReady;
 }
 
-function uploadLayerTexture(renderer: Renderer, src: string, image: HTMLImageElement | HTMLCanvasElement) {
+function uploadLayerTexture(renderer: Renderer, src: string, image: ImageBitmap | HTMLCanvasElement, maxPixels: number) {
   const { gl } = renderer;
+  const size = textureDimensions(image.width, image.height, maxPixels, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+  let resized: HTMLCanvasElement | null = null;
+  if (size.width !== image.width || size.height !== image.height) {
+    resized = document.createElement("canvas");
+    resized.width = size.width; resized.height = size.height;
+    const context = resized.getContext("2d");
+    if (!context) return false;
+    context.drawImage(image, 0, 0, size.width, size.height);
+  }
   const texture = gl.createTexture();
   if (!texture) return false;
   gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -316,16 +333,26 @@ function uploadLayerTexture(renderer: Renderer, src: string, image: HTMLImageEle
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, resized ?? image);
+  if (resized) resized.width = resized.height = 0;
   if (gl.getError() !== gl.NO_ERROR) {
     gl.deleteTexture(texture);
     return false;
   }
+  gl.deleteTexture(renderer.layerTextures.get(src) ?? null);
   renderer.layerTextures.set(src, texture);
+  renderer.layerTextureBytes.set(src, size.width * size.height * 4);
   return true;
 }
 
-function projectPoint(x: number, y: number, z: number, pivot: ScenePivot, camera: LayerCamera) {
+async function loadLayerImage(src: string) {
+  const image = new Image();
+  image.src = src;
+  try { await image.decode(); return await createImageBitmap(image, { premultiplyAlpha: "none" }); }
+  finally { image.src = ""; }
+}
+
+function rotatePoint(x: number, y: number, z: number, pivot: ScenePivot, camera: LayerCamera) {
   const yaw = radians(-camera.azimuth);
   const pitch = radians(-camera.elevation);
   const roll = radians(-camera.roll);
@@ -338,8 +365,13 @@ function projectPoint(x: number, y: number, z: number, pivot: ScenePivot, camera
   const zPitch = Math.sin(pitch) * centeredY + Math.cos(pitch) * zYaw;
   const xRoll = Math.cos(roll) * xYaw - Math.sin(roll) * yPitch;
   const yRoll = Math.sin(roll) * xYaw + Math.cos(roll) * yPitch;
-  const scale = camera.distance / Math.max(1, camera.distance - zPitch);
-  return { x: pivot.x + xRoll * scale, y: pivot.y - yRoll * scale, depth: zPitch };
+  return { x: xRoll, y: yRoll, depth: zPitch };
+}
+
+function projectPoint(x: number, y: number, z: number, pivot: ScenePivot, camera: LayerCamera) {
+  const point = rotatePoint(x, y, z, pivot, camera);
+  const scale = camera.distance / Math.max(1, camera.distance - point.depth);
+  return { x: pivot.x + point.x * scale, y: pivot.y - point.y * scale, depth: point.depth };
 }
 
 function projectPlane(plane: ScenePlane, pivot: ScenePivot, camera: LayerCamera) {
@@ -367,6 +399,13 @@ function pointInQuad(point: Point, corners: readonly Point[]) {
   return true;
 }
 
+function measurementLabel(measurement: BoundsMeasurement, index: number) {
+  if (measurement.relation === "equal") return "边界重合 · 间距 0 px";
+  if (measurement.relation === "overlap") return "外框重叠 · 间距 0 px";
+  if (measurement.relation === "touching") return "边缘相接 · 间距 0 px";
+  return measurement.guides[index].distances.map(({ label, value }) => `${label} ${Number(value.toFixed(2))} px`).join(" · ");
+}
+
 function drawScene(renderer: Renderer, planes: readonly ScenePlane[], camera: LayerCamera, pivot: ScenePivot, projectedRef: { current: ProjectedPlane[] }) {
   resizeRenderer(renderer);
   const { gl, canvas } = renderer;
@@ -378,7 +417,7 @@ function drawScene(renderer: Renderer, planes: readonly ScenePlane[], camera: La
   gl.disable(gl.DEPTH_TEST);
   gl.disable(gl.CULL_FACE);
   gl.enable(gl.BLEND);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   gl.activeTexture(gl.TEXTURE0);
   gl.uniform1i(renderer.uniforms.u_texture, 0);
   gl.uniform2f(renderer.uniforms.u_viewport, renderer.cssWidth, renderer.cssHeight);
@@ -416,18 +455,19 @@ function drawScene(renderer: Renderer, planes: readonly ScenePlane[], camera: La
   }
   for (const { plane } of ordered) {
     const texture = plane.textureSrc === null || plane.textureSrc === "" ? renderer.texture : renderer.layerTextures.get(plane.textureSrc);
-    if ((plane.kind === "native" || plane.kind === "composite" || plane.kind === "isolated") && !texture) continue;
+    const missingTexture = (plane.kind === "native" || plane.kind === "composite" || plane.kind === "isolated") && !texture;
+    const renderKind = missingTexture ? "outline" : plane.kind;
     gl.bindTexture(gl.TEXTURE_2D, texture ?? renderer.texture);
-    const color = plane.kind === "selection" ? SELECTION_COLOR : plane.kind === "hover" ? HOVER_COLOR : OUTLINE_COLOR;
-    const kind = plane.kind === "native" || plane.kind === "composite" ? 1 : plane.kind === "isolated" ? 2 : plane.kind === "outline" ? 3 : plane.kind === "selection" ? 4 : 5;
+    const color = renderKind === "selection" ? SELECTION_COLOR : renderKind === "hover" ? HOVER_COLOR : OUTLINE_COLOR;
+    const kind = renderKind === "native" || renderKind === "composite" ? 1 : renderKind === "isolated" ? 2 : renderKind === "outline" ? 3 : renderKind === "selection" ? 4 : 5;
     gl.uniform4f(renderer.uniforms.u_rect, plane.rect.left, plane.rect.top, plane.rect.width, plane.rect.height);
     gl.uniform4f(renderer.uniforms.u_source_rect, plane.source.left / plane.textureSize.width, plane.source.top / plane.textureSize.height, plane.source.width / plane.textureSize.width, plane.source.height / plane.textureSize.height);
     gl.uniform1f(renderer.uniforms.u_depth, plane.z);
     gl.uniform4f(renderer.uniforms.u_color, color[0], color[1], color[2], 1);
     gl.uniform2f(renderer.uniforms.u_rect_size, plane.rect.width, plane.rect.height);
     gl.uniform1f(renderer.uniforms.u_kind, kind);
-    gl.uniform1f(renderer.uniforms.u_opacity, plane.opacity);
-    const isLine = plane.kind === "outline";
+    gl.uniform1f(renderer.uniforms.u_opacity, missingTexture ? 0.82 : plane.opacity);
+    const isLine = renderKind === "outline";
     gl.bindBuffer(gl.ARRAY_BUFFER, isLine ? renderer.lineBuffer : renderer.quadBuffer);
     gl.enableVertexAttribArray(renderer.unitLocation);
     gl.vertexAttribPointer(renderer.unitLocation, 2, gl.FLOAT, false, 0, 0);
@@ -438,77 +478,141 @@ function drawScene(renderer: Renderer, planes: readonly ScenePlane[], camera: La
   canvas.dataset.layerCanvasPixels = `${canvas.width}x${canvas.height}`;
 }
 
-export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer3DPreview({ src, root, selectedNode, expandedNodeIds, size, renderScale, origin, camera, onSelect }, ref) {
+export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer3DPreview({ src, root, selectedNode, expandedNodeIds, hiddenNodeIds = NO_HIDDEN_NODES, size, renderScale, origin, camera, onSelect, onFitScale }, ref) {
   const sceneRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
   const cameraRef = useRef(camera);
   const planesRef = useRef<ScenePlane[]>([]);
   const projectedRef = useRef<ProjectedPlane[]>([]);
+  const measureGuideRefs = useRef<Array<SVGGElement | null>>([]);
+  const hoverLabelRef = useRef<HTMLDivElement>(null);
+  const hoverPointRef = useRef<Point | null>(null);
   const drawRef = useRef<() => void>(() => {});
+  const fitRef = useRef<() => void>(() => {});
   const [rendererStatus, setRendererStatus] = useState<RendererStatus>("loading");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const layerImageSources = useMemo(() => {
-    const sources: string[] = [];
-    const seen = new Set<string>();
-    const stack = [root];
-    while (stack.length > 0) {
-      const node = stack.pop()!;
-      if (node.layerImageDataUrl && !seen.has(node.layerImageDataUrl)) {
-        seen.add(node.layerImageDataUrl);
-        sources.push(node.layerImageDataUrl);
-      }
-      stack.push(...node.children);
-    }
-    return sources;
-  }, [root]);
+  const [textureWarning, setTextureWarning] = useState<string | null>(null);
   const layout = useMemo(() => buildLayerOverview(root, selectedNode, size, { maxLayers: 512, layerGap: camera.layerGap, expandedIds: expandedNodeIds }), [camera.layerGap, expandedNodeIds, root, selectedNode, size]);
-  const records = layout.records;
-  const roles = useMemo(() => layerPlaneRoles(records, size), [records, size]);
-  const selectedRecord = records.find((record) => record.isSelected) ?? (layout.parent?.isSelected ? layout.parent : null);
-  const hoveredRecord = records.find((record) => record.id === hoveredId) ?? (layout.parent?.id === hoveredId ? layout.parent : null);
-  const parentRole = layout.parent ? (hasOwnVisualStyle(layout.parent, size) ? "surface" : "outline") : null;
+  // Hide presentation only: retain the original Z slots and camera pivot.
+  const records = useMemo(() => layout.records.filter((record) => !hiddenNodeIds.has(record.id)), [layout.records, hiddenNodeIds]);
+  const parent = layout.parent && !hiddenNodeIds.has(layout.parent.id) ? layout.parent : null;
+  const visibilityKey = useMemo(() => JSON.stringify([...hiddenNodeIds].sort()), [hiddenNodeIds]);
+  const textureRecords = [parent, ...records].filter((record): record is LayerRecord => Boolean(record && hasOwnVisualStyle(record, size, hiddenNodeIds) && (record.isCollapsed || record.node.layerImageDataUrl)));
+  // Camera/hover changes don't change the required images or restart decoding.
+  const textureKey = `${visibilityKey}|${textureRecords.map((record) => `${record.id}:${record.isCollapsed}`).join("|")}`;
+  const roles = useMemo(() => layerPlaneRoles(records, size, hiddenNodeIds), [records, size, hiddenNodeIds]);
+  const selectedRecord = records.find((record) => record.isSelected) ?? (parent?.isSelected ? parent : null);
+  const hoveredRecord = records.find((record) => record.id === hoveredId) ?? (parent?.id === hoveredId ? parent : null);
+  const measurement = useMemo(() => selectedRecord && hoveredRecord && selectedRecord.id !== hoveredRecord.id && rendererStatus === "webgl"
+    ? measureBounds(selectedRecord.sourceBounds, hoveredRecord.sourceBounds) : null, [selectedRecord, hoveredRecord, rendererStatus]);
+  const parentRole = parent ? (hasOwnVisualStyle(parent, size, hiddenNodeIds) ? "surface" : "outline") : null;
   const textureCount = records.filter((record) => roles.get(record.id) === "surface").length + Number(parentRole === "surface");
-  const compositeCount = records.filter((record) => record.isCollapsed).length + Number(Boolean(layout.parent?.isCollapsed));
+  const compositeCount = records.filter((record) => record.isCollapsed).length + Number(Boolean(parent?.isCollapsed));
   const nativeTextureCount = records.filter((record) => roles.get(record.id) === "surface" && Boolean(record.node.layerImageDataUrl)).length;
   const textOnlyCount = records.filter((record) => roles.get(record.id) === "surface" && usesTextOnlyTexture(record)).length;
   const outlineCount = records.filter((record) => roles.get(record.id) === "outline").length;
-  const pivot = useMemo(() => {
-    const depths = [layout.parent?.z, ...records.map((record) => record.z)].filter((depth): depth is number => Number.isFinite(depth));
-    const minimumDepth = Math.min(...depths);
-    const maximumDepth = Math.max(...depths);
-    return {
-      x: origin.left + size.width * renderScale / 2,
-      y: origin.top + size.height * renderScale / 2,
-      z: depths.length > 0 ? (minimumDepth + maximumDepth) / 2 : 0,
-    };
-  }, [layout.parent?.z, origin.left, origin.top, records, renderScale, size.height, size.width]);
+  const sceneRecords = [layout.parent, ...layout.records].filter((record): record is LayerRecord => Boolean(record));
+  const center = {
+    x: sceneRecords.length ? (Math.min(...sceneRecords.map(r => r.renderBounds.left)) + Math.max(...sceneRecords.map(r => r.renderBounds.right))) / 2 : size.width / 2,
+    y: sceneRecords.length ? (Math.min(...sceneRecords.map(r => r.renderBounds.top)) + Math.max(...sceneRecords.map(r => r.renderBounds.bottom))) / 2 : size.height / 2,
+    z: sceneRecords.length ? (Math.min(...sceneRecords.map(r => r.z)) + Math.max(...sceneRecords.map(r => r.z))) / 2 : 0,
+  };
+  const renderOrigin = { left: origin.left + (size.width / 2 - center.x) * renderScale, top: origin.top + (size.height / 2 - center.y) * renderScale };
+  const pivot = useMemo(() => ({
+    x: origin.left + size.width * renderScale / 2,
+    y: origin.top + size.height * renderScale / 2,
+    z: center.z * renderScale,
+  }), [origin.left, origin.top, size.width, size.height, center.z, renderScale]);
+
+  fitRef.current = () => {
+    const canvas = canvasRef.current;
+    if (!onFitScale || !canvas?.clientWidth || !canvas.clientHeight) return;
+    const currentCamera = cameraRef.current;
+    const halfWidth = canvas.clientWidth * 0.43, halfHeight = canvas.clientHeight * 0.43;
+    const distance = currentCamera.distance;
+    let scale = 1;
+    // Fit every actual corner, including Z, with a 7% margin on each side.
+    // Solve the perspective inequality directly; no trial renders or zoom loop.
+    for (const record of sceneRecords) {
+      const b = record.renderBounds;
+      for (const x of [b.left, b.right]) for (const y of [b.top, b.bottom]) {
+        const p = rotatePoint(x, y, record.z, center, currentCamera);
+        for (const [extent, half] of [[Math.abs(p.x), halfWidth], [Math.abs(p.y), halfHeight]]) {
+          const denominator = distance * extent + half * p.depth;
+          if (denominator > 0) scale = Math.min(scale, half * distance / denominator);
+        }
+        if (p.depth > 0) scale = Math.min(scale, (distance - 32) / p.depth);
+      }
+    }
+    onFitScale(scale);
+  };
 
   useEffect(() => {
     if (hoveredId && !hoveredRecord) setHoveredId(null);
   }, [hoveredId, hoveredRecord]);
 
+  useEffect(() => { setHoveredId(null); }, [root, src]);
+
   const scenePlanes = useMemo(() => {
     // Each visible plane owns its pixels. A full-screen screenshot behind the
     // stack duplicates child content and reads like a reflected surface.
     const planes: ScenePlane[] = [];
-    if (layout.parent) {
-      const visual = parentRole === "surface" ? visualFor(layout.parent, size) : null;
-      planes.push({ id: `${layout.parent.id}:parent`, node: layout.parent.hitTestable ? layout.parent.node : null, rect: scaledRect(layout.parent, renderScale, origin), source: visual?.source ?? sourceRect(layout.parent), textureSrc: visual?.textureSrc ?? null, textureSize: visual?.textureSize ?? size, z: layout.parent.z, kind: visual?.kind ?? "outline", opacity: parentRole === "surface" ? (layout.parent.isCollapsed ? 1 : Number(layout.parent.node.attributes?.["effective-alpha"] ?? 1)) : 0.94, hitTestable: layout.parent.hitTestable });
+    if (parent) {
+      const visual = parentRole === "surface" ? visualFor(parent, size, visibilityKey) : null;
+      planes.push({ id: `${parent.id}:parent`, node: parent.hitTestable ? parent.node : null, rect: scaledRect(parent, renderScale, renderOrigin), source: visual?.source ?? sourceRect(parent), textureSrc: visual?.textureSrc ?? null, textureSize: visual?.textureSize ?? size, z: parent.z * renderScale, kind: visual?.kind ?? "outline", opacity: parentRole === "surface" ? (parent.isCollapsed ? 1 : Number(parent.node.attributes?.["effective-alpha"] ?? 1)) : 0.45, hitTestable: parent.hitTestable });
     }
     for (const record of records) {
       const role = roles.get(record.id) ?? "outline";
-      const visual = role === "surface" ? visualFor(record, size) : null;
-      planes.push({ id: record.id, node: record.node, rect: scaledRect(record, renderScale, origin), source: visual?.source ?? sourceRect(record), textureSrc: visual?.textureSrc ?? null, textureSize: visual?.textureSize ?? size, z: record.z, kind: visual?.kind ?? "outline", opacity: role === "outline" ? 0.82 : record.isCollapsed ? 1 : Number(record.node.attributes?.["effective-alpha"] ?? 1), hitTestable: record.hitTestable });
+      const visual = role === "surface" ? visualFor(record, size, visibilityKey) : null;
+      planes.push({ id: record.id, node: record.node, rect: scaledRect(record, renderScale, renderOrigin), source: visual?.source ?? sourceRect(record), textureSrc: visual?.textureSrc ?? null, textureSize: visual?.textureSize ?? size, z: record.z * renderScale, kind: visual?.kind ?? "outline", opacity: role === "outline" ? (record.isCompact ? 0.16 : 0.5) : record.isCollapsed ? 1 : Number(record.node.attributes?.["effective-alpha"] ?? 1), hitTestable: record.hitTestable });
     }
-    if (selectedRecord) planes.push({ id: `${selectedRecord.id}:selection`, node: null, rect: scaledRect(selectedRecord, renderScale, origin), source: sourceRect(selectedRecord), textureSrc: null, textureSize: size, z: selectedRecord.z, kind: "selection", opacity: 1, hitTestable: false });
-    if (hoveredRecord) planes.push({ id: `${hoveredRecord.id}:hover`, node: null, rect: scaledRect(hoveredRecord, renderScale, origin), source: sourceRect(hoveredRecord), textureSrc: null, textureSize: size, z: hoveredRecord.z, kind: "hover", opacity: 1, hitTestable: false });
+    if (selectedRecord) planes.push({ id: `${selectedRecord.id}:selection`, node: null, rect: scaledRect(selectedRecord, renderScale, renderOrigin), source: sourceRect(selectedRecord), textureSrc: null, textureSize: size, z: selectedRecord.z * renderScale, kind: "selection", opacity: 1, hitTestable: false });
+    if (hoveredRecord && !hoveredRecord.isSelected) planes.push({ id: `${hoveredRecord.id}:hover`, node: null, rect: scaledRect(hoveredRecord, renderScale, renderOrigin), source: sourceRect(hoveredRecord), textureSrc: null, textureSize: size, z: hoveredRecord.z * renderScale, kind: "hover", opacity: 1, hitTestable: false });
     return planes;
-  }, [hoveredRecord, layout.parent, origin, parentRole, records, renderScale, roles, selectedRecord, size]);
+  }, [hoveredRecord, parent, renderOrigin.left, renderOrigin.top, parentRole, records, renderScale, roles, selectedRecord, size, visibilityKey]);
 
   drawRef.current = () => {
+    positionHoverLabel();
     const renderer = rendererRef.current;
-    if (renderer) drawScene(renderer, planesRef.current, cameraRef.current, pivot, projectedRef);
+    if (!renderer) return;
+    const currentCamera = cameraRef.current;
+    drawScene(renderer, planesRef.current, currentCamera, pivot, projectedRef);
+    if (!measurement || !selectedRecord || !hoveredRecord) return;
+    // At most four SVG guides. Reproject with the existing camera paint path;
+    // do not render React or rebuild GPU textures on each orbit frame.
+    const widths = measureGuideRefs.current.map(group => group?.querySelector("text")?.getComputedTextLength() ?? 0);
+    const labels: Array<{ x: number; y: number; width: number }> = [];
+    measurement.guides.forEach((guide, index) => {
+      const group = measureGuideRefs.current[index];
+      if (!group) return;
+      const from = projectPoint(renderOrigin.left + guide.from.x * renderScale, renderOrigin.top + guide.from.y * renderScale, selectedRecord.z * renderScale, pivot, currentCamera);
+      const to = projectPoint(renderOrigin.left + guide.to.x * renderScale, renderOrigin.top + guide.to.y * renderScale, hoveredRecord.z * renderScale, pivot, currentCamera);
+      const visible = from.depth < currentCamera.distance - 1 && to.depth < currentCamera.distance - 1 && [from.x, from.y, to.x, to.y].every(Number.isFinite);
+      group.style.visibility = visible ? "visible" : "hidden";
+      if (!visible) return;
+      group.querySelector("path")!.setAttribute("d", `M ${from.x} ${from.y} L ${to.x} ${to.y}`);
+      for (const [i, point] of [from, to].entries()) {
+        const dot = group.querySelectorAll("circle")[i];
+        dot.setAttribute("cx", String(point.x)); dot.setAttribute("cy", String(point.y));
+      }
+      const width = widths[index] + 16;
+      // Labels stay readable at the viewport edge even after panning.
+      const minX = Math.max(0, -currentCamera.panX) + 8, maxX = Math.min(renderer.cssWidth, renderer.cssWidth - currentCamera.panX) - width - 8;
+      const minY = Math.max(0, -currentCamera.panY) + 8, maxY = Math.min(renderer.cssHeight, renderer.cssHeight - currentCamera.panY) - 32;
+      if (minX > maxX || minY > maxY) { group.style.visibility = "hidden"; return; }
+      const x = Math.max(minX, Math.min(maxX, (from.x + to.x - width) / 2));
+      let y = Math.max(minY, Math.min(maxY, (from.y + to.y) / 2 - 30));
+      for (const offset of [0, 28, -28, 56, -56, 84, -84, 112, -112]) {
+        const candidate = Math.max(minY, Math.min(maxY, y + offset));
+        if (labels.every(previous => x >= previous.x + previous.width + 4 || x + width + 4 <= previous.x || Math.abs(candidate - previous.y) >= 28)) {
+          y = candidate; break;
+        }
+      }
+      labels.push({ x, y, width });
+      group.querySelector("g")!.setAttribute("transform", `translate(${x} ${y})`);
+      group.querySelector("rect")!.setAttribute("width", String(width));
+    });
   };
 
   useEffect(() => {
@@ -526,6 +630,10 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
     drawRef.current();
   }, [camera]);
 
+  // Fit after updating the camera. Selection, hover, hiding and free rotation
+  // do not change framing; a changed tree, spacing or viewport does.
+  useEffect(() => { fitRef.current(); }, [root, expandedNodeIds, camera.layerGap, camera.distance]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -536,7 +644,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
     }
     let alive = true;
     rendererRef.current = renderer;
-    const observer = new ResizeObserver(() => drawRef.current());
+    const observer = new ResizeObserver(() => { fitRef.current(); drawRef.current(); });
     observer.observe(canvas);
     const onContextLost = (event: Event) => {
       event.preventDefault();
@@ -553,13 +661,6 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
       }
       setRendererStatus("webgl");
       drawRef.current();
-      for (const layerSrc of layerImageSources) {
-        const layerImage = new Image();
-        layerImage.onload = () => {
-          if (alive && rendererRef.current === renderer && uploadLayerTexture(renderer, layerSrc, layerImage)) drawRef.current();
-        };
-        layerImage.src = layerSrc;
-      }
     };
     image.onerror = () => { if (alive) setRendererStatus("fallback"); };
     image.src = src;
@@ -570,46 +671,75 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
       if (rendererRef.current === renderer) rendererRef.current = null;
       disposeRenderer(renderer);
     };
-  }, [layerImageSources, src]);
+  }, [root, src]);
 
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return;
     let alive = true;
-    const collapsed = [layout.parent, ...records].filter((record): record is LayerRecord => Boolean(record?.isCollapsed));
-    const images = new Map<string, Promise<HTMLImageElement | null>>();
-    const load = (src: string) => {
-      if (!images.has(src)) images.set(src, new Promise((resolve) => {
-        const image = new Image();
-        image.onload = () => resolve(image);
-        image.onerror = () => resolve(null);
-        image.src = src;
-      }));
-      return images.get(src)!;
-    };
-    for (const record of collapsed) {
-      const key = `subtree:${record.id}`;
-      if (renderer.layerTextures.has(key)) continue;
-      const nodes = subtreeImageNodes(record.node);
-      void Promise.all(nodes.map((node) => load(node.layerImageDataUrl!))).then((loaded) => {
-        if (!alive || rendererRef.current !== renderer) return;
-        const rect = sourceRect(record);
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.ceil(rect.width);
-        canvas.height = Math.ceil(rect.height);
-        const context = canvas.getContext("2d");
-        if (!context) return;
-        // Transparent canvas, parent first, then only its descendants in order.
-        nodes.forEach((node, index) => {
-          const bounds = node.bounds!;
-          context.globalAlpha = Number(node.attributes?.["effective-alpha"] ?? 1);
-          if (loaded[index]) context.drawImage(loaded[index]!, bounds.left - rect.left, bounds.top - rect.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
-        });
-        if (uploadLayerTexture(renderer, key, canvas)) drawRef.current();
-      });
+    const wanted = new Map(textureRecords.map((record) => [record.isCollapsed ? `subtree:${record.id}:${visibilityKey}` : record.node.layerImageDataUrl!, record]));
+    const maxPixels = Math.min(2_000_000, Math.floor(MAX_LAYER_TEXTURE_PIXELS / Math.max(1, wanted.size)));
+    setTextureWarning(null);
+    for (const [key, texture] of renderer.layerTextures) {
+      if (wanted.has(key) && (renderer.layerTextureBytes.get(key) ?? 0) <= maxPixels * 4) continue;
+      renderer.gl.deleteTexture(texture);
+      renderer.layerTextures.delete(key);
+      renderer.layerTextureBytes.delete(key);
     }
+    const load = async (node: UiNode) => {
+      if (!alive) throw new Error("图层加载已取消");
+      const image = await loadLayerImage(node.layerImageDataUrl!);
+      if (!alive) { image.close(); throw new Error("图层加载已取消"); }
+      return image;
+    };
+    // Decode serially: a folded branch may contain hundreds of full-size PNGs.
+    void (async () => {
+      for (const [key, record] of wanted) {
+        if (!alive || rendererRef.current !== renderer) return;
+        if (renderer.layerTextures.has(key)) continue;
+        let image: ImageBitmap | HTMLCanvasElement | null = null;
+        try {
+          image = record.isCollapsed
+            ? await composeSubtreeImage(record.node, sourceRect(record), load, maxPixels, hiddenNodeIds)
+            : await load(record.node);
+          if (!alive || rendererRef.current !== renderer) return;
+          if (!uploadLayerTexture(renderer, key, image, maxPixels)) throw new Error("图层纹理上传失败");
+          drawRef.current();
+        } catch (error) {
+          if (alive) setTextureWarning(error instanceof Error ? error.message : "部分图层未能加载");
+        } finally {
+          if (image instanceof ImageBitmap) image.close();
+          else if (image) image.width = image.height = 0;
+        }
+      }
+      if (!alive || rendererRef.current !== renderer) return;
+      renderer.canvas.dataset.layerTextureBytes = String([...renderer.layerTextureBytes.values()].reduce((sum, value) => sum + value, 0));
+      renderer.canvas.dataset.layerTextureCount = String(renderer.layerTextures.size);
+      renderer.canvas.dataset.layerTextureVisibility = visibilityKey;
+    })();
     return () => { alive = false; };
-  }, [layout, records, rendererStatus, root]);
+  }, [textureKey, rendererStatus, root]);
+
+  function pickNode(clientX: number, clientY: number) {
+    const canvas = canvasRef.current;
+    if (!canvas || rendererStatus !== "webgl") return null;
+    const rect = canvas.getBoundingClientRect();
+    const point = { x: clientX - rect.left, y: clientY - rect.top };
+    if (point.x < 0 || point.y < 0 || point.x >= rect.width || point.y >= rect.height) return null;
+    return projectedRef.current.find((plane) => pointInQuad(point, plane.corners))?.node ?? null;
+  }
+
+  function positionHoverLabel() {
+    const label = hoverLabelRef.current, canvas = canvasRef.current, point = hoverPointRef.current;
+    if (!label || !canvas || !point) return;
+    const rect = canvas.getBoundingClientRect();
+    const viewport = canvas.closest(".screenshot-frame")?.getBoundingClientRect() ?? rect;
+    const minX = Math.max(0, viewport.left - rect.left) + 8, minY = Math.max(0, viewport.top - rect.top) + 8;
+    const maxX = Math.min(rect.width, viewport.right - rect.left) - label.offsetWidth - 8;
+    const maxY = Math.min(rect.height, viewport.bottom - rect.top) - label.offsetHeight - 8;
+    const x = point.x - rect.left, y = point.y - rect.top;
+    label.style.transform = `translate(${Math.max(minX, Math.min(maxX, x + 14 > maxX ? x - label.offsetWidth - 14 : x + 14))}px, ${Math.max(minY, Math.min(maxY, y + 18 > maxY ? y - label.offsetHeight - 18 : y + 18))}px)`;
+  }
 
   useImperativeHandle(ref, () => ({
     paintCamera(next) {
@@ -617,30 +747,38 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
       sceneRef.current?.style.setProperty("transform", `translate3d(${next.panX}px, ${next.panY}px, 0)`);
       drawRef.current();
     },
-    pick(clientX, clientY) {
-      const canvas = canvasRef.current;
-      if (!canvas || rendererStatus !== "webgl") return null;
-      const rect = canvas.getBoundingClientRect();
-      const point = { x: clientX - rect.left, y: clientY - rect.top };
-      return projectedRef.current.find((plane) => pointInQuad(point, plane.corners))?.node ?? null;
-    },
+    fit() { fitRef.current(); },
+    pick: pickNode,
     hover(clientX, clientY) {
-      const canvas = canvasRef.current;
-      if (!canvas || rendererStatus !== "webgl") return;
-      const rect = canvas.getBoundingClientRect();
-      const point = { x: clientX - rect.left, y: clientY - rect.top };
-      const nextId = projectedRef.current.find((plane) => pointInQuad(point, plane.corners))?.node.id ?? null;
+      const nextId = pickNode(clientX, clientY)?.id ?? null;
+      hoverPointRef.current = { x: clientX, y: clientY };
+      positionHoverLabel();
       setHoveredId((current) => current === nextId ? current : nextId);
     },
     clearHover() {
+      hoverPointRef.current = null;
       setHoveredId((current) => current ? null : current);
     },
   }), [rendererStatus]);
 
   return (
-    <div ref={sceneRef} className={`layer-scene layer-renderer-${rendererStatus}`} style={{ transform: `translate3d(${camera.panX}px, ${camera.panY}px, 0)` }} data-view-mode="layers3d" data-layer-mode="overview" data-layer-parent-id={layout.parentId ?? ""} data-layer-hovered-id={hoveredId ?? ""} data-layer-count={records.length + Number(Boolean(layout.parent?.isCollapsed))} data-layer-texture-count={textureCount} data-layer-native-texture-count={nativeTextureCount} data-layer-composite-count={compositeCount} data-layer-root-composite={layout.parent?.isCollapsed ? "true" : "false"} data-layer-text-only-count={textOnlyCount} data-layer-outline-count={outlineCount} data-layer-selection-count={Number(Boolean(selectedRecord))} data-layer-candidate-count={layout.candidateCount} data-layer-truncated={layout.truncated ? "true" : "false"} data-layer-omitted-count={layout.omittedCount} data-layer-pivot-x={pivot.x.toFixed(2)} data-layer-pivot-y={pivot.y.toFixed(2)} data-layer-pivot-z={pivot.z.toFixed(2)} aria-label="WebGL 3D hierarchy layers">
+    <div ref={sceneRef} className={`layer-scene layer-renderer-${rendererStatus}`} style={{ transform: `translate3d(${camera.panX}px, ${camera.panY}px, 0)` }} data-view-mode="layers3d" data-layer-mode="overview" data-layer-parent-id={layout.parentId ?? ""} data-layer-hovered-id={hoveredId ?? ""} data-layer-hidden-count={hiddenNodeIds.size} data-layer-count={records.length + Number(Boolean(parent?.isCollapsed))} data-layer-texture-count={textureCount} data-layer-native-texture-count={nativeTextureCount} data-layer-composite-count={compositeCount} data-layer-root-composite={parent?.isCollapsed ? "true" : "false"} data-layer-text-only-count={textOnlyCount} data-layer-outline-count={outlineCount} data-layer-selection-count={Number(Boolean(selectedRecord))} data-layer-candidate-count={layout.candidateCount} data-layer-truncated={layout.truncated ? "true" : "false"} data-layer-omitted-count={layout.omittedCount} data-layer-pivot-x={pivot.x.toFixed(2)} data-layer-pivot-y={pivot.y.toFixed(2)} data-layer-pivot-z={pivot.z.toFixed(2)} aria-label="WebGL 3D hierarchy layers">
       <canvas ref={canvasRef} className="layer-webgl-canvas" data-layer-webgl="true" data-layer-renderer={rendererStatus} aria-hidden="true" />
+      {hoveredRecord && rendererStatus === "webgl" && <div ref={hoverLabelRef} className={`layer-hover-label${hoveredRecord.isSelected ? " is-selected" : ""}`} role="tooltip" data-node-id={hoveredRecord.id}>
+        <div><span>{hoveredRecord.isSelected ? "已选中" : "指向"}</span><strong>{nodeShortClass(hoveredRecord.node)}</strong></div>
+        <code>{hoveredRecord.node.resourceId?.replace(/^.*:id\//, "@id/") || hoveredRecord.node.text || hoveredRecord.node.contentDesc || `#${hoveredRecord.id}`}</code>
+      </div>}
+      {measurement && <>
+        <svg className="layer-measurement" aria-hidden="true" data-measure-anchor={selectedRecord!.id} data-measure-target={hoveredRecord!.id} data-measure-relation={measurement.relation}>
+          {measurement.guides.map((_guide, index) => <g key={index} ref={element => { measureGuideRefs.current[index] = element; }}>
+            <path /><circle r="3" className="measure-anchor" /><circle r="3" className="measure-target" />
+            <g className="measure-label"><rect height="24" rx="4" /><text x="8" y="16">{measurementLabel(measurement, index)}</text></g>
+          </g>)}
+        </svg>
+        <span className="layer-measurement-status" role="status">{nodeDisplayLabel(selectedRecord!.node)} 到 {nodeDisplayLabel(hoveredRecord!.node)}：{measurement.guides.map((_, index) => measurementLabel(measurement, index)).join("，")}。按原始外框测量，不含 3D 展开层距。</span>
+      </>}
       {rendererStatus === "fallback" && <span className="layer-webgl-fallback">WebGL 不可用，已回退到截图预览。</span>}
+      {(layout.truncated || textureWarning) && <span className="layer-resource-note" role="status">{textureWarning ?? `当前显示 ${records.length} 层，另有 ${layout.omittedCount} 层未显示；可收起分支或从树中选中定位。`}</span>}
       <div className="layer-scene-metadata" hidden aria-hidden="true">
         {records.map((record) => {
           const role = roles.get(record.id) ?? "outline";

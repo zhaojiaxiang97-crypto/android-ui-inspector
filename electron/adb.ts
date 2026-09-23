@@ -1,5 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import { spawn } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { setTimeout as wait } from "node:timers/promises";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -7,12 +9,17 @@ import type { AdbProbeResult, CaptureGeometry, DeviceInfo, UiBounds, UiNode, UiS
 import { assessCaptureGeometry, isRotation } from "../shared/screen-coordinates";
 import { parseInputDisplay, pngSize } from "./capture-display";
 import { inspectQmlHierarchy, type QmlDebugNode } from "./qml-debug";
-import { captureViewLayers, captureTextureViewBitmaps, type CapturedViewLayer } from "./view-debug";
+import { captureViewLayers, captureViewBitmaps, matchesViewRoot, type CapturedViewLayer } from "./view-debug";
+import { qmlColorCss, qmlStyleSvg } from "../shared/qml-style";
+import { textureDimensions } from "../shared/layer-textures";
 
 const COMMAND_TIMEOUT_MS = 30_000;
 const MAX_UI_HIERARCHY_DEPTH = 200;
 const QML_DEBUG_PORT = 3768;
 const qmlDebugTargets = new Map<string, string>();
+type InspectionOptions = { signal?: AbortSignal; onProgress?: (stage: string, elapsedMs: number) => void };
+// Task-local cancellation also covers nested ADB commands, without affecting probes.
+const inspectionContext = new AsyncLocalStorage<InspectionOptions>();
 
 type CommandResult = {
   code: number | null;
@@ -43,7 +50,9 @@ const xmlParser = new XMLParser({
 
 function runCommand(command: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true });
+    const signal = inspectionContext.getStore()?.signal;
+    signal?.throwIfAborted();
+    const child = spawn(command, args, { windowsHide: true, signal });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let settled = false;
@@ -314,7 +323,7 @@ function appBounds(section: string): UiBounds | null {
   return { left, top, right, bottom, raw: `[${left},${top}][${right},${bottom}]` };
 }
 
-function debugViewTree(section: string, target: ForegroundTarget): UiNode {
+export function debugViewTree(section: string, target: ForegroundTarget): UiNode {
   const hierarchy = section.split("View Hierarchy:")[1]?.split("\n    Looper")[0];
   if (!hierarchy) throw new Error("无法从 Debug App 读取 View Hierarchy。");
   if (hierarchy.includes("AndroidComposeView")) throw new Error("当前版本尚未支持 Compose Debug 控件树。");
@@ -343,23 +352,25 @@ function debugViewTree(section: string, target: ForegroundTarget): UiNode {
 
   for (const line of hierarchy.split(/\r?\n/)) {
     const match = line.match(/^(\s+)([^\s{]+)\{([^}]*)\}(.*)$/);
-    if (!match) continue;
-    const indent = match[1].length;
-    const className = match[2].split("@")[0];
-    const details = match[3];
+    const decor = line.match(/^(\s+)(DecorView)@([0-9a-f]+)\[[^\r\n]*\]\s*$/i);
+    const identity = match ?? decor;
+    if (!identity) continue;
+    const indent = identity[1].length;
+    const className = identity[2].split("@")[0];
+    const details = match?.[3] ?? "";
     const coordinates = details.match(/\s(-?\d+),(-?\d+)-(-?\d+),(-?\d+)(?:\s|$)/);
-    if (!coordinates) continue;
+    if (!coordinates && !decor) continue;
     while (stack.length > 1 && stack.at(-1)!.indent >= indent) stack.pop();
     const parent = stack.at(-1)!;
-    const localLeft = Number(coordinates[1]);
-    const localTop = Number(coordinates[2]);
+    const localLeft = Number(coordinates?.[1] ?? 0);
+    const localTop = Number(coordinates?.[2] ?? 0);
     const left = parent.left + localLeft;
     const top = parent.top + localTop;
-    const right = parent.left + Number(coordinates[3]);
-    const bottom = parent.top + Number(coordinates[4]);
+    const right = parent.left + Number(coordinates?.[3] ?? 0);
+    const bottom = parent.top + Number(coordinates?.[4] ?? 0);
     const flags = details.trim().split(/\s+/)[1] ?? "";
     const resourceId = details.match(/#\S+\s+([^\s}]+:id\/[^\s}]+)/)?.[1] ?? null;
-    const text = match[4].match(/^\(([^)]*)\)/)?.[1] || null;
+    const text = match?.[4].match(/^\(([^)]*)\)/)?.[1] || null;
     const index = parent.node.children.length;
     const node: UiNode = {
       id: `${parent.node.id}/${index}`,
@@ -369,15 +380,15 @@ function debugViewTree(section: string, target: ForegroundTarget): UiNode {
       text,
       resourceId,
       contentDesc: null,
-      bounds: { left, top, right, bottom, raw: `[${left},${top}][${right},${bottom}]` },
+      bounds: coordinates ? { left, top, right, bottom, raw: `[${left},${top}][${right},${bottom}]` } : null,
       clickable: flags.includes("C"),
-      enabled: flags.includes("E"),
+      enabled: Boolean(decor) || flags.includes("E"),
       focusable: flags.includes("F"),
       focused: false,
       scrollable: className.includes("Scroll") || className.includes("Recycler"),
       selected: false,
-      visibleToUser: flags.startsWith("V"),
-      attributes: { "inspection-source": "debug-view", "view-flags": flags, "view-ref": `${className}@${details.trim().split(/\s+/)[0]}` },
+      visibleToUser: Boolean(decor) || flags.startsWith("V"),
+      attributes: { "inspection-source": "debug-view", "view-flags": flags, "view-ref": `${className}@${decor?.[3] ?? details.trim().split(/\s+/)[0]}` },
       children: [],
     };
     parent.node.children.push(node);
@@ -388,12 +399,13 @@ function debugViewTree(section: string, target: ForegroundTarget): UiNode {
 }
 
 function viewLayerName(node: UiNode) {
+  if (node.attributes?.["debug-layer-name"]) return node.attributes["debug-layer-name"];
   if (node.resourceId?.includes(":id/")) return `id/${node.resourceId.split(":id/")[1]}`;
   const className = node.className ?? "";
   return className.slice(className.lastIndexOf(".") + 1);
 }
 
-export function attachViewLayerImages(root: UiNode, layers: readonly CapturedViewLayer[]) {
+export function attachViewLayerImages(root: UiNode, layers: readonly CapturedViewLayer[], windowOrigin = { x: 0, y: 0 }) {
   const nodes: UiNode[] = [];
   const stack = [...root.children].reverse();
   while (stack.length > 0) {
@@ -402,29 +414,46 @@ export function attachViewLayerImages(root: UiNode, layers: readonly CapturedVie
     for (let index = node.children.length - 1; index >= 0; index -= 1) stack.push(node.children[index]);
   }
 
-  const used = new Set<number>();
+  // DDMS CAPTURE_LAYERS has no identity for most records. Never resolve a
+  // same-name/same-bounds collision by traversal order: it can swap pixels.
+  const key = (name: string, x: number, y: number, width: number, height: number) => JSON.stringify([name, x, y, width, height]);
+  const candidates = new Map<string, UiNode[]>();
+  for (const node of nodes) {
+    delete node.layerImageDataUrl;
+    delete node.layerImageSize;
+    delete node.layerImageEmpty;
+    node.layerImageStatus = node.visibleToUser ? "unavailable" : "hidden";
+    if (!node.visibleToUser || !node.bounds) continue;
+    const { left, top, right, bottom } = node.bounds;
+    // Android omits PFLAG_SKIP_DRAW views from anonymous CAPTURE_LAYERS.
+    // Keep explicit identities usable; Surface/Texture buffers are captured separately.
+    const names = [node.attributes?.["view-ref"]];
+    if (node.attributes?.["skip-draw"] !== "true") names.push(viewLayerName(node));
+    for (const name of new Set(names.filter((value): value is string => Boolean(value)))) {
+      const id = key(name, left, top, right - left, bottom - top);
+      candidates.set(id, [...(candidates.get(id) ?? []), node]);
+    }
+  }
+  const counts = new Map<string, number>();
+  for (const layer of layers) {
+    if (!layer.visible || !layer.pngDataUrl || layer.width < 1 || layer.height < 1) continue;
+    const id = key(layer.viewRef ?? layer.name, layer.x + windowOrigin.x, layer.y + windowOrigin.y, layer.width, layer.height);
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
   let attached = 0;
   for (const layer of layers) {
     if (!layer.visible || !layer.pngDataUrl || layer.width < 1 || layer.height < 1) continue;
-    let match = -1;
-    let bestScore = Number.POSITIVE_INFINITY;
-    for (let index = 0; index < nodes.length; index += 1) {
-      const node = nodes[index];
-      if (used.has(index) || !node.visibleToUser || viewLayerName(node) !== layer.name || !node.bounds) continue;
-      const width = node.bounds.right - node.bounds.left;
-      const height = node.bounds.bottom - node.bounds.top;
-      const score = Math.abs(node.bounds.left - layer.x) + Math.abs(node.bounds.top - layer.y) + Math.abs(width - layer.width) + Math.abs(height - layer.height);
-      if (score < bestScore) {
-        match = index;
-        bestScore = score;
-      }
+    const id = key(layer.viewRef ?? layer.name, layer.x + windowOrigin.x, layer.y + windowOrigin.y, layer.width, layer.height);
+    const matches = candidates.get(id) ?? [];
+    if (matches.length !== 1 || counts.get(id) !== 1) {
+      for (const node of matches) if (node.layerImageStatus !== "captured") node.layerImageStatus = "ambiguous";
+      continue;
     }
-    // DDMS and View Hierarchy report the same screen-space rectangle. Do not
-    // attach a similarly named parent bitmap to another View elsewhere.
-    if (match < 0 || bestScore !== 0) continue;
-    used.add(match);
-    nodes[match].layerImageDataUrl = layer.pngDataUrl;
-    nodes[match].layerImageSize = { width: layer.width, height: layer.height };
+    const node = matches[0];
+    if (node.layerImageStatus === "captured") continue;
+    node.layerImageDataUrl = layer.pngDataUrl;
+    node.layerImageSize = { width: layer.width, height: layer.height };
+    node.layerImageStatus = "captured";
     attached += 1;
   }
   return attached;
@@ -434,56 +463,135 @@ async function captureDebugViewImages(adbPath: string, serial: string, packageNa
   const pid = await runDeviceAdb(adbPath, serial, ["shell", "pidof", packageName]);
   const processId = pid.stdout.toString("utf8").trim().split(/\s+/)[0];
   if (pid.code !== 0 || !/^\d+$/.test(processId)) return 0;
-  const forwarded = await runDeviceAdb(adbPath, serial, ["forward", "tcp:0", `jdwp:${processId}`]);
+  // Let registration return its allocated port even if cancellation arrives;
+  // killing the client midway could leave an unknown ADB server-side forward.
+  const forwarded = await inspectionContext.exit(() => runDeviceAdb(adbPath, serial, ["forward", "tcp:0", `jdwp:${processId}`]));
   const port = forwarded.stdout.toString("utf8").trim();
   if (forwarded.code !== 0 || !/^\d+$/.test(port)) return 0;
   try {
-    const count = attachViewLayerImages(root, await captureViewLayers(Number(port), (dump) => applyViewProperties(root, dump)));
-    const textures: UiNode[] = [];
+    let windowName = "";
+    const layers = await captureViewLayers(Number(port), {
+      rootRefs: root.children.map((node) => node.attributes?.["view-ref"]).filter((value): value is string => Boolean(value)),
+      onHierarchy: (dump, name) => { applyViewProperties(root, dump, true); windowName = name; },
+      signal: inspectionContext.getStore()?.signal,
+    });
+    // DDMS images use window coordinates; the restored tree uses screen coordinates.
+    const windowBounds = root.children[0].bounds;
+    let count = attachViewLayerImages(root, layers, { x: windowBounds?.left ?? 0, y: windowBounds?.top ?? 0 });
+    const fallback: UiNode[] = [];
     const pending = [root];
     while (pending.length) {
       const node = pending.pop()!;
       if (!node.visibleToUser) continue;
       const bounds = node.bounds;
-      if (node.className?.includes("TextureView") && node.attributes?.["view-ref"] && bounds && bounds.right > 0 && bounds.bottom > 0 && bounds.left < (root.bounds?.right ?? Infinity) && bounds.top < (root.bounds?.bottom ?? Infinity)) textures.push(node);
+      if (node.attributes?.["view-ref"] && bounds && bounds.right > bounds.left && bounds.bottom > bounds.top && (bounds.right - bounds.left) * (bounds.bottom - bounds.top) <= 4_000_000 && bounds.right > 0 && bounds.bottom > 0 && bounds.left < (root.bounds?.right ?? Infinity) && bounds.top < (root.bounds?.bottom ?? Infinity)) fallback.push(node);
       pending.push(...node.children);
     }
-    if (textures.length) {
+    if (fallback.length) {
       try {
-        const images = await captureTextureViewBitmaps(Number(port), textures.map((node) => node.attributes!["view-ref"]));
-        for (const node of textures) {
+        fallback.sort((a, b) => Number(b.layerImageStatus === "ambiguous") - Number(a.layerImageStatus === "ambiguous"));
+        const { images, failures, kinds } = await captureViewBitmaps(Number(port), { rootRef: root.children[0].attributes!["view-ref"], windowName }, fallback.map((node) => ({ ref: node.attributes!["view-ref"], captureOwn: !node.layerImageDataUrl && node.attributes!["skip-draw"] !== "true" })), inspectionContext.getStore()?.signal);
+        if (failures.size) root.attributes = { ...root.attributes, "texture-capture-warning": `${failures.size} 个控件未完成独立画面补采，原因可在属性栏查看；已保留其余采集结果。` };
+        for (const node of fallback) {
+          const kind = kinds.get(node.attributes!["view-ref"]);
+          if (kind === "surface") {
+            // A View snapshot contains only the SurfaceView's placeholder/hole,
+            // never its external buffer. Don't label that as a captured video.
+            if (node.layerImageStatus === "captured") count--;
+            delete node.layerImageDataUrl;
+            delete node.layerImageSize;
+            node.layerImageStatus = "failed";
+            node.attributes!["image-source"] = "SurfaceView / OpenGL 独立缓冲层";
+          }
+          const failure = failures.get(node.attributes!["view-ref"]);
+          if (failure) node.attributes!["image-capture-error"] = failure;
           const image = images.get(node.attributes!["view-ref"]);
           if (!image) continue;
+          if (image.width !== node.bounds!.right - node.bounds!.left || image.height !== node.bounds!.bottom - node.bounds!.top) {
+            node.attributes!["image-capture-error"] = "采集期间控件尺寸变化，请重新采集";
+            continue;
+          }
+          if (node.layerImageStatus !== "captured") count++;
           node.layerImageDataUrl = image.pngDataUrl;
           node.layerImageSize = { width: image.width, height: image.height };
+          node.layerImageStatus = "captured";
+          node.attributes!["image-source"] = image.kind === "surface" ? "SurfaceView / OpenGL 独立缓冲层，不含父层或邻居" : image.kind === "texture" ? "TextureView 自身缓冲区" : "按对象身份独立采集，不含子节点";
         }
       } catch {
-        root.attributes = { ...root.attributes, "texture-capture-warning": "部分视频控件未能读取独立画面。" };
+        inspectionContext.getStore()?.signal?.throwIfAborted();
+        root.attributes = { ...root.attributes, "texture-capture-warning": "部分控件的独立画面补采失败，已保留此前采集结果。" };
       }
     }
     return count;
   } finally {
-    await runDeviceAdb(adbPath, serial, ["forward", "--remove", `tcp:${port}`]).catch(() => undefined);
+    await inspectionContext.exit(() => runDeviceAdb(adbPath, serial, ["forward", "--remove", `tcp:${port}`])).catch(() => undefined);
   }
 }
 
-export function applyViewProperties(root: UiNode, dump: string) {
+export function applyViewProperties(root: UiNode, dump: string, restoreHierarchy = false) {
   const properties = new Map<string, Record<string, string>>();
+  const records: Array<{ ref: string; indent: number }> = [];
   for (const line of dump.split("\n")) {
-    const header = line.match(/^\s*(\S+@\w+) /);
-    if (!header) continue;
+    const header = line.match(/^(\s*)(\S+@\w+) /);
+    if (!header) {
+      if (restoreHierarchy && line.trim() && line.trim() !== "DONE.") throw new Error("Debug 控件树记录格式无效。");
+      continue;
+    }
     const values: Record<string, string> = {};
     let offset = header[0].length;
     while (offset < line.length) {
       const field = line.slice(offset).match(/^([^= ]+)=(\d+),/);
-      if (!field) break;
+      if (!field) throw new Error("Debug 控件属性格式不完整。");
       offset += field[0].length;
       const length = Number(field[2]);
-      if (offset + length > line.length) break;
+      if (!Number.isSafeInteger(length) || offset + length > line.length) throw new Error("Debug 控件属性长度无效。");
+      if (offset + length < line.length && line[offset + length] !== " ") throw new Error("Debug 控件属性分隔符无效。");
       values[field[1]] = line.slice(offset, offset + length);
       offset += length + 1;
     }
-    properties.set(header[1], values);
+    if (properties.has(header[2])) throw new Error("Debug 控件对象身份重复，请重新采集。");
+    properties.set(header[2], values);
+    records.push({ ref: header[2], indent: header[1].length });
+  }
+  const windowRef = dump.trimStart().split(/\s/)[0];
+  for (const node of root.children) {
+    const ref = node.attributes?.["view-ref"];
+    if (ref && matchesViewRoot(ref, windowRef)) {
+      node.className = windowRef.split("@")[0];
+      node.attributes = { ...node.attributes, "view-ref": windowRef };
+    }
+  }
+  if (restoreHierarchy) {
+    if (!records.length || records.length > 50_000 || records[0].indent !== 0
+      || !root.children.some((node) => matchesViewRoot(node.attributes?.["view-ref"] ?? "", records[0].ref))) {
+      throw new Error("Debug 控件树不完整或根窗口已变化，请重新采集。");
+    }
+    const previous = new Map<string, UiNode>();
+    const pending = [...root.children];
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (node.attributes?.["view-ref"]) previous.set(node.attributes["view-ref"], node);
+      pending.push(...node.children);
+    }
+    const rebuilt = { ...root, children: [] as UiNode[] };
+    const parents = [{ node: rebuilt, indent: -1 }];
+    for (const record of records) {
+      while (parents.length > 1 && parents.at(-1)!.indent >= record.indent) parents.pop();
+      if (parents.length > MAX_UI_HIERARCHY_DEPTH || (parents.length === 1 && rebuilt.children.length)) throw new Error("Debug 控件树结构无效。");
+      const parent = parents.at(-1)!.node;
+      const old = previous.get(record.ref);
+      const index = parent.children.length;
+      const node: UiNode = {
+        id: `${parent.id}/${index}`, index, package: root.package, className: record.ref.split("@")[0],
+        text: old?.text ?? null, resourceId: old?.resourceId ?? null, contentDesc: old?.contentDesc ?? null,
+        bounds: null, clickable: false, enabled: true, focusable: false, focused: false,
+        scrollable: /Scroll|Recycler/.test(record.ref), selected: false, visibleToUser: true,
+        attributes: { "inspection-source": "debug-view", "view-ref": record.ref }, children: [],
+      };
+      parent.children.push(node);
+      parents.push({ node, indent: record.indent });
+    }
+    root.children = rebuilt.children;
   }
   const stack = [{ node: root, alpha: 1, visible: true }];
   while (stack.length) {
@@ -492,9 +600,42 @@ export function applyViewProperties(root: UiNode, dump: string) {
     const ownAlpha = Number(values?.["drawing:getAlpha()"] ?? 1);
     const effectiveAlpha = alpha * (Number.isFinite(ownAlpha) ? Math.max(0, Math.min(1, ownAlpha)) : 1);
     node.attributes = { ...node.attributes, "effective-alpha": String(effectiveAlpha) };
-    node.visibleToUser = visible && node.visibleToUser && effectiveAlpha > 0;
+    node.visibleToUser = visible && (values?.["getVisibility()"] !== undefined ? ["VISIBLE", "0"].includes(values["getVisibility()"]) : node.visibleToUser) && effectiveAlpha > 0;
     if (values) {
       node.attributes["alpha"] = String(ownAlpha);
+      const layerName = values["mID"];
+      if (layerName && layerName !== "NO_ID") {
+        node.attributes["debug-layer-name"] = layerName;
+        // DDMS does not include the resource namespace; do not invent one.
+        if (!node.resourceId && layerName.startsWith("id/")) node.resourceId = layerName;
+      }
+      const privateFlags = values["mPrivateFlags"];
+      if (privateFlags && /^0x[\da-f]+$/i.test(privateFlags)) node.attributes["skip-draw"] = String((Number(privateFlags) & 0x80) !== 0);
+      for (const [property, key] of [["clickable", "isClickable()"], ["enabled", "isEnabled()"], ["focusable", "focus:isFocusable()"], ["focused", "focus:isFocused()"], ["selected", "isSelected()"]] as const) {
+        if (values[key] === "true" || values[key] === "false") node[property] = values[key] === "true";
+      }
+      const text = values["text:mText"] ?? values["text:getText()"];
+      if (text !== undefined) node.text = text === "null" ? null : text;
+      const description = values["accessibility:getContentDescription()"];
+      if (description !== undefined) node.contentDesc = description === "null" ? null : description;
+      const exported = {
+        z: ["drawing:getZ()"],
+        elevation: ["drawing:getElevation()"],
+        "translation-z": ["drawing:getTranslationZ()"],
+        "clip-children": ["drawing:getClipChildren()"],
+        "clip-to-padding": ["drawing:getClipToPadding()"],
+        "padding-left": ["padding:mPaddingLeft", "padding:getPaddingLeft()"],
+        "padding-top": ["padding:mPaddingTop", "padding:getPaddingTop()"],
+        "padding-right": ["padding:mPaddingRight", "padding:getPaddingRight()"],
+        "padding-bottom": ["padding:mPaddingBottom", "padding:getPaddingBottom()"],
+        rotation: ["drawing:getRotation()"],
+        "scale-x": ["drawing:getScaleX()"],
+        "scale-y": ["drawing:getScaleY()"],
+      };
+      for (const [key, aliases] of Object.entries(exported)) {
+        const value = aliases.map((alias) => values[alias]).find((value) => value !== undefined);
+        if (value !== undefined && (value === "true" || value === "false" || (value.trim() !== "" && Number.isFinite(Number(value))))) node.attributes[key] = value;
+      }
       const x = Number(values["layout:getLocationOnScreen_x()"]);
       const y = Number(values["layout:getLocationOnScreen_y()"]);
       const width = Number(values["layout:getWidth()"]);
@@ -505,7 +646,7 @@ export function applyViewProperties(root: UiNode, dump: string) {
   }
 }
 
-function qmlUiTree(root: QmlDebugNode, packageName: string, viewport: UiBounds | null): UiNode {
+export function qmlUiTree(root: QmlDebugNode, packageName: string, viewport: UiBounds | null): UiNode {
   const rootGeometry = root.geometry;
   const scaleX = viewport && rootGeometry?.width ? (viewport.right - viewport.left) / rootGeometry.width : 1;
   const scaleY = viewport && rootGeometry?.height ? (viewport.bottom - viewport.top) / rootGeometry.height : scaleX;
@@ -538,7 +679,9 @@ function qmlUiTree(root: QmlDebugNode, packageName: string, viewport: UiBounds |
       focused: false,
       scrollable: /(Flickable|ListView|GridView|ScrollView)/i.test(source.type),
       selected: false,
-      visibleToUser: Boolean(geometry && geometry.visible && geometry.opacity > 0 && geometry.width > 0 && geometry.height > 0),
+      // QObject/attached-property wrappers have no geometry, but may own visual
+      // descendants. Zero-size Items can also have unclipped visible children.
+      visibleToUser: !geometry || (geometry.visible && geometry.effectiveOpacity > 0),
       attributes: {
         "inspection-source": "debug-qml",
         "qml-debug-id": String(source.debugId),
@@ -547,11 +690,31 @@ function qmlUiTree(root: QmlDebugNode, packageName: string, viewport: UiBounds |
         "qml-source": source.url,
         "qml-line": String(source.line),
         opacity: String(geometry?.opacity ?? 1),
+        alpha: String(geometry?.opacity ?? 1),
+        "effective-alpha": String(geometry?.effectiveOpacity ?? 1),
+        "qml-clip": String(geometry?.clip ?? false),
+        "qml-layer-enabled": String(geometry?.layerEnabled ?? false),
         z: String(geometry?.z ?? 0),
         "drawing-order": String(geometry?.z ?? index),
       },
       children: [],
     };
+    if (geometry?.style && bounds && geometry.width > 0 && geometry.height > 0 && bounds.right > bounds.left && bounds.bottom > bounds.top) {
+      const style = geometry.style;
+      const imageSize = textureDimensions(bounds.right - bounds.left, bounds.bottom - bounds.top);
+      const svg = qmlStyleSvg(style, geometry, imageSize, scaleX);
+      node.layerImageDataUrl = `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+      node.layerImageSize = imageSize;
+      node.layerImageStatus = "style";
+      Object.assign(node.attributes!, {
+        "background-color": style.fill ? qmlColorCss(style.fill) : "未暴露",
+        "border-color": style.border ? qmlColorCss(style.border) : "未暴露",
+        "border-width": String(style.borderWidth * scaleX),
+        "border-status": style.borderValidityUnknown ? "默认黑色 1px 边框的启用状态未暴露，未绘制" : "已读取",
+        "corner-radii": style.radii.map((r) => r * scaleX).join(" / "),
+        "background-gradient": style.unsupportedGradient ? "不支持的渐变预设，未绘制填充" : style.gradient ? JSON.stringify(style.gradient) : "none",
+      });
+    }
     node.children = source.children.map((child, childIndex) => convert(child, `${id}/${childIndex}`, childIndex));
     return node;
   };
@@ -559,42 +722,53 @@ function qmlUiTree(root: QmlDebugNode, packageName: string, viewport: UiBounds |
 }
 
 function delay(milliseconds: number) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  return wait(milliseconds, undefined, { signal: inspectionContext.getStore()?.signal });
 }
 
 async function qmlDebugTree(adbPath: string, serial: string, target: ForegroundTarget) {
-  const forward = await runDeviceAdb(adbPath, serial, ["forward", `tcp:${QML_DEBUG_PORT}`, `tcp:${QML_DEBUG_PORT}`]);
+  const signal = inspectionContext.getStore()?.signal;
+  signal?.throwIfAborted();
+  const forward = await inspectionContext.exit(() => runDeviceAdb(adbPath, serial, ["forward", "tcp:0", `tcp:${QML_DEBUG_PORT}`]));
   if (forward.code !== 0) throw new Error(commandError("无法转发 QML 调试端口", forward));
+  const port = Number(forward.stdout.toString("utf8").trim());
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("QML 调试转发端口无效。");
 
-  if (qmlDebugTargets.get(serial) === target.packageName) {
-    try {
-      return { root: await inspectQmlHierarchy(QML_DEBUG_PORT), restarted: false };
-    } catch {
-      qmlDebugTargets.delete(serial);
+  try {
+    signal?.throwIfAborted();
+    if (qmlDebugTargets.get(serial) === target.packageName) {
+      try {
+        return { root: await inspectQmlHierarchy(port, signal), restarted: false };
+      } catch {
+        signal?.throwIfAborted();
+        qmlDebugTargets.delete(serial);
+      }
     }
-  }
 
-  await runDeviceAdb(adbPath, serial, ["shell", "am", "force-stop", target.packageName]);
-  const start = await runDeviceAdb(adbPath, serial, [
-    "shell", "am", "start", "-n", target.component,
-    "--es", "applicationArguments", `-qmljsdebugger=port:${QML_DEBUG_PORT},services:QmlDebugger`,
-  ]);
-  if (start.code !== 0 || /\bError:/.test(start.stdout.toString("utf8"))) {
-    throw new Error(commandError("无法以 QML Debug 模式启动目标 App", start));
-  }
-
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    try {
-      const root = await inspectQmlHierarchy(QML_DEBUG_PORT);
-      qmlDebugTargets.set(serial, target.packageName);
-      return { root, restarted: true };
-    } catch (error) {
-      lastError = error;
-      await delay(250);
+    await runDeviceAdb(adbPath, serial, ["shell", "am", "force-stop", target.packageName]);
+    const start = await runDeviceAdb(adbPath, serial, [
+      "shell", "am", "start", "-n", target.component,
+      "--es", "applicationArguments", `-qmljsdebugger=port:${QML_DEBUG_PORT},services:QmlDebugger`,
+    ]);
+    if (start.code !== 0 || /\bError:/.test(start.stdout.toString("utf8"))) {
+      throw new Error(commandError("无法以 QML Debug 模式启动目标 App", start));
     }
+
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        const root = await inspectQmlHierarchy(port, signal);
+        qmlDebugTargets.set(serial, target.packageName);
+        return { root, restarted: true };
+      } catch (error) {
+        signal?.throwIfAborted();
+        lastError = error;
+        await delay(250);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("无法连接 QML Debug 服务。");
+  } finally {
+    await inspectionContext.exit(() => runDeviceAdb(adbPath, serial, ["forward", "--remove", `tcp:${port}`])).catch(() => undefined);
   }
-  throw lastError instanceof Error ? lastError : new Error("无法连接 QML Debug 服务。");
 }
 
 async function captureScreen(adbPath: string, serial: string) {
@@ -679,13 +853,30 @@ export async function probeAdb(): Promise<AdbProbeResult> {
   }
 }
 
-export async function inspectDevice(serial: string): Promise<UiSnapshot> {
+export function inspectDevice(serial: string, options: InspectionOptions = {}): Promise<UiSnapshot> {
+  return inspectionContext.run(options, () => readDeviceSnapshot(serial, options));
+}
+
+async function readDeviceSnapshot(serial: string, options: InspectionOptions): Promise<UiSnapshot> {
+  const started = performance.now();
+  let stageStart = started;
+  let currentStage = "";
+  const timings: Record<string, number> = {};
+  const stage = (name: string) => {
+    options.signal?.throwIfAborted();
+    const now = performance.now();
+    if (currentStage) timings[currentStage] = Math.round(now - stageStart);
+    currentStage = name;
+    stageStart = now;
+    options.onProgress?.(name, Math.round(now - started));
+  };
   if (!serial.trim()) return errorSnapshot(serial, "设备序列号不能为空。");
 
   const adbPath = findAdbPath();
   if (!adbPath) return errorSnapshot(serial, "未找到 adb。请安装 Android SDK Platform-Tools 后重试。");
 
   try {
+    stage("检查前台 Debug App");
     const activities = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]);
     if (activities.code !== 0) return errorSnapshot(serial, commandError("无法读取前台 App", activities));
     const target = foregroundTarget(activities.stdout.toString("utf8"));
@@ -694,6 +885,7 @@ export async function inspectDevice(serial: string): Promise<UiSnapshot> {
     const debugCheck = await runDeviceAdb(adbPath, serial, ["shell", "run-as", target.packageName, "id"]);
     if (debugCheck.code !== 0) return errorSnapshot(serial, `仅支持 Debug App：${target.packageName} 不可调试。`);
 
+    stage("读取控件树");
     const top = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", target.packageName]);
     if (top.code !== 0) return errorSnapshot(serial, commandError("无法读取 Debug App 层级", top));
     const section = targetActivitySection(top.stdout.toString("utf8"), target);
@@ -713,16 +905,42 @@ export async function inspectDevice(serial: string): Promise<UiSnapshot> {
       root = debugViewTree(section, target);
       inspectionSource = "debug-view";
       rawHierarchy = section;
+      stage("采集独立控件画面");
       try {
         const imageCount = await captureDebugViewImages(adbPath, serial, target.packageName, root);
         if (imageCount === 0) warning = "未读取到独立 View 画面，缺失画面的控件仅显示边框。";
         if (root.attributes?.["texture-capture-warning"]) warning = root.attributes["texture-capture-warning"];
       } catch (error) {
+        options.signal?.throwIfAborted();
+        const pending = [...root.children];
+        while (pending.length) {
+          const node = pending.pop()!;
+          node.layerImageStatus ??= node.visibleToUser ? "failed" : "hidden";
+          pending.push(...node.children);
+        }
         warning = `独立 View 画面抓取失败，缺失画面的控件仅显示边框。${error instanceof Error ? error.message : ""}`;
       }
+      const pending = [...root.children];
+      let ambiguous = 0, outsideWindow = 0;
+      while (pending.length) {
+        const node = pending.pop()!;
+        node.layerImageStatus ??= node.visibleToUser ? "unavailable" : "hidden";
+        if (node.layerImageStatus === "ambiguous") {
+          ambiguous++;
+          const b = node.bounds, window = root.bounds;
+          if (b && window && (b.right <= window.left || b.bottom <= window.top || b.left >= window.right || b.top >= window.bottom)) outsideWindow++;
+        }
+        pending.push(...node.children);
+      }
+      if (ambiguous) warning = [warning, `${ambiguous} 个控件的位图无法唯一匹配${outsideWindow ? `（其中 ${outsideWindow} 个在当前窗口范围外）` : ""}，已保留边框，未混用其他控件画面。`].filter(Boolean).join(" ");
     }
 
+    stage("读取屏幕并校验前台窗口");
     const screenshot = await captureScreen(adbPath, serial);
+    const after = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]);
+    if (after.code !== 0 || foregroundTarget(after.stdout.toString("utf8"))?.component !== target.component) {
+      return errorSnapshot(serial, "采集期间前台窗口发生变化或无法校验，请保持页面稳定后重新采集。");
+    }
     if (!screenshot.screenshotDataUrl) {
       warning = [warning, commandError("控件树已读取，但截图失败或不是有效 PNG", screenshot.result)].filter(Boolean).join(" ");
     } else if (screenshot.captureGeometry) {
@@ -730,6 +948,7 @@ export async function inspectDevice(serial: string): Promise<UiSnapshot> {
       if (integrity.status === "mismatch") warning = [warning, integrity.message].filter(Boolean).join(" ");
     }
 
+    stage("完成");
     return {
       serial,
       root,
@@ -740,9 +959,12 @@ export async function inspectDevice(serial: string): Promise<UiSnapshot> {
       error: null,
       warning,
       inspectionSource,
+      captureTimings: timings,
+      captureDurationMs: Math.round(performance.now() - started),
       ...(screenshot.captureGeometry ? { captureGeometry: screenshot.captureGeometry } : {}),
     };
   } catch (error) {
+    options.signal?.throwIfAborted();
     return errorSnapshot(serial, error instanceof Error ? error.message : "读取 Debug 控件树失败。");
   }
 }
