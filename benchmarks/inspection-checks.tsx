@@ -1,7 +1,7 @@
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import App from "../src/App";
-import type { InspectionProgress, UiSnapshot } from "../shared/types";
+import type { AppMenuAction, AppMenuState, InspectionProgress, UiSnapshot } from "../shared/types";
 import { makeNode } from "./fixtures";
 
 export async function verifyInspectionBehavior() {
@@ -11,6 +11,8 @@ export async function verifyInspectionBehavior() {
   const root = createRoot(host);
   let mounted = true;
   let progress: ((value: InspectionProgress) => void) | null = null;
+  let menuAction: ((value: AppMenuAction) => void) | null = null;
+  let menuState: AppMenuState | null = null;
   const requests: Array<{ id: string; serial: string; resolve: (value: UiSnapshot) => void; reject: (error: Error) => void }> = [];
   const cancelled: string[] = [];
   const copied: string[] = [];
@@ -28,6 +30,8 @@ export async function verifyInspectionBehavior() {
   const snapshot = (serial: string, nodeCount: number): UiSnapshot => ({ serial, root: makeNode("latest"), nodeCount, xmlSize: 0, rawXml: null, screenshotDataUrl: null, error: null, warning: null });
   window.electronApi = {
     runtime: { sandboxed: true, contextIsolated: true },
+    updateAppMenu: async (state) => { menuState = state; },
+    onAppMenuAction: (callback) => { menuAction = callback; return () => { menuAction = null; }; },
     probeAdb: async () => ({ adbPath: "fixture", adbVersion: "fixture", error: null, devices: ["a", "b"].map((serial) => ({ serial, state: "device", model: serial, androidVersion: "15", product: null, transportId: null })) }),
     inspectDevice: (serial, id) => new Promise((resolve, reject) => requests.push({ serial, id, resolve, reject })),
     cancelInspection: async (id) => { cancelled.push(id); },
@@ -75,14 +79,32 @@ export async function verifyInspectionBehavior() {
     partial.text = null; partial.contentDesc = "收藏"; partial.resourceId = "app:id/collect_icon"; partial.className = "android.view.View";
     unknown.text = " \n"; unknown.contentDesc = " "; unknown.resourceId = "app:id/collect_icon"; unknown.className = "android.view.View";
     styled.text = null; styled.contentDesc = null; styled.resourceId = null; styled.className = "android.widget.FrameLayout";
-    partial.attributes = { "padding-top": "0", "padding-bottom": "bad", "padding-left": "4.5", "border-width": "1", "border-status": "启用状态未知" };
+    partial.attributes = { "inspection-source": "debug-view", "padding-top": "0", "padding-bottom": "bad", "padding-left": "4.5", "border-width": "1", "border-status": "启用状态未知" };
     unknown.bounds = null;
     unknown.attributes = { "padding-top": " ", "padding-right": "NaN", "padding-bottom": "Infinity" };
     styled.layerImageStatus = "style";
-    styled.attributes = { "border-width": "0", "border-status": "已读取" };
+    styled.attributes = { "inspection-source": "debug-qml", "border-width": "0", "border-status": "已读取" };
     measured.root!.children = [partial, unknown, styled];
     requests[2].resolve(measured);
     await until(() => Boolean(host.querySelector(".snapshot-summary")?.textContent?.startsWith("22 nodes")));
+
+    check(!host.querySelector(".tree-pane > .subpanel-heading"), "redundant hierarchy heading remains");
+    const splitter = host.querySelector<HTMLElement>(".tree-pane-resizer")!;
+    const treePane = host.querySelector<HTMLElement>(".tree-pane")!;
+    const resizeKey = (key: string) => flushSync(() => splitter.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true })));
+    resizeKey("ArrowRight");
+    check(treePane.offsetWidth === 316, "sidebar keyboard resize failed");
+    splitter.setPointerCapture = () => {};
+    const splitPointer = (type: string, x: number) => flushSync(() => splitter.dispatchEvent(new PointerEvent(type, { bubbles: true, isPrimary: true, pointerId: 9, button: 0, clientX: x })));
+    splitPointer("pointerdown", 316); splitPointer("pointermove", 446); splitPointer("pointerup", 446);
+    check(treePane.offsetWidth === 446 && splitter.getAttribute("aria-valuenow") === "446", "sidebar pointer resize did not update width/accessibility");
+    splitPointer("pointerdown", 446); splitPointer("pointermove", -1000); splitPointer("pointercancel", -1000);
+    check(treePane.offsetWidth === 240 && !splitter.parentElement!.classList.contains("is-resizing-tree"), "sidebar minimum/cancel failed");
+    splitPointer("pointerdown", 240); splitPointer("pointermove", 5000); window.dispatchEvent(new Event("blur"));
+    check(treePane.offsetWidth <= 720 && !splitter.parentElement!.classList.contains("is-resizing-tree"), "sidebar maximum/blur cleanup failed");
+    resizeKey("Home");
+    check(treePane.offsetWidth === 306, "sidebar reset failed");
+    await tick(); await tick();
 
     const panel = host.querySelector<HTMLElement>(".floating-inspector")!;
     const heading = () => panel.querySelector<HTMLHeadingElement>(".inspector-node-heading h4")!;
@@ -91,6 +113,30 @@ export async function verifyInspectionBehavior() {
     check(heading().textContent === measured.root!.text && heading().title === measured.root!.text, "node heading does not prefer real text or preserve its full title");
     check(type().textContent?.includes("FrameLayout · @id/root") && type().title.includes("android.widget.FrameLayout"), "node type or full class name was lost");
     check(parent().textContent === "父容器 · 无（根节点）", "root node invents a parent");
+    const cards = () => [...panel.querySelectorAll<HTMLDetailsElement>(".inspector-card")];
+    check(cards().length === 5 && cards().slice(0, 4).every(card => card.open), "inspector property groups are missing or initially closed");
+    check(panel.querySelector(".inspector-type > summary small")?.textContent === "来源未标注", "missing source was labeled as View Debug");
+    check(panel.querySelector(".inspector-class-name")?.textContent === "android.widget.FrameLayout", "full class name missing from type card");
+    check(!panel.querySelector(".inspector-geometry input"), "read-only geometry looks editable");
+    click(".inspector-type > summary");
+    check(!cards()[0].open, "type card cannot collapse independently");
+    const search = panel.querySelector<HTMLInputElement>('.inspector-search input')!;
+    const filter = (value: string) => flushSync(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, value);
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    filter("  BOUNDS  ");
+    check(cards().filter(card => !card.hidden).length === 1 && !panel.querySelector<HTMLElement>(".inspector-layout")!.hidden, "search did not filter property names case-insensitively");
+    filter("android.widget.FrameLayout");
+    check(cards().filter(card => !card.hidden).length === 1 && !cards()[0].hidden, "property value search failed");
+    filter("no-property-matches-958");
+    check(cards().every(card => card.hidden) && Boolean(panel.querySelector('.inspector-search-empty[role="status"]')), "search has no honest empty state");
+    click('.inspector-search button');
+    check(!search.value && document.activeElement === search && cards().every(card => !card.hidden) && !cards()[0].open, "clear search lost focus or reset disclosure state");
+    filter("padding");
+    flushSync(() => search.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    check(!search.value && !panel.hidden, "Escape in search closed the whole inspector instead of clearing the filter");
+    click(".inspector-type > summary");
     const frame = host.querySelector<HTMLElement>(".screenshot-frame")!;
     const handle = host.querySelector<HTMLButtonElement>(".inspector-drag-handle")!;
     const frameBefore = frame.getBoundingClientRect();
@@ -127,6 +173,7 @@ export async function verifyInspectionBehavior() {
     check(JSON.parse(copied[0]).id === "latest", "copy did not use the selected node");
     flushSync(() => host.querySelector<HTMLElement>(".inspector-more > summary")!.click());
     check(host.querySelector<HTMLDetailsElement>(".inspector-more")!.open && Boolean(host.querySelector(".selector-copy")), "full properties and copy/export were removed");
+    click(".inspector-padding > summary");
     const box = () => host.querySelector<HTMLElement>(".box-model-card")!;
     const edges = () => [...box().querySelectorAll(".box-model-edge strong")].map(value => value.textContent).join("/");
     check(box().querySelector(".box-model-size strong")!.textContent === "63 × 45 屏幕 px" && edges() === "0/2/0/2", "box model lost bounds or measured zero padding");
@@ -143,6 +190,7 @@ export async function verifyInspectionBehavior() {
     }
     panel.style.removeProperty("width");
     click('.tree-row[data-tree-id="latest/partial"]');
+    check(panel.querySelector(".inspector-type > summary small")?.textContent === "View Debug", "native View source was lost");
     check(heading().textContent === "收藏" && type().textContent?.includes("View · @id/collect_icon"), "description did not take priority over the resource name");
     check(parent().textContent === `父容器 · ${measured.root!.text}` && parent().title.includes("#latest"), "parent identity missing or stale");
     check(edges() === "0/—/—/4.5", "partial/invalid padding discarded known sides or invented zeroes");
@@ -152,6 +200,8 @@ export async function verifyInspectionBehavior() {
     check(!box().querySelector(".box-model-diagram") && Boolean(box().querySelector(".box-model-empty")), "unknown padding retained empty nested boxes");
     check(box().querySelector(".box-model-size strong")!.textContent === "— 屏幕 px", "missing bounds were invented");
     click('.tree-row[data-tree-id="latest/style"]');
+    check(panel.querySelector(".inspector-type > summary small")?.textContent === "QML Debug", "QML source was mislabeled");
+    check(panel.querySelector(".inspector-image-state strong")?.textContent === "样式重建" && !panel.querySelector(".inspector-image")!.textContent?.includes("—px"), "style capture or missing units are misleading");
     check(heading().textContent === "FrameLayout" && type().textContent?.includes("#latest/style"), "unnamed node did not retain type and unique ID");
     check(box().querySelector(".box-model-extra > div:last-child dd")!.textContent === "0px", "confirmed zero-width border was discarded");
     click('.tree-row[data-tree-id="latest"]');
@@ -165,8 +215,23 @@ export async function verifyInspectionBehavior() {
     click(".inspector-toggle");
     check(frame.getBoundingClientRect().height === frameBefore.height, "restore resized the canvas");
 
-    click(".capture-button");
-    click(".toolbar-back-button");
+    window.electronApi = { ...window.electronApi, runtime: { ...window.electronApi.runtime, nativeMenu: true } };
+    click(".refresh-button");
+    await until(() => Boolean(host.querySelector(".native-menu")) && !host.querySelector<HTMLButtonElement>(".refresh-button")!.disabled);
+    check(!host.querySelector<HTMLElement>(".topbar .inspector-toolbar")!.getClientRects().length, "native menu still has duplicate window controls");
+    const sendMenu = (action: AppMenuAction) => flushSync(() => menuAction?.(action));
+    sendMenu({ type: "collapse-all" });
+    check(host.querySelectorAll(".tree-row").length === 1, "native collapse did not reach the tree");
+    sendMenu({ type: "expand-all" });
+    check(host.querySelectorAll(".tree-row").length === 4, "native expand did not reach the tree");
+    sendMenu({ type: "search" });
+    check(document.activeElement === host.querySelector(".tree-search"), "native search did not focus the input");
+    sendMenu({ type: "capture" });
+    const currentMenu = menuState as AppMenuState | null;
+    check(currentMenu?.capturing && currentMenu.selectedSerial === "b", "capture state did not reach native menu");
+    sendMenu({ type: "capture" });
+    check(requests.length === 4, "native menu allowed a duplicate capture");
+    sendMenu({ type: "home" });
     check(cancelled.includes(requests[3].id), "returning home did not cancel capture");
     requests[3].resolve(snapshot("b", 33));
     await tick(); await tick();
@@ -174,10 +239,10 @@ export async function verifyInspectionBehavior() {
 
     click(".capture-button");
     flushSync(() => root.unmount()); mounted = false;
-    check(cancelled.includes(requests[4].id) && progress === null, "unmount did not release capture and listener");
+    check(cancelled.includes(requests[4].id) && progress === null && menuAction === null, "unmount did not release capture and listeners");
     requests[4].resolve(snapshot("b", 44));
     await tick();
-    return { checks: ["stage and cancel", "device switch ignores stale progress/failure", "floating inspector: drag, keyboard, resize bounds, collapse, close, restore and copy", "node identity: text/description/resource/type priority, full class, parent/root, long names at 300/248px", "box model: four-side placement at 300/248px, zero/partial/invalid padding, missing bounds and confirmed/ambiguous border", "return home ignores late result", "unmount cancels and unsubscribes"] };
+    return { checks: ["stage and cancel", "device switch ignores stale progress/failure", "sidebar: no heading, pointer/keyboard width, min/max, reset and cancelled drag", "native menu: capture guard, state sync, search, expand/collapse, home and cleanup", "floating inspector: drag, keyboard, resize bounds, collapse, close, restore and copy", "inspector groups: native disclosure, name/value search, empty/clear/Escape, retained collapse state, read-only geometry and honest View/QML/unknown source", "node identity: text/description/resource/type priority, full class, parent/root, long names at 300/248px", "box model: four-side placement at 300/248px, zero/partial/invalid padding, missing bounds and confirmed/ambiguous border", "return home ignores late result", "unmount cancels and unsubscribes"] };
   } finally {
     if (mounted) flushSync(() => root.unmount());
     window.electronApi = previousApi;

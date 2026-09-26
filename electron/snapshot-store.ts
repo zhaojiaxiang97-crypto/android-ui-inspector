@@ -2,8 +2,8 @@ import { app } from "electron";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { SaveSnapshotRequest, SnapshotStoreResult, StoredSnapshot, UiNode, UiSnapshot } from "../shared/types";
-import { isCaptureGeometry } from "../shared/screen-coordinates";
+import type { SaveSnapshotRequest, SnapshotStoreResult, StoredSnapshot } from "../shared/types";
+import { isUiSnapshot } from "../shared/snapshot-validation";
 
 const STORE_FILE_NAME = "snapshots.json";
 const MAX_SNAPSHOTS = 30;
@@ -23,69 +23,6 @@ function storePath() {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function isNullableString(value: unknown): value is string | null {
-  return value === null || typeof value === "string";
-}
-
-function isStringMap(value: unknown) {
-  return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
-}
-
-function isUiBounds(value: unknown) {
-  if (!isRecord(value)) return false;
-  return typeof value.left === "number"
-    && typeof value.top === "number"
-    && typeof value.right === "number"
-    && typeof value.bottom === "number"
-    && typeof value.raw === "string";
-}
-
-function isUiNode(value: unknown, depth = 0, budget = { count: 0 }): value is UiNode {
-  if (!isRecord(value) || depth > 200 || budget.count++ > 20_000) return false;
-  return typeof value.id === "string"
-    && (value.index === null || typeof value.index === "number")
-    && isNullableString(value.className)
-    && isNullableString(value.package)
-    && isNullableString(value.text)
-    && isNullableString(value.resourceId)
-    && isNullableString(value.contentDesc)
-    && (value.bounds === null || isUiBounds(value.bounds))
-    && typeof value.clickable === "boolean"
-    && typeof value.enabled === "boolean"
-    && typeof value.focusable === "boolean"
-    && typeof value.focused === "boolean"
-    && typeof value.scrollable === "boolean"
-    && typeof value.selected === "boolean"
-    && typeof value.visibleToUser === "boolean"
-    && (value.layerImageDataUrl === undefined || typeof value.layerImageDataUrl === "string")
-    && (value.layerImageEmpty === undefined || typeof value.layerImageEmpty === "boolean")
-    && (value.layerImageStatus === undefined || ["captured", "style", "unavailable", "ambiguous", "hidden", "failed"].includes(value.layerImageStatus as string))
-    && (value.layerImageSize === undefined || (isRecord(value.layerImageSize) && typeof value.layerImageSize.width === "number" && typeof value.layerImageSize.height === "number"))
-    && (value.attributes === undefined || isStringMap(value.attributes))
-    && Array.isArray(value.children)
-    && value.children.every((child) => isUiNode(child, depth + 1, budget));
-}
-
-function isUiSnapshot(value: unknown): value is UiSnapshot {
-  if (!isRecord(value)) return false;
-  return typeof value.serial === "string"
-    && value.serial.length <= 512
-    && (value.root === null || isUiNode(value.root))
-    && typeof value.nodeCount === "number"
-    && Number.isFinite(value.nodeCount)
-    && typeof value.xmlSize === "number"
-    && Number.isFinite(value.xmlSize)
-    && isNullableString(value.rawXml)
-    && isNullableString(value.screenshotDataUrl)
-    && isNullableString(value.error)
-    && isNullableString(value.warning)
-    && (value.inspectionSource === undefined || value.inspectionSource === "uiautomator" || value.inspectionSource === "debug-view" || value.inspectionSource === "debug-qml")
-    && (value.hierarchyDumpMode === undefined || value.hierarchyDumpMode === "full" || value.hierarchyDumpMode === "compressed")
-    && (value.captureDurationMs === undefined || (typeof value.captureDurationMs === "number" && Number.isFinite(value.captureDurationMs) && value.captureDurationMs >= 0))
-    && (value.captureTimings === undefined || (isRecord(value.captureTimings) && Object.values(value.captureTimings).every((duration) => typeof duration === "number" && Number.isFinite(duration) && duration >= 0)))
-    && (value.captureGeometry === undefined || isCaptureGeometry(value.captureGeometry));
 }
 
 function isSaveSnapshotRequest(value: unknown): value is SaveSnapshotRequest {

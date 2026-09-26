@@ -1,0 +1,160 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { createInspectorMcpServer } from "../electron/mcp-server";
+import { publishMcpSnapshot, readMcpSnapshot, revokeMcpSnapshot } from "../electron/mcp-snapshot";
+import { makeNode } from "../benchmarks/fixtures";
+import type { UiSnapshot } from "../shared/types";
+import { isUiSnapshot } from "../shared/snapshot-validation";
+
+const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS1EAAAAASUVORK5CYII=";
+function fixture(): UiSnapshot {
+  const root = makeNode("0");
+  root.bounds = { left: 0, top: 0, right: 1080, bottom: 2400, raw: "[0,0][1080,2400]" };
+  root.children = [makeNode("0/0", 1), makeNode("0/1", 2)];
+  const bar = root.children[0];
+  bar.resourceId = "example:id/seekbar";
+  bar.bounds = { left: 0, top: 80, right: 1080, bottom: 364, raw: "[0,80][1080,364]" };
+  bar.layerImageDataUrl = png;
+  bar.layerImageSize = { width: 1080, height: 284 };
+  bar.layerImageStatus = "captured";
+  bar.attributes = { alpha: "1", padding: "0", long: "x".repeat(3000) };
+  root.children[1].bounds = { left: 0, top: 420, right: 1080, bottom: 470, raw: "[0,420][1080,470]" };
+  return { serial: "synthetic-device", root, nodeCount: 3, xmlSize: 0, rawXml: null, screenshotDataUrl: png, error: null, warning: null, inspectionSource: "debug-view" };
+}
+const data = (result: CallToolResult) => {
+  assert.ok(!result.isError, JSON.stringify(result));
+  assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), result.structuredContent);
+  return result.structuredContent!;
+};
+
+test("MCP reads only an explicit share: paging, node metrics, images, validation, stale IDs and revocation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "inspector-mcp-"));
+  const path = join(directory, "mcp", "current.json");
+  const server = createInspectorMcpServer(path);
+  const client = new Client({ name: "test", version: "1" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const call = async (name: string, args: Record<string, unknown> = {}) => await client.callTool({ name, arguments: args }) as CallToolResult;
+  try {
+    const tools = (await client.listTools()).tools;
+    assert.deepEqual(tools.slice(0, 5).map(tool => tool.name), ["get_snapshot", "search_nodes", "get_node", "get_image", "measure_nodes"]);
+    assert.ok(tools.slice(0, 5).every(tool => tool.annotations?.readOnlyHint && tool.annotations.destructiveHint === false));
+    for (const name of ["tap_node", "scroll_node", "press_back"]) {
+      assert.equal(tools.find(tool => tool.name === name)?.annotations?.readOnlyHint, false);
+      assert.equal(tools.find(tool => tool.name === name)?.annotations?.idempotentHint, false);
+      assert.equal(tools.find(tool => tool.name === name)?.annotations?.destructiveHint, true);
+    }
+    assert.equal((await call("get_debug_session")).isError, true);
+    assert.equal((await call("get_snapshot")).isError, true);
+    const snapshot = fixture();
+    const before = JSON.stringify(snapshot);
+    const entry = publishMcpSnapshot(path, snapshot, "0/0");
+    if (process.platform !== "win32") assert.equal(statSync(path).mode & 0o777, 0o600);
+    const current = data(await call("get_snapshot"));
+    assert.equal(current.snapshotId, entry.id);
+    assert.equal(current.nodeCount, 3);
+    assert.equal(current.selectedNodeId, "0/0");
+    assert.ok(!JSON.stringify(current).includes("base64"));
+    const snapshotId = entry.id;
+    const found = data(await call("search_nodes", { snapshotId, query: "SEEKBAR", limit: 1 }));
+    assert.equal(found.total, 1);
+    assert.equal((found.items as Array<{ id: string }>)[0].id, "0/0");
+    assert.equal(data(await call("search_nodes", { snapshotId, query: "TextView", by: "class" })).total, 2);
+    assert.equal(data(await call("search_nodes", { snapshotId, query: "TextView", by: "text" })).total, 0);
+    assert.equal((await call("search_nodes", { snapshotId, by: "unsupported" })).isError, true);
+    const tree = data(await call("get_tree", { snapshotId, depth: 0 }));
+    assert.equal(tree.total, 1);
+    assert.equal(tree.depthLimited, true);
+    assert.equal(tree.nextOffset, null);
+    const treePage = data(await call("get_tree", { snapshotId, offset: 1, limit: 1 }));
+    assert.equal(treePage.nextOffset, 2);
+    assert.equal(treePage.total, 3);
+    assert.equal((treePage.items as Array<{ parentId: string; depth: number }>)[0].parentId, "0");
+    assert.equal((treePage.items as Array<{ depth: number }>)[0].depth, 1);
+    const subtree = data(await call("get_tree", { snapshotId, nodeId: "0/0" }));
+    assert.equal(subtree.total, 1);
+    assert.equal(subtree.depthLimited, false);
+    assert.equal((await call("get_tree", { snapshotId, nodeId: "missing" })).isError, true);
+    assert.equal((await call("get_tree", { snapshotId, depth: -1 })).isError, true);
+    assert.equal((await call("get_tree", { snapshotId, limit: 501 })).isError, true);
+    const exact = data(await call("search_nodes", { snapshotId, selector: { resourceId: "example:id/seekbar", className: "android.widget.TextView" }, visible: true, enabled: true, clickable: false, scrollable: false }));
+    assert.equal(exact.total, 1);
+    assert.equal((exact.items as Array<{ enabled: boolean; scrollable: boolean }>)[0].enabled, true);
+    assert.equal((exact.items as Array<{ enabled: boolean; scrollable: boolean }>)[0].scrollable, false);
+    assert.equal(data(await call("search_nodes", { snapshotId, selector: { resourceId: "example:id/SEEKBAR" } })).total, 0);
+    assert.equal(data(await call("search_nodes", { snapshotId, query: "missing", selector: { resourceId: "example:id/seekbar" } })).total, 0);
+    assert.equal(data(await call("search_nodes", { snapshotId, clickable: false })).total, 2);
+    assert.equal(data(await call("search_nodes", { snapshotId, scrollable: true })).total, 1);
+    assert.equal(data(await call("search_nodes", { snapshotId, enabled: false })).total, 0);
+    assert.equal((await call("search_nodes", { snapshotId, selector: {} })).isError, true);
+    assert.equal((await call("search_nodes", { snapshotId, selector: { regex: ".*" } })).isError, true);
+    const first = data(await call("search_nodes", { snapshotId, limit: 1 }));
+    assert.equal(first.nextOffset, 1);
+    assert.equal(data(await call("search_nodes", { snapshotId, limit: 1, offset: 2 })).nextOffset, null);
+    assert.equal((await call("search_nodes", { snapshotId, limit: 999 })).isError, true);
+    assert.equal((await call("get_node", { snapshotId, nodeId: "missing" })).isError, true);
+    const details = data(await call("get_node", { snapshotId, nodeId: "0/0", limit: 2 }));
+    assert.equal((details.node as { bounds: { height: number } }).bounds.height, 284);
+    assert.equal(details.nextAttributeOffset, 2);
+    const attrs = data(await call("get_node", { snapshotId, nodeId: "0/0", attributeOffset: 2 }));
+    assert.equal((attrs.attributes as { long: string }).long.length, 513);
+    assert.equal(data(await call("get_node", { snapshotId, nodeId: "0", limit: 1 })).nextOffset, 1);
+    const measurement = data(await call("measure_nodes", { snapshotId, fromNodeId: "0/0", toNodeId: "0/1" }));
+    assert.equal(measurement.units, "screen px");
+    assert.equal(measurement.relation, "gap");
+    assert.ok(JSON.stringify(measurement).includes('"value":56'));
+    assert.equal((await call("get_image", { snapshotId, nodeId: "0/0" })).content[1].type, "image");
+    assert.equal((await call("get_image", { snapshotId })).content[1].type, "image");
+    assert.equal((await call("get_image", { snapshotId, nodeId: "0/1" })).isError, true);
+    assert.equal(JSON.stringify(snapshot), before);
+    const next = publishMcpSnapshot(path, fixture(), null);
+    assert.equal((await call("get_node", { snapshotId, nodeId: "0/0" })).isError, true);
+    assert.equal(data(await call("get_snapshot")).snapshotId, next.id);
+    revokeMcpSnapshot(path);
+    assert.equal((await call("get_snapshot")).isError, true); // cached data must not leak after revocation
+    assert.throws(() => publishMcpSnapshot(path, { root: "bad" }, null));
+    assert.equal(isUiSnapshot({ ...fixture(), root: { ...fixture().root, bounds: { left: NaN, top: 0, right: 1, bottom: 1, raw: "bad" } } }), false);
+    publishMcpSnapshot(path, fixture(), null);
+    const abandoned = JSON.parse(readFileSync(path, "utf8"));
+    abandoned.ownerPid = 2147483647;
+    writeFileSync(path, JSON.stringify(abandoned));
+    assert.equal((await call("get_snapshot")).isError, true);
+    writeFileSync(path, "{}");
+    assert.throws(() => readMcpSnapshot(path));
+    assert.equal((await call("get_snapshot")).isError, true);
+  } finally { await client.close(); await server.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("MCP packaged stdio entry speaks to an official client without Electron or a network port", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "inspector-mcp-stdio-"));
+  const path = join(directory, "current.json");
+  const entry = join(directory, "server.cjs");
+  execFileSync("bun", ["build", resolve("scripts/mcp.ts"), "--outfile", entry, "--target", "node", "--format", "cjs"], { stdio: "pipe" });
+  const snapshot = fixture();
+  snapshot.root!.children[1].layerImageDataUrl = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>').toString("base64")}`;
+  const shared = publishMcpSnapshot(path, snapshot, null);
+  const client = new Client({ name: "stdio-test", version: "1" });
+  const transport = new StdioClientTransport({ command: "node", args: [entry], env: { ANDROID_UI_INSPECTOR_MCP_SNAPSHOT: path }, stderr: "pipe" });
+  let stderr = "";
+  transport.stderr?.on("data", chunk => { stderr += String(chunk); });
+  try {
+    await client.connect(transport);
+    assert.equal((await client.listTools()).tools.length, 13);
+    const result = await client.callTool({ name: "get_snapshot", arguments: {} }) as CallToolResult;
+    assert.equal(data(result).snapshotId, shared.id);
+    const svg = await client.callTool({ name: "get_image", arguments: { snapshotId: shared.id, nodeId: "0/1" } }) as CallToolResult;
+    assert.equal(svg.content[1].type, "resource");
+    revokeMcpSnapshot(path);
+    assert.equal((await client.callTool({ name: "get_snapshot", arguments: {} })).isError, true);
+    assert.equal(stderr, "");
+  } finally { await client.close(); rmSync(directory, { recursive: true, force: true }); }
+});

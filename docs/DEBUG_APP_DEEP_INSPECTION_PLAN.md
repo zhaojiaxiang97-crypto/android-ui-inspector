@@ -1,6 +1,6 @@
 # Debug App 深度控件树改造计划
 
-状态：已实施第一阶段
+状态：已实施，进入稳定性维护
 日期：2026-09-15
 
 ## 目标
@@ -13,12 +13,12 @@
 
 | App 状态 | 处理方式 | 页面提示 |
 | --- | --- | --- |
-| Debug 原生 View | 前台 Activity 的 `dumpsys activity <package>` + DDMS/JDWP 独立位图 | View Debug |
+| Debug 原生 View | 前台 Activity 的 `dumpsys activity <package>` + DDMS 层级与定点截图 | View Debug |
 | Debug Qt/QML | QmlDebugger 真实对象树 + Rectangle/Window 样式重建 | QML Debug |
 | Debug 但深度工具不可用 | 停止采集 | 深度检查工具不可用 |
 | Release | 停止采集 | 仅支持 Debug App |
 
-不再使用 UIAutomator 的 `VirtualChild` 作为产品控件树。当前仅接入原生 View 与 QML；Compose 尚不支持。
+不再使用 UIAutomator 的 `VirtualChild` 作为深度产品控件树。fast 自动化模式仍可能返回 VirtualChild；当前深度模式接入原生 View 与 QML，Compose 尚不支持。
 
 ## 实施步骤
 
@@ -83,4 +83,4 @@
 
 先保证当前 Qt/QML Debug App 和原生 View Debug App 稳定，需要 Compose 时再接 AOSP App Inspection 通道。
 
-后续实施和仍未覆盖的边界见 [采集与图层稳定性改良](INSPECTION_RELIABILITY.md)。
+当前实现和仍未覆盖的边界见 [项目当前状态](PROJECT_STATUS.md)；历史采集记录见 [采集与图层稳定性改良](INSPECTION_RELIABILITY.md)。

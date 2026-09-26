@@ -2,15 +2,17 @@
 
 一个本地优先、仅支持 **Debug App** 的 Android UI 层级检查工具。通过 ADB 读取真实控件树、独立 View 位图和屏幕截图，使用 WebGL 展示可展开、可选中的 3D 层级。
 
+当前进度和真实验证结果见 [项目当前状态](docs/PROJECT_STATUS.md)。
+
 当前默认桌面技术栈是 Electron + React + TypeScript + Vite，目标是 Windows、macOS、Linux 桌面端。项目不需要后端账号，设备数据和快照历史默认只保存在本机。
 
 ## 当前能力
 
 - 发现 Android SDK、PATH 和 Windows winget 位置中的 ADB，并展示设备授权状态、序列号、型号和产品信息。
-- 原生 View 使用 Debug hierarchy + DDMS/JDWP；Qt/QML 使用 QML Debug 对象树。Release App 直接拒绝，不回退到 UIAutomator。
+- 原生 View 使用 Debug hierarchy + DDMS；Qt/QML 使用 QML Debug 对象树。Release App 直接拒绝，不回退到 UIAutomator。
 - 展示可展开的真实控件树、来源属性、bounds、独立 View 位图和设备截图；UIAutomator 解析仅保留用于历史快照和测试。
 - 图层状态区分已采集、未返回位图、匹配有歧义、不可见和采集失败；缺少位图不等于控件透明。
-- SurfaceView / GLSurfaceView、TextureView 及其自定义子类可读取自身缓冲画面，复用现有 3D 展开与折叠合成；不以窗口截图代替独立图层。
+- SurfaceView / GLSurfaceView、TextureView 及其自定义子类优先使用 DDMS 可见结果；外部缓冲或受保护内容可能只有边框，不以窗口截图代替独立图层。
 - 选择节点时在截图上高亮 bounds；点击截图可反查节点，并自动清理筛选、展开祖先和滚动到目标。
 - 为节点生成 XPath、UiSelector、ADB 点击命令和 JSON；支持复制及通过系统保存对话框导出 JSON/XML/PNG。
 - 按文本、resource-id、class 搜索，并按可操作、有标识等条件过滤。
@@ -34,7 +36,7 @@
 - 必须是允许 `run-as` 的可调试 App，不仅是包名或文件名带有 debug。
 - 当前支持原生 View 和带 QML Debug 插件的 Qt/QML App；尚不支持 Compose、Flutter、WebView 内部控件树。
 - 原生 View 的位图先校验窗口根身份，再按名称和精确屏幕矩形唯一匹配。DDMS 的多数位图记录不带控件 ID，同名同位置的歧义记录不会强行贴图。
-- 原生 View 缺少独立位图时只显示边框。SurfaceView 独立采集已在 Android 14 真机验证；Android 10–13 路径完成协议测试，其他系统版本或厂商实现仍需验证。受保护/DRM 内容不绕过，可能失败或由系统返回黑色/透明画面；嵌入式 SurfacePackage 暂不支持。同一 OpenGL 画面只对应所属 View，不解析内部绘制指令。
+- 原生 View 缺少独立位图时只显示边框。SurfaceView/OpenGL 外部缓冲是否能返回真实画面取决于 Android 版本、厂商和保护标记；不绕过 DRM，也不把窗口截图裁切成独立图层。同一 OpenGL 画面只对应所属 View，不解析内部绘制指令。
 - QML Rectangle/Window 的真实背景色、圆角、边框和基础线性渐变会重建为独立样式图层，展开保留自身样式，折叠合成本分支。它不是 Qt 独立截图通道；其他叶节点仍可能使用截图近似，复杂自绘、渐变预设尚不支持。不会将完整 Qt Surface 重复贴到 QML 子节点上。
 - 合成支持已暴露的 sibling Z、矩形裁剪、padding 裁剪和分组透明度；未暴露的圆角裁剪、任意变换矩阵、自定义绘制顺序仍不能保证与手机逐像素一致。
 - 采集不是冻结的同一帧。会检查前台 Activity 和屏幕几何变化；视频、动画及同一 Activity 内的布局变化仍可能产生时间差。
@@ -65,7 +67,7 @@ bun install
 adb devices -l
 ```
 
-只有显示为 `device` 且已授权的设备可以执行检查。先在手机上打开 Debug App，再在顶部选择设备并点击“采集截图”。原生 View 采集不要求修改业务代码，但 JDWP 采集视频位图时会短暂暂停目标主线程；Qt/QML 首次建立调试连接会重启目标 App。取消会断开调试连接并清理本次端口转发。
+只有显示为 `device` 且已授权的设备可以执行检查。先在手机上打开 Debug App，再在顶部选择设备并点击“采集截图”。原生 View 采集不要求修改业务代码；自动补采使用 DDMS 只读协议，不进入会影响下一轮导出的 JDWP 对象调用。Qt/QML 首次建立调试连接会重启目标 App。取消会断开调试连接并清理本次端口转发。
 
 检查工作台采用双栏布局：左侧是可搜索、可筛选和可键盘操作的 hierarchy 树，右侧是完整画布，节点属性浮在画布上方，不再预留底部空间。拖动属性标题可移动面板，聚焦标题后可用方向键微调、Home 复位，Escape 关闭；收起、关闭和重新打开都不会改变相机视口。点击左侧节点会在截图上按真实 `bounds` 高亮，点击截图也会反向定位到左侧树节点；快照历史收纳在顶部的“快照与历史”按钮中。
 
@@ -89,6 +91,10 @@ bun run start
 修改源码后需要重新执行 `bun run build`；`start` 不依赖 Vite 开发服务器。
 
 ## 常用命令
+
+命令行调试：`bun run cli --help`。提供连接诊断、设备列表、层级树、控件搜索、属性、图片导出、测距及自动调试操作；默认输出 JSON，复用桌面的共享和授权，不需要 MCP 客户端。详见 [CLI 使用说明](docs/CLI.md)。
+
+本地 AI 接入：支持 MCP 只读快照和自动 UI 调试。授权指定 Debug App 后，AI 可实时采集、精确筛选并点击控件、滚动指定列表、返回上一页、验证预期结果；失败保留前后证据，操作结果未知时不盲目重试，随时可停止。默认关闭。macOS 从 **文件 → MCP** 操作，其他平台使用 **自动调试** 入口。详见 [MCP 使用说明](docs/MCP.md)。
 
 | 命令 | 用途 | 输出 |
 | --- | --- | --- |
@@ -184,7 +190,7 @@ dist*/release/  构建生成目录，不手动编辑、不提交
 
 更详细的职责、依赖方向和新文件放置规则见 [开发目录约定](docs/DEVELOPMENT_STRUCTURE.md)。核心原则是：renderer 只能通过 preload 白名单访问桌面能力；主进程校验 IPC 输入；共享算法保持纯 TypeScript；测试 fixture 必须脱敏；生成产物不得回写源码目录。
 
-本轮 Windows 版视觉重构已完成主要代码和真机回归；固定脱敏 fixture、Windows OS DPI、多显示器以及 macOS/Linux 原生打包等环境验收项仍按计划文档逐步补齐。差距清单、目标布局、实施记录和验收标准见 [UI 设计稿对齐改造计划](docs/UI_REDESIGN_REFACTOR_PLAN.md)。
+本轮主要视觉和采集改造已完成；固定脱敏 fixture、Windows OS DPI、多显示器以及 macOS/Linux 原生打包等环境验收项仍待真实环境补齐。当前以 [项目当前状态](docs/PROJECT_STATUS.md) 为准，UI 历史方案见 [UI 设计稿对齐改造计划](docs/UI_REDESIGN_REFACTOR_PLAN.md)。
 
 ## 贡献流程
 
@@ -201,4 +207,4 @@ dist*/release/  构建生成目录，不手动编辑、不提交
 - 在干净 Windows 环境完成安装/升级/卸载测试；确认修复后的三平台 CI 结果，再补齐 macOS/Linux 打包启动和真实设备验证。所有 `package:*` 只生成本地包，不自动发布 GitHub Release。
 - 继续评估超大树筛选、差异计算、原始属性展示和屏幕阅读器体验。
 
-项目阶段性实施记录由工作区上级的 `ANDROID_UI_INSPECTOR_PLAN.md` 维护；仓库内的开发规则和验收说明见 `docs/`。
+当前阶段性实施记录以 [项目当前状态](docs/PROJECT_STATUS.md) 和 [采集与图层稳定性改良](docs/INSPECTION_RELIABILITY.md) 为准。

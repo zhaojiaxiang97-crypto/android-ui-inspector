@@ -1,12 +1,13 @@
 import { createRoot } from "react-dom/client";
 import { createRef } from "react";
 import { flushSync } from "react-dom";
-import type { CaptureGeometry, PixelSize, UiNode } from "../shared/types";
+import type { CaptureGeometry, LayerMenuAction, PixelSize, UiNode } from "../shared/types";
 import { ScreenshotPreview } from "../src/components/ScreenshotPreview";
 import { makeNode } from "./fixtures";
 import { composeSubtreeImage } from "../shared/layer-textures";
 import { qmlStyleFrom, qmlStyleSvg } from "../shared/qml-style";
 import { Layer3DPreview, type LayerSceneHandle } from "../src/components/Layer3DPreview";
+import { nodeDisplayLabel, flattenNodes } from "../shared/tree-utils";
 import "../src/App.css";
 
 function assert(value: unknown, message: string): asserts value {
@@ -81,6 +82,9 @@ async function verifyCoordinates() {
   };
   try {
     checks.push(...await verifyLayerComposites());
+    checks.push(...await verifyLayerOcclusion());
+    checks.push(...await verifyLayerBorders());
+    checks.push(...await verifyLayerContentBounds());
     checks.push(...await verifyLayerMenu());
     checks.push(...await verifyLayerExpansion());
     checks.push(...await verifyLayerMeasurements());
@@ -129,6 +133,51 @@ async function verifyCoordinates() {
     await setZoom(1);
     checks.push("ScreenshotPreview zoom 25/50/100/200/400/800/1600%, layout box and reverse lookup");
 
+    const wheel = (deltaY: number, ctrlKey = false) => {
+      const frame = host.querySelector<HTMLElement>(".screenshot-frame")!;
+      const rect = frame.getBoundingClientRect();
+      const event = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY, ctrlKey, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 });
+      flushSync(() => frame.dispatchEvent(event));
+      assert(event.defaultPrevented, "workspace zoom must prevent browser/page zoom");
+    };
+    const settleZoom = async () => { await tick(); await tick(); };
+    for (const mode of ["2D", "3D 层级"]) {
+      flushSync(() => [...host.querySelectorAll<HTMLButtonElement>(".view-mode-toggle button")].find(button => button.textContent === mode)!.click());
+      await tick(); await tick(); await setZoom(1);
+      const initialWidth = parseFloat(stage().style.width);
+      const scale = () => parseFloat(stage().style.width) / initialWidth;
+      for (let i = 0; i < 20; i++) wheel(-0.1, true);
+      near(scale(), 1, `${mode}: pinch must coalesce a burst instead of rendering each event`);
+      await settleZoom();
+      const fineScale = scale();
+      near(fineScale, Math.exp(0.01), `${mode}: tiny pinch deltas accumulate gently`, 0.00001);
+      for (let i = 0; i < 20; i++) wheel(0.1, true);
+      await settleZoom();
+      near(scale(), 1, `${mode}: pinch in/out is reversible`, 0.00001);
+      wheel(-2, true);
+      await settleZoom();
+      near(scale(), fineScale, `${mode}: zoom depends on gesture distance, not event count`, 0.00001);
+      wheel(2, true);
+      wheel(-120);
+      await settleZoom();
+      assert(zoomReadout() === "125%", `${mode}: regular mouse wheel changed`);
+      wheel(120);
+      await settleZoom();
+      assert(zoomReadout() === "100%", `${mode}: regular mouse wheel reverse changed`);
+      wheel(-10000, true);
+      await settleZoom();
+      assert(zoomReadout() === "1600%", `${mode}: pinch exceeded maximum zoom`);
+      wheel(10000, true);
+      await settleZoom();
+      assert(zoomReadout() === "25%", `${mode}: pinch exceeded minimum zoom`);
+      await setZoom(1);
+      wheel(-20, true);
+      flushSync(() => host.querySelector<HTMLButtonElement>(".zoom-reset")!.click());
+      await settleZoom();
+      assert(zoomReadout() === "100%", `${mode}: queued wheel overrides reset`);
+    }
+    checks.push("pinch: gentle continuous 2D/3D zoom, tiny deltas, event-rate independence, reversal, limits and unchanged mouse wheel");
+
     // Scroll changes client rect origin, not device pixel coordinates.
     window.scrollTo(0, 60); await tick(); click(.1, .2);
     assert(selectedId() === "0/0", "scroll offset changed the mapping");
@@ -173,7 +222,198 @@ async function verifyCoordinates() {
   } finally { flushSync(() => reactRoot.unmount()); host.remove(); window.scrollTo(0, 0); }
 }
 
-Object.assign(window, { verifyCoordinates });
+Object.assign(window, { verifyCoordinates, benchmarkLayerRendering });
+
+async function verifyLayerBorders() {
+  const host = document.createElement("div");
+  Object.assign(host.style, { width: "440px", height: "400px", position: "relative" });
+  document.body.append(host);
+  const reactRoot = createRoot(host), scene = createRef<LayerSceneHandle>();
+  const camera = { distance: 1100, azimuth: 0, elevation: 0, roll: 0, layerGap: 64, panX: 0, panY: 0 };
+  const bitmap = document.createElement("canvas"); bitmap.width = 240; bitmap.height = 200;
+  const context = bitmap.getContext("2d")!;
+  context.fillStyle = "black"; context.fillRect(0, 0, 240, 200);
+  context.fillStyle = "red"; context.fillRect(80, 80, 80, 40);
+  const screen = bitmap.toDataURL();
+  bitmap.width = 160; bitmap.height = 120;
+  try {
+    for (const mode of ["native", "trimmed", "composite", "isolated"]) {
+      context.clearRect(0, 0, 160, 120); context.fillStyle = "red";
+      const inset = mode === "trimmed" ? 20 : 0;
+      context.fillRect(inset, inset, 160 - inset * 2, 120 - inset * 2);
+      const root = node("0", 0, 0, 240, 200), face = node("0/0", 40, 40, 200, 160);
+      root.layerImageEmpty = true; root.children = [face];
+      face.layerImageDataUrl = bitmap.toDataURL(); face.layerImageSize = { width: 160, height: 120 };
+      if (mode === "isolated") { delete face.layerImageDataUrl; delete face.layerImageSize; face.className = "android.widget.TextView"; }
+      if (mode === "composite") {
+        face.children = [{ ...face, id: "0/0/0", children: [] }];
+        delete face.layerImageDataUrl; delete face.layerImageSize; face.layerImageEmpty = true;
+      }
+      let selected: UiNode | null = null, hidden: ReadonlySet<string> = new Set();
+      const render = () => flushSync(() => reactRoot.render(<Layer3DPreview key={mode} ref={scene} src={screen} root={root} selectedNode={selected} expandedNodeIds={new Set([root.id])} hiddenNodeIds={hidden} size={{ width: 240, height: 200 }} renderScale={1} origin={{ left: 80, top: 80 }} camera={camera} onSelect={() => {}} />));
+      render();
+      const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
+      await until(() => canvas.dataset.layerRenderer === "webgl" && canvas.dataset.layerTextureCount === (mode === "isolated" ? "0" : "1"), `${mode}: border textures did not settle`);
+      const gl = canvas.getContext("webgl")!, rect = canvas.getBoundingClientRect();
+      const pivotZ = Number(host.querySelector<HTMLElement>(".layer-scene")!.dataset.layerPivotZ);
+      const z = Number(host.querySelector<HTMLElement>('[data-layer-node-id="0/0"]')!.dataset.layerZ);
+      const scale = 1100 / (1100 - z + pivotZ);
+      const point = (x: number, y: number) => ({ x: 200 + (x - 120) * scale, y: 180 + (y - 100) * scale });
+      const patch = (x: number, y: number) => {
+        const p = point(x, y), pixels = new Uint8Array(5 * 5 * 4);
+        gl.readPixels(Math.round(p.x * canvas.width / rect.width) - 2, Math.round(canvas.height - p.y * canvas.height / rect.height) - 2, 5, 5, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        return Array.from({ length: 25 }, (_, i) => [...pixels.subarray(i * 4, i * 4 + 4)]);
+      };
+      scene.current!.paintCamera(camera);
+      for (const [x, y] of [[40 + inset, 100], [200 - inset, 100], [120, 40 + inset], [120, 160 - inset]]) {
+        assert(patch(x, y).some(p => p[2] > 60), `${mode}: missing white border at ${x},${y}`);
+      }
+      assert(patch(120, 100).every(p => p[0] === 255 && p[1] === 0 && p[2] === 0), `${mode}: adding borders altered the layer's own pixels`);
+      const center = point(120, 100);
+      assert(scene.current!.pick(rect.left + center.x, rect.top + center.y)?.id === face.id, `${mode}: border intercepted picking`);
+      flushSync(() => scene.current!.hover(rect.left + center.x, rect.top + center.y));
+      scene.current!.paintCamera(camera);
+      assert(patch(40 + inset, 100).some(p => p[2] > p[0] + 40 && p[1] > p[0] + 20), `${mode}: white border covered the blue hover`);
+      flushSync(() => scene.current!.clearHover()); selected = face; render(); scene.current!.paintCamera(camera);
+      assert(patch(40 + inset, 100).some(p => p[1] > p[0] + 20 && p[1] > p[2] + 40), `${mode}: white border covered the green selection`);
+      selected = null; hidden = new Set([face.id]); render(); scene.current!.paintCamera(camera);
+      assert(patch(40 + inset, 100).every(p => p[3] === 0), `${mode}: hiding the layer left its border behind`);
+    }
+    return ["pixel: native/trimmed/composite/legacy content has all four borders, unchanged own pixels and picking, blue/green highlights, hidden-border removal"];
+  } finally { flushSync(() => reactRoot.unmount()); host.remove(); }
+}
+
+async function verifyLayerOcclusion() {
+  const host = document.createElement("div");
+  Object.assign(host.style, { width: "800px", height: "900px", position: "relative" });
+  document.body.append(host);
+  const reactRoot = createRoot(host), scene = createRef<LayerSceneHandle>();
+  const root = node("0", 0, 0, 360, 780), face = node("0/0", 0, 0, 360, 780), front = node("0/1", 40, 100, 100, 160);
+  root.layerImageEmpty = front.layerImageEmpty = true;
+  face.index = 0; front.index = 1;
+  const bitmap = document.createElement("canvas"); bitmap.width = bitmap.height = 4;
+  const context = bitmap.getContext("2d")!;
+  context.fillStyle = "red"; context.fillRect(0, 0, 4, 4);
+  face.layerImageDataUrl = bitmap.toDataURL(); face.layerImageSize = { width: 4, height: 4 };
+  root.children = [face, front];
+  const camera = { distance: 1100, azimuth: 0, elevation: 0, roll: 0, layerGap: 64, panX: 0, panY: 0 };
+  const render = (alpha: number) => flushSync(() => reactRoot.render(<Layer3DPreview key={alpha} ref={scene} src={face.layerImageDataUrl!} root={{ ...root, children: [{ ...face, attributes: { "effective-alpha": String(alpha) } }, front] }} selectedNode={null} expandedNodeIds={new Set([root.id])} size={{ width: 360, height: 780 }} renderScale={1} origin={{ left: 220, top: 30 }} camera={camera} onSelect={() => {}} />));
+  const canvas = () => host.querySelector<HTMLCanvasElement>("canvas")!;
+  const ready = () => until(() => canvas()?.dataset.layerRenderer === "webgl" && canvas().dataset.layerTextureCount === "1", "angled occlusion textures did not settle");
+  try {
+    render(1); await ready();
+    const pivotZ = Number(host.querySelector<HTMLElement>(".layer-scene")!.dataset.layerPivotZ);
+    const frontZ = Number(host.querySelector<HTMLElement>('[data-layer-node-id="0/1"]')!.dataset.layerZ);
+    const faceZ = Number(host.querySelector<HTMLElement>('[data-layer-node-id="0/0"]')!.dataset.layerZ);
+    assert(frontZ > faceZ, "occlusion fixture must place the small outline in front of the full-size face");
+    const views = [0, 20, 29, 30, 30.5, 31, 35, 40, 60, 80, 89, 91, 100, 140, 150, 160, 180, 200, 330, 30].map(azimuth => ({ ...camera, azimuth }));
+    views.push({ ...camera, azimuth: 31, elevation: 25, roll: 18 }, { ...camera, azimuth: 150, elevation: -20, roll: -15 });
+    const sample = (view: typeof camera) => {
+      scene.current!.paintCamera(view);
+      const yaw = -view.azimuth * Math.PI / 180, pitch = -view.elevation * Math.PI / 180, roll = -view.roll * Math.PI / 180;
+      const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+      const project = (x: number, y: number) => {
+        const rx = cy * (x - 180) + sy * (frontZ - pivotZ), rz = -sy * (x - 180) + cy * (frontZ - pivotZ);
+        const ry = cp * (390 - y) - sp * rz, depth = sp * (390 - y) + cp * rz;
+        const scale = view.distance / (view.distance - depth);
+        return { x: 400 + (Math.cos(roll) * rx - Math.sin(roll) * ry) * scale, y: 420 - (Math.sin(roll) * rx + Math.cos(roll) * ry) * scale };
+      };
+      // Independent oracle: intersect the eye-to-control ray with the opaque
+      // face, rather than sharing the renderer's plane-sort implementation.
+      const eye = { x: 180 - sy * cp * view.distance, y: 390 - sp * view.distance, z: pivotZ + cy * cp * view.distance };
+      const blocked = (x: number, y: number) => {
+        const t = (faceZ - eye.z) / (frontZ - eye.z);
+        const bx = eye.x + (x - eye.x) * t, by = eye.y + (y - eye.y) * t;
+        return t > 0 && t < 1 && bx > 0 && bx < 360 && by > 0 && by < 780;
+      };
+      const bounds = canvas().getBoundingClientRect(), edge = project(100, 130), center = project(70, 130);
+      const pixels = new Uint8Array(5 * 5 * 4), gl = canvas().getContext("webgl")!;
+      gl.readPixels(Math.round(edge.x * canvas().width / bounds.width) - 2, Math.round(canvas().height - edge.y * canvas().height / bounds.height) - 2, 5, 5, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      return { blue: Math.max(...pixels.filter((_, i) => i % 4 === 2)), edgeBlocked: blocked(100, 130), expectedPick: blocked(70, 130) ? face.id : front.id, picked: scene.current!.pick(bounds.left + center.x, bounds.top + center.y)?.id };
+    };
+    for (const view of views) {
+      const result = sample(view), label = `orbit ${view.azimuth}/${view.elevation}/${view.roll}`;
+      assert(result.edgeBlocked ? result.blue === 0 : result.blue > 10, `${label}: incorrect border occlusion (${JSON.stringify(result)})`);
+      assert(result.picked === result.expectedPick, `${label}: picking disagrees with the nearest ray intersection (${JSON.stringify(result)})`);
+    }
+    // A translucent foreground must attenuate a rear border, not erase it.
+    render(0.5); await ready();
+    const translucent = sample({ ...camera, azimuth: 150 });
+    assert(translucent.edgeBlocked && translucent.blue > 10 && translucent.blue < 120, `translucent foreground lost alpha blending over the rear border (${JSON.stringify(translucent)})`);
+    return ["pixel: off-center outline vs opaque face across 30°/31°, front/back/edge-on orbit, pitch/roll, ray-checked picking and translucent foreground"];
+  } finally { flushSync(() => reactRoot.unmount()); host.remove(); }
+}
+
+async function benchmarkLayerRendering() {
+  const host = document.createElement("div");
+  Object.assign(host.style, { width: "840px", height: "580px", position: "relative" });
+  document.body.append(host);
+  const reactRoot = createRoot(host), scene = createRef<LayerSceneHandle>();
+  const root = node("render-root", 0, 0, 360, 780);
+  const bitmap = document.createElement("canvas"); bitmap.width = bitmap.height = 16;
+  const context = bitmap.getContext("2d")!;
+  for (let cell = 0; cell < 32; cell++) {
+    const x = cell % 4 * 88, y = Math.floor(cell / 4) * 96;
+    for (let layer = 0; layer < 16; layer++) {
+      const child = node(`render-${cell}-${layer}`, x, y, x + 80, y + 88);
+      child.attributes = { "inspection-source": "debug-view" };
+      if (layer < 15) child.layerImageEmpty = true;
+      else {
+        context.fillStyle = `hsl(${cell * 11}, 55%, 55%)`; context.fillRect(0, 0, 16, 16);
+        child.layerImageDataUrl = bitmap.toDataURL(); child.layerImageSize = { width: 16, height: 16 };
+      }
+      root.children.push(child);
+    }
+  }
+  root.layerImageEmpty = true;
+  const camera = { distance: 1100, azimuth: 40, elevation: 12, roll: 0, layerGap: 96, panX: 0, panY: 0 };
+  const samples: number[] = [], draws: number[] = [];
+  try {
+    flushSync(() => reactRoot.render(<Layer3DPreview ref={scene} src={bitmap.toDataURL()} root={root} selectedNode={root.children[15]} expandedNodeIds={new Set([root.id])} size={{ width: 360, height: 780 }} renderScale={.55} origin={{ left: 321, top: 75 }} camera={camera} onSelect={() => {}} />));
+    const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
+    await until(() => canvas.dataset.layerRenderer === "webgl" && canvas.dataset.layerTextureCount === "32", "render benchmark textures did not settle");
+    const gl = canvas.getContext("webgl")!, draw = gl.drawArrays.bind(gl), upload = gl.texImage2D.bind(gl);
+    let calls = 0, uploads = 0;
+    gl.drawArrays = (...args) => { calls++; draw(...args); };
+    gl.texImage2D = ((...args: Parameters<typeof upload>) => { uploads++; upload(...args); }) as typeof upload;
+    for (let i = 0; i < 132; i++) {
+      await tick(); calls = 0;
+      const start = performance.now();
+      scene.current!.paintCamera({ ...camera, azimuth: 20 + Math.sin(i / 20) * 30, elevation: 12 + Math.cos(i / 20) * 8 });
+      if (i >= 12) { samples.push(performance.now() - start); draws.push(calls); }
+    }
+    assert(uploads === 0, "orbit uploaded or decoded unchanged textures");
+    assert(Math.max(...draws) < 128, "512-layer borders reverted to per-plane draw calls");
+    assert(host.querySelectorAll(".layer-plane").length === 512, "render optimization dropped controls");
+    const bounds = canvas.getBoundingClientRect();
+    assert(scene.current!.pick(bounds.left + Number(canvas.dataset.layerProbeX), bounds.top + Number(canvas.dataset.layerProbeY)), "batched scene lost picking");
+    assert(gl.getError() === gl.NO_ERROR, "render benchmark has a WebGL error");
+    scene.current!.paintCamera(camera);
+    const screenshot = canvas.toDataURL("image/png");
+    // A rear outline must not bleed through an opaque face; a front outline
+    // must remain visible and selectable. Check pixels, not only draw counts.
+    const occlusionRoot = node("occlusion", 0, 0, 200, 160);
+    const rear = node("rear-outline", 30, 30, 170, 130), face = node("opaque-face", 10, 10, 190, 150), front = node("front-outline", 50, 50, 150, 110);
+    occlusionRoot.layerImageEmpty = rear.layerImageEmpty = front.layerImageEmpty = true;
+    context.fillStyle = "red"; context.fillRect(0, 0, 16, 16);
+    face.layerImageDataUrl = bitmap.toDataURL(); face.layerImageSize = { width: 16, height: 16 };
+    occlusionRoot.children = [rear, face, front];
+    const straight = { ...camera, azimuth: 0, elevation: 0, layerGap: 64 };
+    flushSync(() => reactRoot.render(<Layer3DPreview ref={scene} src={face.layerImageDataUrl!} root={occlusionRoot} selectedNode={null} expandedNodeIds={new Set([occlusionRoot.id])} size={{ width: 200, height: 160 }} renderScale={1} origin={{ left: 80, top: 80 }} camera={straight} onSelect={() => {}} />));
+    await until(() => canvas.dataset.layerRenderer === "webgl" && canvas.dataset.layerTextureCount === "1", "occlusion textures did not settle");
+    scene.current!.paintCamera(straight);
+    const maxBlue = (x: number) => {
+      const ratio = canvas.width / canvas.clientWidth, pixels = new Uint8Array(5 * 5 * 4);
+      gl.readPixels(Math.round(x * ratio) - 2, Math.round(canvas.height - 160 * ratio) - 2, 5, 5, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      return Math.max(...pixels.filter((_, i) => i % 4 === 2));
+    };
+    assert(maxBlue(180 - 70 * 1100 / 1132) === 0, "batched rear outline leaks through the opaque face");
+    assert(maxBlue(180 - 50 * 1100 / 1004) > 10, "front outline lost its visible border");
+    assert(scene.current!.pick(bounds.left + 180, bounds.top + 160)?.id === front.id, "outline batching changed front-most picking");
+    samples.sort((a, b) => a - b); draws.sort((a, b) => a - b);
+    return { layers: 512, textures: 32, samples: samples.length, medianCpuMs: samples[60], p95CpuMs: samples[114], medianDrawCalls: draws[60], maxDrawCalls: draws.at(-1), scope: "CPU frame submission in real WebGL; excludes GPU completion/display refresh", screenshot };
+  } finally { flushSync(() => reactRoot.unmount()); host.remove(); }
+}
 
 async function verifyLayerComposites() {
   const rect = { left: 0, top: 0, width: 20, height: 20 };
@@ -363,8 +603,8 @@ async function verifyLayerComposites() {
     hideParent.children = [hideChild];
     const hideRoot = imageNode("hide-root", null); hideRoot.children = [hideParent];
     const originalTree = JSON.stringify(hideRoot);
-    const drawHidden = async (hidden: string[], expanded = true) => {
-      flushSync(() => reactRoot.render(<Layer3DPreview key="hide" ref={scene} src={parent.layerImageDataUrl!} root={hideRoot} selectedNode={hideChild} expandedNodeIds={new Set(expanded ? [hideRoot.id, hideParent.id] : [hideRoot.id])} hiddenNodeIds={new Set(hidden)} size={{ width: 20, height: 20 }} renderScale={10} origin={{ left: 50, top: 50 }} camera={camera} onSelect={() => {}} />));
+    const drawHidden = async (hidden: string[], expanded = true, focusedNode: UiNode | null = null) => {
+      flushSync(() => reactRoot.render(<Layer3DPreview key="hide" ref={scene} src={parent.layerImageDataUrl!} root={hideRoot} selectedNode={hideChild} expandedNodeIds={new Set(expanded ? [hideRoot.id, hideParent.id] : [hideRoot.id])} hiddenNodeIds={new Set(hidden)} focusedNode={focusedNode} size={{ width: 20, height: 20 }} renderScale={10} origin={{ left: 50, top: 50 }} camera={camera} onSelect={() => {}} />));
       await until(() => canvas()?.dataset.layerRenderer === "webgl" && canvas()?.dataset.layerTextureVisibility === JSON.stringify([...hidden].sort()), "hidden-layer textures did not settle");
       scene.current!.paintCamera(camera);
     };
@@ -392,28 +632,139 @@ async function verifyLayerComposites() {
     assert(canvas().dataset.layerTextureCount === "0", "hidden textures were not released");
     assert(JSON.stringify(hideRoot) === originalTree, "hiding modified the original snapshot");
     checks.push("pixel: hide/restore own planes, pass-through picking, fixed Z/pivot, folded-cache invalidation and immutable snapshot");
+
+    const focusedPixel = () => {
+      scene.current!.paintCamera(camera);
+      hideGl.readPixels(Math.floor(canvas().width * .3125), Math.floor(canvas().height * .625), 1, 1, hideGl.RGBA, hideGl.UNSIGNED_BYTE, rgba);
+      return [...rgba];
+    };
+    await drawHidden([], true, hideParent);
+    await until(() => canvas().dataset.layerTextureCount === "1" && focusedPixel()[0] === 255, "focused parent did not load its own red pixels");
+    expect(focusedPixel(), [255, 0, 0, 255], "expanded parent focus must not borrow its blue child's image");
+    assert(host.querySelectorAll(".layer-plane").length === 1 && !host.querySelector<HTMLElement>(".layer-scene")!.dataset.layerParentId, "focus retained another plane or root backdrop");
+    await drawHidden([], true, hideChild);
+    await until(() => focusedPixel()[2] === 255, "focused child did not load blue pixels");
+    expect(focusedPixel(), [0, 0, 255, 255], "child focus retains only its own image");
+    bounds = canvas().getBoundingClientRect();
+    assert(scene.current!.pick(bounds.left + 150, bounds.top + 100)?.id === hideChild.id, "focused child is not centered/selectable");
+    assert(scene.current!.pick(bounds.left + 70, bounds.top + 100) === null, "isolated parent still receives hits outside the child");
+    await drawHidden([], false, hideParent);
+    await until(() => host.querySelector<HTMLElement>(".layer-scene")!.dataset.layerCompositeCount === "1" && focusedPixel()[2] === 255, "focused folded parent lost its combined picture");
+    assert(host.querySelectorAll(".layer-plane").length === 1, "focused folded parent expanded into multiple planes");
+    await drawHidden([hideChild.id], false, hideParent);
+    expect(focusedPixel(), [255, 0, 0, 255], "focus resurrected a manually hidden child in a folded parent");
+    await drawHidden([], true, hideRoot);
+    await until(() => canvas().dataset.layerTextureCount === "0", "empty root focus retained child textures");
+    assert(host.querySelectorAll(".layer-plane").length === 1 && scene.current!.pick(bounds.left + 150, bounds.top + 100)?.id === hideRoot.id, "root focus must be a single selectable plane");
+    assert(JSON.stringify(hideRoot) === originalTree, "focus modified the captured snapshot");
+    checks.push("pixel: focused leaf/root/parent, centered picking, no backdrop or child leakage, folded composites and hidden-state preservation");
   } finally { flushSync(() => reactRoot.unmount()); host.remove(); }
   return checks;
+}
+
+async function verifyLayerContentBounds() {
+  const host = document.createElement("div");
+  Object.assign(host.style, { width: "680px", height: "400px", position: "relative" });
+  document.body.append(host);
+  const reactRoot = createRoot(host), scene = createRef<LayerSceneHandle>();
+  const bitmap = document.createElement("canvas"); bitmap.width = 1080; bitmap.height = 284;
+  const ctx = bitmap.getContext("2d")!;
+  const root = node("content-root", 0, 0, 1080, 500);
+  const back = node("content-back", 0, 80, 1080, 364);
+  ctx.fillStyle = "blue"; ctx.fillRect(0, 0, 1080, 284);
+  back.layerImageDataUrl = bitmap.toDataURL(); back.layerImageSize = { width: 1080, height: 284 };
+  ctx.clearRect(0, 0, 1080, 284); ctx.fillStyle = "white"; ctx.fillRect(31, 131, 1018, 22);
+  const bar = node("content-bar", 0, 80, 1080, 364);
+  bar.layerImageDataUrl = bitmap.toDataURL(); bar.layerImageSize = back.layerImageSize;
+  const below = node("content-below", 20, 420, 100, 460);
+  root.children = [back, bar, below];
+  const original = JSON.stringify(root);
+  let selected = bar, expanded = new Set([root.id]), hidden = new Set<string>();
+  const camera = { distance: 1100, azimuth: 0, elevation: 0, roll: 0, layerGap: 64, panX: 0, panY: 0 };
+  const render = () => flushSync(() => reactRoot.render(<Layer3DPreview ref={scene} src={back.layerImageDataUrl!} root={root} selectedNode={selected} expandedNodeIds={expanded} hiddenNodeIds={hidden} size={{ width: 1080, height: 500 }} renderScale={.5} origin={{ left: 60, top: 40 }} camera={camera} onSelect={() => {}} />));
+  const canvas = () => host.querySelector<HTMLCanvasElement>("canvas")!;
+  // Independent projection of device coordinates, not production hit-test helpers.
+  const point = (id: string, x: number, y: number, azimuth = 0, elevation = 0) => {
+    const el = host.querySelector<HTMLElement>(`[data-layer-node-id="${id}"]`);
+    const pivotZ = Number(host.querySelector<HTMLElement>(".layer-scene")!.dataset.layerPivotZ);
+    const z = el ? Number(el.dataset.layerZ) * .5 : pivotZ;
+    const yaw = -azimuth * Math.PI / 180, pitch = -elevation * Math.PI / 180;
+    const cx = (x - 540) * .5, cy = (250 - y) * .5, cz = z - pivotZ;
+    const rx = Math.cos(yaw) * cx + Math.sin(yaw) * cz, rz = -Math.sin(yaw) * cx + Math.cos(yaw) * cz;
+    const ry = Math.cos(pitch) * cy - Math.sin(pitch) * rz, dz = Math.sin(pitch) * cy + Math.cos(pitch) * rz;
+    const bounds = canvas().getBoundingClientRect();
+    return { x: bounds.left + 330 + rx * 1100 / (1100 - dz), y: bounds.top + 165 - ry * 1100 / (1100 - dz) };
+  };
+  const pick = (p: { x: number; y: number }) => scene.current!.pick(p.x, p.y)?.id;
+  try {
+    render();
+    await until(() => canvas()?.dataset.layerTextureCount === "2" && canvas()?.dataset.layerTrimmedCount === "1", "transparent-margin textures did not settle");
+    scene.current!.paintCamera(camera);
+    const gl = canvas().getContext("webgl")!;
+    const highlight = () => gl.getUniform(gl.getParameter(gl.CURRENT_PROGRAM), gl.getUniformLocation(gl.getParameter(gl.CURRENT_PROGRAM), "u_rect")!) as Float32Array;
+    const box = highlight();
+    near(box[0], 75.5, "highlight follows actual content X"); near(box[1], 145.5, "highlight follows actual content Y");
+    near(box[2], 509, "highlight width excludes transparent margins"); near(box[3], 11, "highlight height excludes transparent margins");
+    assert(pick(point(bar.id, 540, 220)) === bar.id, "painted progress bar must remain selectable");
+    assert(pick(point(bar.id, 540, 100)) === back.id, "transparent progress-bar margin intercepted the layer behind it");
+    const rgba = new Uint8Array(4), p = point(bar.id, 540, 220), bounds = canvas().getBoundingClientRect();
+    gl.readPixels(Math.floor((p.x - bounds.left) * canvas().width / bounds.width), Math.floor(canvas().height - (p.y - bounds.top) * canvas().height / bounds.height), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    assert(rgba[0] > 240 && rgba[1] > 240 && rgba[2] > 240, "trimming stretched or displaced the white progress-bar pixels");
+    selected = back; render();
+    flushSync(() => scene.current!.hover(p.x, p.y));
+    near(highlight()[2], 509, "blue hover follows content width"); near(highlight()[3], 11, "blue hover follows content height");
+    flushSync(() => scene.current!.clearHover()); selected = bar; render();
+    const target = point(below.id, 60, 440);
+    flushSync(() => scene.current!.hover(target.x, target.y));
+    assert(host.querySelector(".layer-measurement")?.textContent === "水平 0 px · 垂直 56 px", "measurement must retain layout bounds, not visible-content bounds");
+    scene.current!.clearHover();
+    const readPixels = CanvasRenderingContext2D.prototype.getImageData;
+    let reads = 0;
+    CanvasRenderingContext2D.prototype.getImageData = function (...args: Parameters<typeof readPixels>) { reads++; return readPixels.apply(this, args); };
+    try {
+      for (const angle of [15, 30, -20]) {
+        scene.current!.paintCamera({ ...camera, azimuth: angle, elevation: 8 });
+        assert(pick(point(bar.id, 540, 220, angle, 8)) === bar.id, "content picking lost perspective alignment");
+        assert(pick(point(bar.id, 540, 100, angle, 8)) !== bar.id, "rotated transparent margin intercepted picking");
+      }
+      assert(reads === 0, "orbit rescanned image pixels instead of using cached bounds");
+    } finally { CanvasRenderingContext2D.prototype.getImageData = readPixels; }
+    // A folded branch has its own composite; don't reuse the parent's own bounds.
+    selected = root; expanded = new Set(); hidden = new Set([back.id]); render();
+    await until(() => canvas().dataset.layerTextureCount === "1" && canvas().dataset.layerTextureVisibility === JSON.stringify([back.id]), "folded content bounds did not refresh");
+    scene.current!.paintCamera(camera);
+    near(highlight()[2], 509, "folded image content width"); near(highlight()[3], 11, "folded image content height");
+    assert(pick(point(root.id, 540, 220)) === root.id && pick(point(root.id, 540, 100)) === undefined, "folded composite still intercepts transparent margins");
+    assert(JSON.stringify(root) === original, "visible-content presentation mutated layout, bitmaps or snapshot data");
+    const clippedBar = { ...bar, bounds: { left: -50, top: 80, right: 1030, bottom: 364, raw: "[-50,80][1030,364]" } };
+    const clippedRoot = { ...root, children: [clippedBar] };
+    flushSync(() => reactRoot.render(<Layer3DPreview ref={scene} src={back.layerImageDataUrl!} root={clippedRoot} selectedNode={clippedBar} expandedNodeIds={new Set([root.id])} size={{ width: 1080, height: 500 }} renderScale={.5} origin={{ left: 60, top: 40 }} camera={camera} onSelect={() => {}} />));
+    await until(() => canvas().dataset.layerTextureCount === "1" && canvas().dataset.layerTrimmedCount === "1" && canvas().dataset.layerTextureVisibility === "[]", "screen-clipped content did not settle");
+    scene.current!.paintCamera(camera);
+    near(highlight()[0], 60, "offscreen content must stay clipped at the screen edge");
+    near(highlight()[2], 499.5, "cropped source UV must exclude only the offscreen/transparent pixels");
+    return ["pixel: progress-bar content/layout separation, unchanged pixels and measurements, perspective pass-through picking, cached scans, historical images and folded composites"];
+  } finally { flushSync(() => reactRoot.unmount()); host.remove(); }
 }
 
 async function verifyLayerMenu() {
   const host = document.createElement("div"); host.style.width = "680px"; document.body.append(host);
   const reactRoot = createRoot(host), previousApi = window.electronApi;
-  type Choice = "hide" | "restore" | null;
-  let menu: { canHide: boolean; canRestore: boolean; resolve: (choice: Choice) => void } | null = null;
+  let menu: { canHide: boolean; canRestore: boolean; canExitFocus: boolean; resolve: (choice: LayerMenuAction) => void } | null = null;
   let menuCalls = 0, selected: UiNode | null = null;
   const selectedId = () => selected?.id;
   let current = fixture({ width: 1080, height: 2400 });
   const render = () => flushSync(() => reactRoot.render(<ScreenshotPreview src={current.src} root={current.root} selectedNode={selected} expandedNodeIds={new Set([current.root.id])} geometry={current.geometry} onSelect={node => { selected = node; render(); }} />));
-  window.electronApi = { ...previousApi, showLayerMenu: (canHide, canRestore) => {
+  window.electronApi = { ...previousApi, showLayerMenu: (canHide, canRestore, canExitFocus) => {
     menuCalls++;
-    return new Promise<Choice>(resolve => { menu = { canHide, canRestore, resolve }; });
+    return new Promise<LayerMenuAction>(resolve => { menu = { canHide, canRestore, canExitFocus, resolve }; });
   } };
   const canvas = () => host.querySelector<HTMLCanvasElement>(".layer-webgl-canvas")!;
   const frame = () => host.querySelector<HTMLElement>(".screenshot-frame")!;
   const ready = () => until(() => canvas()?.dataset.layerRenderer === "webgl" && Boolean(canvas()?.dataset.layerProbeX), "menu scene not ready");
   const rightClick = () => {
     const c = canvas(), bounds = c.getBoundingClientRect();
+    assert(c.dataset.layerProbeX && c.dataset.layerProbeY, `menu ${menuCalls}: no rendered pick target; scene=${JSON.stringify(host.querySelector<HTMLElement>(".layer-scene")?.dataset)}`);
     c.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, button: 2, isPrimary: true, clientX: bounds.left + Number(c.dataset.layerProbeX), clientY: bounds.top + Number(c.dataset.layerProbeY) }));
   };
   try {
@@ -430,6 +781,7 @@ async function verifyLayerMenu() {
     const label = () => host.querySelector<HTMLElement>(".layer-hover-label");
     const hoveredId = label()?.dataset.nodeId;
     assert(hoveredId && label()!.querySelector("strong")?.textContent && selectedId() === undefined, `hover must identify the pointed node without selecting it: ${JSON.stringify({ hoveredId, selected: selectedId(), x, y, bounds, scene: host.querySelector(".layer-scene")?.getAttribute("data-layer-hovered-id") })}`);
+    assert(label()!.querySelector("strong")?.textContent === nodeDisplayLabel(flattenNodes(current.root).get(hoveredId)!), "hover title does not share the property panel's meaningful name");
     assert(getComputedStyle(label()!).pointerEvents === "none", "hover label intercepts clicks");
     assert(getComputedStyle(canvas()).cursor === "crosshair", "idle canvas must use a precise cursor");
     const probe = canvas().dataset.layerProbeX;
@@ -473,14 +825,52 @@ async function verifyLayerMenu() {
     rightClick(); await until(() => Boolean(menu), "third menu unavailable");
     menu!.resolve("hide"); menu = null;
     await until(() => Boolean(host.querySelector(".restore-layers")), "second hide failed");
+    const hiddenId = selectedId();
+    const sceneState = () => host.querySelector<HTMLElement>(".layer-scene")!.dataset;
+    const focus = async () => {
+      await ready(); await tick();
+      rightClick(); await until(() => Boolean(menu), "focus menu unavailable");
+      assert(menu!.canHide, "pointed layer cannot be focused");
+      const id = selectedId(); menu!.resolve("focus"); menu = null;
+      await until(() => sceneState().layerFocusedId === id && sceneState().layerCount === "1", "focus did not isolate exactly one layer");
+      await tick(); await tick();
+      return id;
+    };
+    const focusId = await focus();
+    assert(sceneState().layerHiddenCount === "1" && !host.querySelector(`[data-layer-node-id="${hiddenId}"]`), "focus erased the existing hidden state");
+    selected = current.root; render(); await tick();
+    assert(sceneState().layerFocusedId === focusId && sceneState().layerCount === "1" && sceneState().layerSelectionCount === "0", "tree selection changed isolation or highlighted an outside layer");
+    assert(!host.querySelector(".layer-measurement"), "outside nodes remained available for measurement");
+    rightClick(); await until(() => Boolean(menu), "focused layer menu unavailable");
+    assert(menu!.canExitFocus, "focused menu lacks an exit");
+    menu!.resolve("hide"); menu = null;
+    await until(() => sceneState().layerCount === "0", "hiding the focused layer left a pickable plane");
+    const emptyBounds = frame().getBoundingClientRect();
+    frame().dispatchEvent(new PointerEvent("pointerup", { bubbles: true, button: 2, isPrimary: true, clientX: emptyBounds.left + 8, clientY: emptyBounds.top + 8 }));
+    await until(() => Boolean(menu), "empty focused scene cannot open exit menu");
+    assert(!menu!.canHide && menu!.canExitFocus, "empty focus menu enablement wrong");
+    menu!.resolve("exit-focus"); menu = null;
+    await until(() => !host.querySelector(".exit-layer-focus"), "menu exit focus failed");
+    assert(sceneState().layerHiddenCount === "2" && !host.querySelector(`[data-layer-node-id="${hiddenId}"]`), "exit focus restored manually hidden layers");
     flushSync(() => host.querySelector<HTMLButtonElement>(".restore-layers")!.click());
     assert(!host.querySelector(".restore-layers"), "toolbar restore failed");
+    await focus();
+    flushSync(() => host.querySelector<HTMLButtonElement>(".exit-layer-focus")!.click());
+    assert(sceneState().layerMode === "overview", "toolbar exit focus failed");
+    await focus();
+    flushSync(() => frame().dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" })));
+    assert(sceneState().layerMode === "overview" && frame().classList.contains("layers3d-active"), "Esc must leave focus without leaving 3D");
+    await focus();
+    flushSync(() => host.querySelector<HTMLButtonElement>(".view-mode-toggle button")!.click());
+    assert(!host.querySelector(".exit-layer-focus") && !frame().classList.contains("layers3d-active"), "2D switch retained invisible isolation state");
+    flushSync(() => host.querySelector<HTMLButtonElement>(".view-mode-toggle button:last-child")!.click()); await ready();
+    assert(JSON.stringify(current.root) === original, "focus/exit mutated the original hierarchy");
     rightClick(); await until(() => Boolean(menu), "stale menu unavailable");
     const stale = menu!; menu = null;
     current = fixture({ width: 720, height: 1280 }); selected = null; render(); await ready();
-    stale.resolve("hide"); await tick();
-    assert(!host.querySelector(".restore-layers"), "old menu hid a layer in a new snapshot");
-    return ["pointer: precise cursor, hover identity, click jitter, rotate/pan distinction, stable selection and interrupted-gesture cleanup", "menu: right-click hide, keyboard and toolbar restore, cancel, right-drag separation and stale snapshot protection"];
+    stale.resolve("focus"); await tick();
+    assert(!host.querySelector(".exit-layer-focus") && !host.querySelector(".restore-layers"), "old menu changed a new snapshot");
+    return ["pointer: precise cursor, hover identity, click jitter, rotate/pan distinction, stable selection and interrupted-gesture cleanup", "menu: right-click hide/focus, keyboard/toolbar/empty-scene exit, immutable hidden state, stable tree selection, 2D switch and stale snapshot protection"];
   } finally { flushSync(() => reactRoot.unmount()); host.remove(); window.electronApi = previousApi; }
 }
 
@@ -515,6 +905,14 @@ async function verifyLayerExpansion() {
     tap(p); double();
     assert(Number(expansions) === 1 && expanded.has(current.root.id), "double click failed to expand the picked parent");
     await tick();
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!reduced) {
+      assert(Number(canvas().dataset.layerAnimationProgress) < 1, "expansion did not animate from the parent");
+      const version = Number(canvas().dataset.layerRenderVersion);
+      await tick(); await tick();
+      assert(Number(canvas().dataset.layerRenderVersion) > version, "expansion did not repaint the WebGL scene");
+    }
+    await until(() => canvas().dataset.layerAnimationProgress === "1", "expansion animation did not finish");
     assert(host.querySelector(".layer-scene")?.getAttribute("data-layer-root-composite") === "false" && host.querySelectorAll(".layer-plane").length === 4, "children did not separate after expansion");
     const leaf = point(); tap(leaf); tap(leaf); double();
     assert(selected.children.length === 0 && Number(expansions) === 1, "leaf double click expanded a node");
@@ -532,7 +930,16 @@ async function verifyLayerExpansion() {
     assert(expanded.size === 0, "cancelled gesture triggered expansion");
     tap(point()); tap({ x: frame().getBoundingClientRect().left + 2, y: frame().getBoundingClientRect().top + 2 }); double();
     assert(expanded.size === 0, "empty-space click expanded the previous parent");
-    return ["double-click: parent-only expansion, separate children, single/leaf/pan/drag/cancel/empty clicks do not expand"];
+    expanded = new Set([current.root.id]); render(); await tick();
+    expanded = new Set(); render(); await tick();
+    assert(canvas().dataset.layerAnimationProgress === "1", "collapse did not interrupt the previous expansion");
+    const previousMatchMedia = window.matchMedia;
+    window.matchMedia = query => query.includes("prefers-reduced-motion") ? { matches: true } as MediaQueryList : previousMatchMedia.call(window, query);
+    try {
+      expanded = new Set([current.root.id]); render(); await tick();
+      assert(canvas().dataset.layerAnimationProgress === "1", "reduced-motion setting was ignored");
+    } finally { window.matchMedia = previousMatchMedia; }
+    return ["double-click: parent-only expansion, 240ms GPU animation, cancellation/reduced motion; single/leaf/pan/drag/cancel/empty clicks do not expand"];
   } finally { flushSync(() => reactRoot.unmount()); host.remove(); }
 }
 

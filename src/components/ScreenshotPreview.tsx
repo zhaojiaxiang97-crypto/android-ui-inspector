@@ -14,6 +14,7 @@ type Props = {
   selectedNode: UiNode | null;
   expandedNodeIds: ReadonlySet<string>;
   geometry?: CaptureGeometry;
+  layersAvailable?: boolean;
   toolbarHost?: HTMLElement | null;
   onSelect: (node: UiNode) => void;
   onExpand?: (node: UiNode) => void;
@@ -39,13 +40,15 @@ type Gesture = {
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 16;
 const ZOOM_STEP = 0.25;
+const PINCH_ZOOM_SENSITIVITY = 0.005;
 const DRAG_THRESHOLD = 4;
 const ZOOM_PRESETS = [0.5, 1, 2, 4, 8, 16] as const;
 // Open from the front-left: controls fan left, with the page stack behind them.
 const DEFAULT_CAMERA: OrbitCamera = { distance: 1100, azimuth: 40, elevation: 12, roll: 0, layerGap: 96, panX: 0, panY: 0 };
 
 function clampZoom(value: number) {
-  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.round(value * 100) / 100));
+  // Keep tiny pinch deltas; only the displayed percentage should be rounded.
+  return Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, value));
 }
 
 export function ScreenshotPreview(props: Props) {
@@ -54,7 +57,7 @@ export function ScreenshotPreview(props: Props) {
   return <LoadedScreenshot key={props.src} {...props} />;
 }
 
-function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, toolbarHost, onSelect, onExpand }: Props) {
+function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, layersAvailable = true, toolbarHost, onSelect, onExpand }: Props) {
   const frameRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -65,6 +68,7 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
   const previousSelectedIdRef = useRef<string | null>(null);
   const menuRequestRef = useRef(0);
   const [hiddenNodeIds, setHiddenNodeIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [focusedNode, setFocusedNode] = useState<UiNode | null>(null);
   const [menuError, setMenuError] = useState<string | null>(null);
   const [size, setSize] = useState<PixelSize | null>(null);
   const [frameSize, setFrameSize] = useState<FrameSize>({ width: 0, height: 0 });
@@ -76,18 +80,20 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
   const [camera, setCamera] = useState<OrbitCamera>(DEFAULT_CAMERA);
   const cameraRef = useRef<OrbitCamera>(DEFAULT_CAMERA);
   const cameraFrameRef = useRef<number | null>(null);
+  const zoomFrameRef = useRef<number | null>(null);
   const [sceneOrigin, setSceneOrigin] = useState<SceneOrigin>({ left: 0, top: 0 });
   const [spacePressed, setSpacePressed] = useState(false);
 
   const integrity = assessCaptureGeometry(geometry, size ?? undefined);
   const enabled = Boolean(size && !failed && integrity.status !== "mismatch");
-  const canRender3d = Boolean(enabled && root.visibleToUser && root.bounds && root.children.length > 0);
+  const canRender3d = Boolean(layersAvailable && enabled && root.visibleToUser && root.bounds && root.children.length > 0);
   const overlay = enabled && size && selectedNode?.visibleToUser && selectedNode.bounds ? boundsPercent(selectedNode.bounds, size) : null;
   const rootSelected = selectedNode?.id === root.id;
 
   useEffect(() => {
     layerClickRef.current = null;
     setHiddenNodeIds(new Set());
+    setFocusedNode(null);
     setMenuError(null);
     return () => { menuRequestRef.current++; };
   }, [root]);
@@ -95,17 +101,19 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
   async function openLayerMenu(clientX?: number, clientY?: number) {
     if (viewMode !== "layers3d" || !enabled) return;
     const node = clientX !== undefined && clientY !== undefined ? layerSceneRef.current?.pick(clientX, clientY) : selectedNode;
-    const canHide = Boolean(node && !hiddenNodeIds.has(node.id));
-    if (!canHide && hiddenNodeIds.size === 0) return;
+    const canHide = Boolean(node?.visibleToUser && node.bounds && !hiddenNodeIds.has(node.id));
+    if (!canHide && hiddenNodeIds.size === 0 && !focusedNode) return;
     if (node && canHide) onSelect(node);
     const request = ++menuRequestRef.current;
     setMenuError(null);
     try {
-      const action = await window.electronApi.showLayerMenu(canHide, hiddenNodeIds.size > 0);
+      const action = await window.electronApi.showLayerMenu(canHide, hiddenNodeIds.size > 0, Boolean(focusedNode));
       if (request !== menuRequestRef.current || !frameRef.current) return;
       layerSceneRef.current?.clearHover();
       if (action === "hide" && node && canHide) setHiddenNodeIds((current) => new Set([...current, node.id]));
       if (action === "restore") setHiddenNodeIds(new Set());
+      if (action === "focus" && node && canHide) changeLayerFocus(node);
+      if (action === "exit-focus") changeLayerFocus(null);
     } catch {
       if (request === menuRequestRef.current && frameRef.current) setMenuError("无法打开图层菜单，请重新启动程序后重试。");
     }
@@ -161,6 +169,7 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
 
   useEffect(() => () => {
     if (cameraFrameRef.current !== null) cancelAnimationFrame(cameraFrameRef.current);
+    if (zoomFrameRef.current !== null) cancelAnimationFrame(zoomFrameRef.current);
   }, []);
 
   useEffect(() => {
@@ -169,7 +178,10 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
         event.preventDefault();
         setSpacePressed(true);
       }
-      if (event.key === "Escape" && viewMode === "layers3d") setViewMode("flat");
+      if (event.key === "Escape" && viewMode === "layers3d") {
+        if (focusedNode) { event.preventDefault(); changeLayerFocus(null); }
+        else setViewMode("flat");
+      }
       const screenshotFocused = Boolean(frameRef.current && event.target instanceof Node && frameRef.current.contains(event.target));
       if (viewMode === "layers3d" && screenshotFocused) {
         if (event.key === "Home") {
@@ -218,7 +230,7 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onWindowBlur);
     };
-  }, [enabled, viewMode, zoom]);
+  }, [enabled, viewMode, zoom, focusedNode]);
 
   useEffect(() => {
     const selectedId = selectedNode?.id ?? null;
@@ -275,7 +287,18 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
     }
     const nextZoom = clampZoom(next);
     zoomRef.current = nextZoom;
-    setZoom(nextZoom);
+    if (event) {
+      // Accumulate every pinch delta, but rebuild React/scene geometry only once
+      // per display frame, including high-rate trackpads.
+      if (zoomFrameRef.current === null) zoomFrameRef.current = requestAnimationFrame(() => {
+        zoomFrameRef.current = null;
+        setZoom(zoomRef.current);
+      });
+    } else {
+      if (zoomFrameRef.current !== null) cancelAnimationFrame(zoomFrameRef.current);
+      zoomFrameRef.current = null;
+      setZoom(nextZoom);
+    }
   }
 
   function fitView() {
@@ -290,6 +313,17 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
   function resetView() {
     fitView();
     commitCamera(DEFAULT_CAMERA);
+  }
+
+  function changeLayerFocus(node: UiNode | null) {
+    menuRequestRef.current++;
+    layerClickRef.current = null;
+    layerSceneRef.current?.clearHover();
+    setFocusedNode(node);
+    zoomAnchorRef.current = null;
+    changeZoom(1);
+    commitCamera({ ...cameraRef.current, panX: 0, panY: 0 });
+    frameRef.current?.scrollTo({ left: 0, top: 0, behavior: "auto" });
   }
 
   function selectAtPoint(event: PointerEvent<HTMLDivElement>, pressedNode?: UiNode | null) {
@@ -378,9 +412,13 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
   }
 
   function handleWheel(event: WheelEvent) {
-    if (!enabled || event.deltaY === 0) return;
+    if (!enabled || !Number.isFinite(event.deltaY) || event.deltaY === 0) return;
     event.preventDefault();
-    changeZoom(zoomRef.current * (event.deltaY < 0 ? 1.25 : 0.8), event);
+    // Chromium delivers trackpad pinch as Ctrl+wheel with small pixel deltas.
+    const factor = event.ctrlKey
+      ? Math.exp(-event.deltaY * PINCH_ZOOM_SENSITIVITY)
+      : event.deltaY < 0 ? 1.25 : 0.8;
+    changeZoom(zoomRef.current * factor, event);
   }
 
   const stageStyle: CSSProperties = {
@@ -397,7 +435,7 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
 
   const toolbar = <div className="screenshot-view-toolbar" aria-label="截图视图工具栏">
       <div className="view-mode-toggle" role="group" aria-label="截图显示模式">
-        <button className={viewMode === "flat" ? "active" : ""} type="button" onClick={() => setViewMode("flat")}>2D</button>
+        <button className={viewMode === "flat" ? "active" : ""} type="button" onClick={() => { if (focusedNode) changeLayerFocus(null); setViewMode("flat"); }}>2D</button>
         <button className={viewMode === "layers3d" ? "active" : ""} type="button" disabled={!canRender3d} onClick={() => setViewMode("layers3d")}>3D 层级</button>
       </div>
       <div className="zoom-controls" role="group" aria-label="截图缩放">
@@ -412,6 +450,7 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
         </select>
         <button className="zoom-fit" type="button" onClick={fitView} disabled={!size}>适应</button>
         <button className="zoom-reset" type="button" onClick={resetView} disabled={!size}>重置</button>
+        {focusedNode && <button className="zoom-fit exit-layer-focus" type="button" onClick={() => changeLayerFocus(null)} title={`正在聚焦：${nodeDisplayLabel(focusedNode)} · Esc 退出`}>退出聚焦</button>}
         {viewMode === "layers3d" && hiddenNodeIds.size > 0 && <button className="restore-layers" type="button" onClick={() => setHiddenNodeIds(new Set())} aria-label="恢复所有隐藏图层">恢复图层 ({hiddenNodeIds.size})</button>}
       </div>
       {viewMode === "layers3d" && (
@@ -421,7 +460,7 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
             <div className="layer-options" aria-label="3D 层级视图参数">
               <label className="layer-gap-label">
                 <span>层间距 {camera.layerGap}px</span>
-                <input type="range" min="24" max="128" step="8" value={camera.layerGap} onChange={(event) => commitCamera({ ...cameraRef.current, layerGap: Number(event.target.value) })} aria-label="3D 层间距" />
+                <input type="range" min="24" max="240" step="8" value={camera.layerGap} onChange={(event) => commitCamera({ ...cameraRef.current, layerGap: Number(event.target.value) })} aria-label="3D 层间距" />
               </label>
               <label className="layer-perspective-label">
                 <span>视距 {camera.distance}px</span>
@@ -429,7 +468,7 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
               </label>
               <span className="orbit-label" aria-hidden="true">Orbit</span>
               <span className="orbit-readout" aria-live="polite">Yaw {Math.round(camera.azimuth)}° · Pitch {Math.round(camera.elevation)}°</span>
-              <span className="window-stack-label" title="截图中的全部可见层">全量展开总览</span>
+              <span className="window-stack-label" title={focusedNode ? nodeDisplayLabel(focusedNode) : "截图中的全部可见层"}>{focusedNode ? "单控件聚焦" : "全量展开总览"}</span>
             </div>
           </div>
         </details>
@@ -511,6 +550,7 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
             selectedNode={selectedNode}
             expandedNodeIds={expandedNodeIds}
             hiddenNodeIds={hiddenNodeIds}
+            focusedNode={focusedNode}
             size={size}
             renderScale={renderScale}
             origin={sceneOrigin}
@@ -524,9 +564,9 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
     </div>
     {size && <p className={`screenshot-status ${integrity.status}`} role="status">
       {size.width}×{size.height} · {size.width > size.height ? "横屏" : size.width < size.height ? "竖屏" : "方形"} · {integrity.message}
-      {viewMode === "layers3d" && canRender3d ? ` · 3D 全量展开 · 间距 ${camera.layerGap}px` : ""}
+      {viewMode === "layers3d" && canRender3d ? focusedNode ? ` · 聚焦：${nodeDisplayLabel(focusedNode)} · Esc 退出` : ` · 3D 全量展开 · 间距 ${camera.layerGap}px` : ""}
     </p>}
     {menuError && <p className="screenshot-status mismatch" role="alert">{menuError}</p>}
-    {enabled && <p className="screenshot-hint">点击选中，双击父层级展开；悬停另一层测距（原始外框 px，不含展开层距）；滚轮缩放，空格/Shift/中键平移；3D 左/右键拖动旋转，右键单击隐藏。</p>}
+    {enabled && <p className="screenshot-hint">点击选中，双击父层级展开；悬停另一层测距（原始外框 px，不含展开层距）；滚轮缩放，空格/Shift/中键平移；3D 左/右键拖动旋转，右键聚焦或隐藏。</p>}
   </>;
 }

@@ -1,9 +1,7 @@
 import type { UiNode } from "./types";
 
-// Keep the layout model in sync with the readable inspection row in App.css.
-// A stale 32px value under-scrolled deep real-device selections because the
-// dark workspace renders rows at 36px.
-export const TREE_ROW_HEIGHT = 36;
+// CSS consumes this value too: compact rows must not drift from virtual scrolling.
+export const TREE_ROW_HEIGHT = 28;
 export const TREE_OVERSCAN = 8;
 export const TREE_VIRTUAL_THRESHOLD = 500;
 

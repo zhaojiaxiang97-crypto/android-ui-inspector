@@ -42,8 +42,8 @@ app.whenReady().then(async () => {
     const result = await window.webContents.executeJavaScript("window.verifyCoordinates()");
     const viewport = await window.webContents.executeJavaScript("({ devicePixelRatio: window.devicePixelRatio, visualViewportScale: window.visualViewport?.scale ?? null, innerWidth, innerHeight, screenWidth: window.screen.width, screenHeight: window.screen.height })");
     assert.ok(Math.abs(Number(result.devicePixelRatio) - scaleFactor) < 0.06, `devicePixelRatio ${result.devicePixelRatio} did not match ${scaleFactor}`);
-    assert.equal(result.checks.filter((check) => !check.startsWith("pixel:")).length, 30, "DPI proxy did not complete the full coordinate and interaction matrix");
-    assert.equal(result.checks.filter((check) => check.startsWith("pixel:")).length, 10, "DPI proxy did not complete layer pixel checks");
+    assert.equal(result.checks.filter((check) => !check.startsWith("pixel:")).length, 31, "DPI proxy did not complete the full coordinate and interaction matrix");
+    assert.equal(result.checks.filter((check) => check.startsWith("pixel:")).length, 12, "DPI proxy did not complete layer pixel checks");
     report.viewport = viewport;
     report.checks = result.checks;
     report.success = true;

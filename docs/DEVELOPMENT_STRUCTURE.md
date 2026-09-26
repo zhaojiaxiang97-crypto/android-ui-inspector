@@ -33,6 +33,7 @@ android-ui-inspector/
 ├─ build/                    # electron-builder hook 和 NSIS 扩展
 ├─ .github/workflows/        # 三平台静态检查、原生打包和启动验证
 ├─ docs/                     # 验收记录、设计资产、性能报告和开发约定
+│  ├─ PROJECT_STATUS.md      # 当前实现、验证结果、限制和下一步
 │  ├─ TEST_PLAN.md           # 测试分层、矩阵、边界和发布门槛
 │  └─ design/                # ImageGen 视觉参考和界面设计稿
 ├─ public/                   # Vite 静态资源；目前为空，新增资源再放这里

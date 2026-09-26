@@ -304,7 +304,7 @@ export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, si
     const order = new Map(candidates.map((entry, index) => [entry, index]));
     limited.sort((a, b) => order.get(a)! - order.get(b)!);
   }
-  const layerGap = clampNumber(options.layerGap, 64, 16, 160);
+  const layerGap = clampNumber(options.layerGap, 64, 16, 240);
   const records: LayerRecord[] = [];
   const emptyBounds = new Set<string>();
   let frontDepth = 0;
@@ -318,7 +318,9 @@ export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, si
     const boundsKey = `${renderBounds.left},${renderBounds.top},${renderBounds.right},${renderBounds.bottom}`;
     const isCompact = isEmpty && emptyBounds.has(boundsKey);
     if (isEmpty) emptyBounds.add(boundsKey);
-    const step = layerGap * (isCompact ? 0.16 : 1);
+    // Keep repeated empty wrappers quieter, but leave enough separation to pick
+    // their edges without turning the whole stack into a solid wire bundle.
+    const step = layerGap * (isCompact ? 0.28 : 1);
     let depth = step;
     // Only overlapping regions need another plane. Disjoint controls share
     // depth without losing their individual images, outlines or hit targets.

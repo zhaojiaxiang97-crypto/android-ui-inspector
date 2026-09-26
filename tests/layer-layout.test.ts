@@ -253,7 +253,7 @@ test("only repeated confirmed-empty bounds compact; real, unknown and folded lay
   const result = buildLayerOverview(root, content, size, { layerGap: 100, expandedIds });
   const [a, b, child, c, d] = result.records;
   assert.deepEqual(result.records.map(r => r.isCompact), [false, true, false, false, false]);
-  assert.equal(b.z - a.z, 16);
+  assert.equal(b.z - a.z, 28);
   assert.equal(child.z - b.z, 100);
   assert.equal(c.z - child.z, 100);
   assert.equal(d.z - c.z, 100);
@@ -262,4 +262,6 @@ test("only repeated confirmed-empty bounds compact; real, unknown and folded lay
   const folded = buildLayerOverview(root, duplicate, size, { layerGap: 100, expandedIds: new Set([root.id]) });
   assert.equal(folded.records[1].isCompact, false);
   assert.equal(folded.records[1].z - folded.records[0].z, 100);
+  const wider = buildLayerOverview(root, content, size, { layerGap: 240, expandedIds });
+  assert.equal(wider.records[3].z - wider.records[2].z, 240);
 });

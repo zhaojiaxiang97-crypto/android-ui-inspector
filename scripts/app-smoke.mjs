@@ -118,6 +118,7 @@ try {
     return pages.find((item) => item.type === "page" && item.webSocketDebuggerUrl);
   }, "application window");
   connection = await connect(page.webSocketDebuggerUrl);
+  await connection.send("Page.bringToFront");
   if (reducedMotion) await connection.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
   if (requestedViewport) {
     await connection.send("Emulation.setDeviceMetricsOverride", {
@@ -387,6 +388,7 @@ try {
         };
         return {
           viewport: { width: window.innerWidth, height: window.innerHeight },
+          topbar: box('.topbar'),
           context: box('.inspector-heading'),
           hierarchy: box('.tree-pane'),
           preview: box('.preview-pane'),
@@ -411,7 +413,10 @@ try {
       assert.ok(workspaceLayout.grid?.width > 0 && workspaceLayout.gizmo?.width > 0, "3D viewport decorations are missing");
       assert.ok(workspaceLayout.windowStack?.width > 0, "3D low-frequency options are missing from the overflow menu");
       assert.ok(workspaceLayout.toolbarHost?.height > 0, "3D view toolbar did not move into the top bar");
-      assert.ok(workspaceLayout.toolbar?.bottom <= workspaceLayout.preview?.top + 1, "3D view toolbar still occupies the preview area");
+      if (runtime.nativeMenu) {
+        assert.equal(workspaceLayout.topbar?.height, 0, "Native actions still reserve a window toolbar");
+        assert.ok(workspaceLayout.toolbarHost.left >= workspaceLayout.preview.left && workspaceLayout.toolbarHost.right <= workspaceLayout.viewport.width, "Compact canvas tools overlap the hierarchy rail");
+      } else assert.ok(workspaceLayout.toolbar?.bottom <= workspaceLayout.preview?.top + 1, "3D view toolbar still occupies the preview area");
       if (workspaceLayout.viewport.width >= 1100) assert.ok(workspaceLayout.toolbar?.height <= 80, "Wide inspector toolbar wrapped unexpectedly");
       assert.ok(workspaceLayout.documentOverflowX <= 1, "Inspector layout introduces horizontal document overflow");
       const pivotLayout = await evaluate(`(() => {
@@ -460,6 +465,7 @@ try {
       await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: detailsDrag.x - 100, y: detailsDrag.y + 60, button: "left", buttons: 1, modifiers: 0 });
       await delay(80);
       await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: detailsDrag.x - 100, y: detailsDrag.y + 60, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
+      report.inspectorDrag = await evaluate(`({ before: ${JSON.stringify(detailsDrag)}, after: document.querySelector('.floating-inspector').getBoundingClientRect().toJSON(), focused: document.hasFocus() })`);
       await until(() => evaluate(`document.querySelector('.floating-inspector').getBoundingClientRect().left < ${detailsDrag.left - 80}`), "property panel drag");
       await evaluate("document.querySelector('.inspector-collapse').click()");
       await until(() => evaluate("document.querySelector('.floating-inspector').getBoundingClientRect().height <= 48"), "property panel collapse");
@@ -472,8 +478,28 @@ try {
       await evaluate("document.querySelector('.inspector-drag-handle').dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }))");
       assert.equal(await evaluate("document.querySelector('.screenshot-frame').getBoundingClientRect().height"), detailsDrag.frameHeight, "Floating inspector changes resized the camera viewport");
       recordCheck("floating property tab drags, collapses, closes and restores without resizing the canvas");
+      const inspectorScreenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+      writeFileSync(join(output, "inspector-groups.png"), Buffer.from(inspectorScreenshot.data, "base64"));
+      await evaluate("document.querySelector('.inspector-type > summary').focus()");
+      for (const key of [{ key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" }, { key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " " }]) {
+        for (const open of [false, true]) {
+          await connection.send("Input.dispatchKeyEvent", { type: "keyDown", ...key });
+          await connection.send("Input.dispatchKeyEvent", { type: "keyUp", ...key, text: undefined });
+          await until(() => evaluate(`document.querySelector('.inspector-type').open === ${open}`), "keyboard property group toggle");
+        }
+      }
+      await evaluate("document.querySelector('.inspector-search input').focus()");
+      await connection.send("Input.insertText", { text: "bounds" });
+      await until(() => evaluate("!document.querySelector('.inspector-layout').hidden && ['.inspector-type', '.inspector-relation', '.inspector-image'].every(selector => document.querySelector(selector).hidden)"), "property group filter");
+      const filteredInspector = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+      writeFileSync(join(output, "inspector-filter.png"), Buffer.from(filteredInspector.data, "base64"));
+      await connection.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+      await connection.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+      await until(() => evaluate("!document.querySelector('.inspector-search input').value && !document.querySelector('.floating-inspector').hidden && document.querySelectorAll('.inspector-card:not([hidden])').length === 5"), "property filter Escape");
+      recordCheck("inspector groups support keyboard folding, live property search and Escape without closing the panel");
       const boxModel = await evaluate(`(() => {
-        document.querySelector('.inspector-more').open = true;
+        document.querySelector('.inspector-layout').open = true;
+        document.querySelector('.inspector-padding').open = true;
         const card = document.querySelector('.box-model-card');
         const section = card.closest('section');
         section.scrollIntoView({ block: 'center' });
@@ -484,7 +510,7 @@ try {
       const boxScreenshot = await connection.send("Page.captureScreenshot", { format: "png", clip: boxModel.clip });
       writeFileSync(join(output, "box-model.png"), Buffer.from(boxScreenshot.data, "base64"));
       report.boxModel = { ...boxModel, screenshot: "box-model.png" };
-      await evaluate("document.querySelector('.inspector-more').open = false; document.querySelector('.inspector-body').scrollTop = 0");
+      await evaluate("document.querySelector('.inspector-padding').open = false; document.querySelector('.inspector-body').scrollTop = 0");
       recordCheck("compact box model remains readable inside the floating inspector");
       const hoverPoints = await evaluate(`(() => {
         const rect = document.querySelector('.layer-webgl-canvas')?.getBoundingClientRect();
@@ -520,6 +546,9 @@ try {
         const anchorId = await evaluate("document.querySelector('.tree-row.selected').dataset.treeId");
         let measurement = null;
         for (const point of hoverPoints) {
+          // Floating canvas tools/inspector can cover a geometrically valid
+          // plane. A real click must hit an exposed part of the canvas.
+          if (!await evaluate(`Boolean(document.elementFromPoint(${point.x}, ${point.y})?.closest('.screenshot-frame'))`)) continue;
           await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "none", buttons: 0 });
           await delay(80);
           const result = await evaluate(`(() => {
@@ -539,10 +568,11 @@ try {
         const screenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
         writeFileSync(join(output, "layers3d-measurement.png"), Buffer.from(screenshot.data, "base64"));
         const { x, y } = measurement.point;
+        report.measurementClick = measurement;
         await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
         await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: 1 });
         await until(() => evaluate(`document.querySelector('.tree-row.selected').dataset.treeId === ${JSON.stringify(measurement.target)} && !document.querySelector('.layer-measurement')`), "click measurement target becomes anchor");
-        assert.equal(await evaluate("document.querySelector('.layer-hover-label.is-selected')?.dataset.nodeId"), measurement.target, "Clicked target does not show selected feedback");
+        await until(() => evaluate(`document.querySelector('.layer-hover-label.is-selected')?.dataset.nodeId === ${JSON.stringify(measurement.target)}`), "clicked target selected feedback");
         await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 100, y: 40, button: "none", buttons: 0 });
         assert.equal(await evaluate("Boolean(document.querySelector('.layer-measurement'))"), false, "Leaving the canvas retained measurement labels");
         await evaluate("document.querySelector('.inspector-toggle').click()");
@@ -907,6 +937,7 @@ try {
     assert.deepEqual(storedGeometry.screenshotSize, report.screenshot);
     await evaluate("document.querySelector('.snapshot-history-item').click()");
     await until(() => evaluate(`document.querySelector('.screenshot-stage')?.dataset.coordinateStatus === ${JSON.stringify(geometry.status)} && Boolean(document.querySelector('.selection-overlay'))`), "restored snapshot geometry");
+    await until(() => evaluate("document.querySelector('.floating-inspector').getBoundingClientRect().height >= 200"), "inspector follows restored snapshot canvas");
     report.storedGeometry = storedGeometry;
     await evaluate("document.querySelector('.snapshot-drawer').open = false");
     recordCheck("snapshot save/load and history preview retain capture geometry");
@@ -923,6 +954,13 @@ try {
 } catch (error) {
   report.error = String(error);
   report.applicationError = stderr.slice(-1500);
+  if (connection) {
+    try {
+      const failure = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+      writeFileSync(join(output, "failure.png"), Buffer.from(failure.data, "base64"));
+      report.failureState = await connection.send("Runtime.evaluate", { expression: "({ focused: document.hasFocus(), selected: document.querySelector('.tree-row.selected')?.dataset.treeId, gesture: document.querySelector('.screenshot-frame')?.dataset.gesture, hovered: document.querySelector('.layer-scene')?.dataset.layerHoveredId, label: document.querySelector('.layer-hover-label')?.textContent })", returnByValue: true });
+    } catch (diagnosticError) { report.diagnosticError = String(diagnosticError); }
+  }
   process.exitCode = 1;
 } finally {
   report.rendererErrors = connection?.errors ?? [];

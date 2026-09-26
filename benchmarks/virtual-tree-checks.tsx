@@ -5,7 +5,7 @@ import { filterTree } from "../shared/tree-utils";
 import { indexTree, TREE_ROW_HEIGHT, visibleTreeRows } from "../shared/visible-tree";
 import type { UiNode } from "../shared/types";
 import type { SetStateAction } from "react";
-import { createTree } from "./fixtures";
+import { createTree, makeNode } from "./fixtures";
 
 function check(value: unknown, message: string): asserts value {
   if (!value) throw new Error(`Virtual tree: ${message}`);
@@ -181,6 +181,43 @@ export async function verifyVirtualTreeBehavior() {
       else bounded();
     }
     checks.push("499/500-row virtualization threshold boundary");
+
+    root = createTree(5, "wide");
+    Object.assign(root, { text: "LeakLauncherActivity", className: "LeakLauncherActivity" });
+    Object.assign(root.children[0], { text: "Leaks", contentDesc: "泄漏列表", className: "android.widget.TextView" });
+    Object.assign(root.children[1], { text: null, contentDesc: "头像", className: "android.widget.ImageView", clickable: true });
+    Object.assign(root.children[2], { text: null, contentDesc: null, resourceId: "app:id/leak_canary_bottom_navigation_bar", className: "android.widget.LinearLayout" });
+    Object.assign(root.children[3], { text: null, contentDesc: null, resourceId: null, className: "android.view.View" });
+    let parent = root.children[2];
+    for (let depth = 0; depth < 10; depth += 1) {
+      const child = makeNode(`${parent.id}/0`, depth + 1);
+      child.text = depth === 9 ? "Heap Dumps" : `Container ${depth}`;
+      parent.children = [child]; parent = child;
+    }
+    selectedId = root.id; expanded = new Set(indexTree(root).keys()); session += 1;
+    host.className = "app-shell inspection-active";
+    draw(); viewport().style.height = "420px";
+    for (const [id, name, kind] of [["0/0", "Leaks", "text"], ["0/1", "头像", "image"], ["0/2", "leak_canary_bottom_navigation_bar", "container"], ["0/3", "View", "leaf"]]) {
+      check(row(id)?.querySelector(".tree-primary")?.textContent === name && row(id)?.dataset.treeKind === kind, `compact name/type mismatch: ${id}`);
+    }
+    check(row("0/3")?.querySelectorAll(".tree-row-content > span").length === 1, "unnamed node repeats its class");
+    check(row("0/2")?.title.includes("app:id/leak_canary_bottom_navigation_bar"), "complete resource ID lost from tooltip");
+    check(getComputedStyle(row("0/2")!.querySelector(".tree-primary")!).direction === "rtl", "long resource ID no longer preserves its distinguishing suffix");
+    check(row("0/1")?.getAttribute("aria-label")?.includes("可点击"), "clickable state has no accessible name");
+    for (const width of [240, 306, 600]) {
+      host.style.width = `${width}px`;
+      check((getComputedStyle(row("0/0")!.querySelector(".tree-class")!).display === "none") === (width <= 380), "narrow tree must reserve space for names instead of truncated type labels");
+      check(viewport().scrollWidth <= viewport().clientWidth, `tree overflows at ${width}px`);
+      for (const element of host.querySelectorAll<HTMLElement>(".tree-row")) {
+        check(element.getBoundingClientRect().height === TREE_ROW_HEIGHT, "compact CSS and virtual row heights differ");
+        const name = element.querySelector<HTMLElement>(".tree-primary")!;
+        check(name.clientWidth >= Math.min(40, name.scrollWidth), `name crushed at ${width}px: ${element.dataset.treeId}`);
+      }
+    }
+    check(Number(row(parent.id)?.getAttribute("aria-level")) === 12, "visual indent cap changed the real hierarchy level");
+    query = "app:id/leak_canary_bottom_navigation_bar"; draw();
+    check(row("0/2") && count() === 2, "compact label broke full-ID search");
+    checks.push("compact semantic names, type icons, full-ID search/tooltips and 240/306/600px deep-tree layout");
     return { checks, threshold: 500, rowHeight: TREE_ROW_HEIGHT, overscan: 8 };
   } finally {
     flushSync(() => reactRoot.unmount());

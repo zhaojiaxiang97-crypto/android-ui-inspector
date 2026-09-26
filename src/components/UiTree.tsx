@@ -21,7 +21,9 @@ type UiTreeProps = {
 const FILTER_EXPANDED: ReadonlySet<string> = new Set();
 
 function treeNodeKind(node: UiNode, hasChildren: boolean) {
-  if (node.clickable || node.focusable || node.scrollable) return "interactive";
+  const className = nodeShortClass(node);
+  if (/Image(View|Button)$/.test(className)) return "image";
+  if (/(TextView|EditText|Button)$/.test(className)) return "text";
   return hasChildren ? "container" : "leaf";
 }
 
@@ -42,10 +44,12 @@ const UiTreeRow = memo(function UiTreeRow({ row, domId, selected, active, expand
   const shortClass = nodeShortClass(node);
   const label = nodeDisplayLabel(node);
   const hasSecondaryLabel = label !== shortClass;
+  const resourceLabel = !node.text?.trim() && !node.contentDesc?.trim() && Boolean(node.resourceId);
   const kind = treeNodeKind(node, hasChildren);
   const muted = !node.visibleToUser || !node.enabled;
   // ponytail: cap deep indentation so Android trees stay readable in a narrow inspector rail.
-  const indentation = 10 + Math.min(depth, 7) * 14;
+  const visualDepth = Math.min(depth, 7);
+  const title = [label, node.className, node.resourceId, node.contentDesc, `#${node.id} · 第 ${depth + 1} 层`, node.clickable && "可点击"].filter(Boolean).join("\n");
   return (
     <div
       id={domId}
@@ -57,10 +61,11 @@ const UiTreeRow = memo(function UiTreeRow({ row, domId, selected, active, expand
       aria-setsize={row.setSize}
       aria-expanded={hasChildren ? expanded : undefined}
       aria-selected={selected}
+      aria-label={[label, hasSecondaryLabel && shortClass, node.clickable && "可点击", !node.enabled && "不可用", !node.visibleToUser && "不可见"].filter(Boolean).join("，")}
       data-tree-kind={kind}
       className={`tree-row tree-kind-${kind} ${hasSecondaryLabel ? "has-secondary-label" : ""} ${muted ? "is-muted" : ""} ${selected ? "selected" : ""} ${active ? "active" : ""}`}
-      style={{ paddingLeft: indentation }}
-      title={`${nodeDisplayLabel(node)} · #${node.id} · 第 ${depth + 1} 层`}
+      style={{ paddingLeft: 8 + visualDepth * 12, "--tree-indent": `${visualDepth * 12}px` } as CSSProperties}
+      title={title}
       onMouseDown={(event) => event.preventDefault()}
       onClick={() => onSelect(node.id)}
       onDoubleClick={() => { if (hasChildren && !expanded) onToggle(node.id); }}
@@ -76,10 +81,14 @@ const UiTreeRow = memo(function UiTreeRow({ row, domId, selected, active, expand
         }}
         onDoubleClick={(event) => event.stopPropagation()}
       >{hasChildren ? (expanded ? "▾" : "▸") : ""}</span>
-      <span className="tree-node-icon" aria-hidden="true" />
-      <span className="tree-class">{shortClass}</span>
-      {hasSecondaryLabel && <span className="tree-label">{label}</span>}
-      {node.clickable && <span className="tree-flag" role="img" aria-label="可点击">tap</span>}
+      <svg className="tree-node-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d={kind === "text" ? "M3 3h10M8 3v10M6 13h4" : kind === "image" ? "M2.5 2.5h11v11h-11zM3 11l3-3 2 2 2-3 3 4M5 5h.01" : kind === "container" ? "M2.5 4.5h9v9h-9zM5 2.5h8.5V11" : "M3 3h10v10H3z"} />
+      </svg>
+      <span className="tree-row-content">
+        <span className={`tree-primary ${hasSecondaryLabel ? "tree-label" : "tree-class"} ${resourceLabel ? "is-resource" : ""}`}>{label}</span>
+        {hasSecondaryLabel && <span className="tree-class">{shortClass}</span>}
+      </span>
+      {node.clickable && <span className="tree-flag" title="可点击" aria-hidden="true" />}
     </div>
   );
 });
@@ -204,11 +213,11 @@ export const UiTree = memo(function UiTree({ root, filteredRoot, filterActive, f
     <div className="ui-tree" style={{ "--tree-row-height": `${TREE_ROW_HEIGHT}px` } as CSSProperties}>
       <div className="tree-toolbar">
         <div className="tree-toolbar-actions">
-          <button className="tree-clear tree-expand-all" type="button" disabled={filterActive || rows.length === 0} onClick={() => onExpandedChange(allExpandedIds)}>全部展开</button>
-          <button className="tree-clear tree-collapse-all" type="button" disabled={filterActive || rows.length === 0} onClick={() => onExpandedChange(new Set())}>全部折叠</button>
-          <button className="tree-clear tree-locate" type="button" disabled={!selectedId || !index.has(selectedId)} onClick={() => { onClearFilter(); setLocalReveal((value) => value + 1); }}>定位选中</button>
+          <button className="tree-clear tree-expand-all" type="button" aria-label="全部展开" title="全部展开" disabled={filterActive || rows.length === 0} onClick={() => onExpandedChange(allExpandedIds)}>展开</button>
+          <button className="tree-clear tree-collapse-all" type="button" aria-label="全部折叠" title="全部折叠" disabled={filterActive || rows.length === 0} onClick={() => onExpandedChange(new Set())}>折叠</button>
+          <button className="tree-clear tree-locate" type="button" aria-label="定位选中" title="定位选中" disabled={!selectedId || !index.has(selectedId)} onClick={() => { onClearFilter(); setLocalReveal((value) => value + 1); }}>定位</button>
         </div>
-        <span className="tree-hint" title="双击父节点展开；方向键浏览和展开/折叠，Home/End 跳转首末行">{rows.length} 行{virtual ? " · 按需渲染" : ""}{filterActive ? " · 筛选展开" : ""}</span>
+        <span className="tree-hint" title={`共 ${index.size} 个节点，当前 ${rows.length} 项。双击父节点展开；方向键浏览，Home/End 跳转。${virtual ? "按需渲染。" : ""}${filterActive ? "筛选期间保持展开。" : ""}`}>{rows.length === index.size ? rows.length : `${rows.length}/${index.size}`} 项</span>
       </div>
       <div
         className="tree-scroll ui-tree-scroll"

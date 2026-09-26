@@ -14,6 +14,52 @@ export type AdbProbeResult = {
   error: string | null;
 };
 
+export type AppMenuAction =
+  | { type: "device"; serial: string }
+  | { type: "capture" | "cancel" | "refresh" | "home" | "search" | "expand-all" | "collapse-all" | "save" | "mcp-share" | "mcp-stop" | "mcp-config" | "debug-start" };
+
+export type LayerMenuAction = "hide" | "restore" | "focus" | "exit-focus" | null;
+
+export type AppMenuState = {
+  devices: Array<Pick<DeviceInfo, "serial" | "model" | "state">>;
+  selectedSerial: string;
+  loading: boolean;
+  capturing: boolean;
+  inspecting: boolean;
+  hasSnapshot: boolean;
+  filtered: boolean;
+  mcpSharing?: boolean;
+};
+
+export type McpShareResult = { shared: boolean; snapshotId: string | null; error: string | null };
+
+export type DebugStep = {
+  id: number;
+  time: string;
+  action: string;
+  input: Record<string, unknown>;
+  status: "running" | "done" | "failed";
+  message: string;
+  beforeId?: string;
+  afterId?: string;
+  dispatchState?: "not_sent" | "unknown" | "sent";
+};
+export type DebugSessionState = {
+  id: string;
+  serial: string;
+  packageName: string;
+  active: boolean;
+  busy: boolean;
+  expiresAt: string;
+  steps: DebugStep[];
+  evidencePath: string | null;
+};
+export type DebugSessionEvent = {
+  state: DebugSessionState;
+  snapshot?: UiSnapshot;
+  selectedNodeId?: string | null;
+};
+
 export type UiBounds = {
   left: number;
   top: number;
@@ -78,6 +124,8 @@ export type UiSnapshot = {
   captureGeometry?: CaptureGeometry;
   captureTimings?: Record<string, number>;
   captureDurationMs?: number;
+  // Fast automation observes accessibility semantics, not independent render layers.
+  captureMode?: "fast" | "deep";
 };
 
 export type InspectionProgress = { requestId: string; stage: string; elapsedMs: number };

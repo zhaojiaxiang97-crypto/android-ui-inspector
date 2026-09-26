@@ -13,6 +13,10 @@ app.whenReady().then(async () => {
   try {
     report.layerImages = await require("../.benchmarks/coordinates/layer-images.cjs").verifyLayerImages();
     await window.loadURL(pathToFileURL(join(project, "benchmarks/coordinates.html")).href);
+    const { screenshot, ...rendering } = await window.webContents.executeJavaScript("window.benchmarkLayerRendering()");
+    report.rendering = rendering;
+    writeFileSync(join(output, "webgl-layers.png"), Buffer.from(screenshot.split(",")[1], "base64"));
+    console.log("WebGL rendering:", JSON.stringify(report.rendering));
     for (const zoom of [1, 1.25, 1.5]) {
       window.webContents.setZoomFactor(zoom);
       const result = await window.webContents.executeJavaScript("window.verifyCoordinates()");

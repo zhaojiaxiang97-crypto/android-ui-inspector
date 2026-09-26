@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import "./styles/tokens.css";
 import "./App.css";
-import type { AdbProbeResult, ExportFormat, StoredSnapshot, UiNode, UiSnapshot } from "../shared/types";
+import type { AdbProbeResult, DebugSessionState, ExportFormat, StoredSnapshot, UiNode, UiSnapshot } from "../shared/types";
 import { homeStateIsConnected, homeStateIsError, resolveHomeState } from "../shared/device-state";
 import { filterTree, flattenNodes, nodeDisplayLabel } from "../shared/tree-utils";
 import { AppHeader } from "./components/AppHeader";
@@ -10,6 +10,7 @@ import { UiTree } from "./components/UiTree";
 import { ScreenshotPreview } from "./components/ScreenshotPreview";
 import { NodePropertiesPanel } from "./components/NodePropertiesPanel";
 import { DeviceHomeView } from "./components/DeviceHomeView";
+import { TreePaneResizer } from "./components/TreePaneResizer";
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -238,6 +239,7 @@ function App() {
   // The first render happens before the probe effect runs. Start in loading so
   // the home state never flashes an error while the bridge is being queried.
   const [loading, setLoading] = useState(true);
+  const [nativeMenu, setNativeMenu] = useState(false);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
   const [selectedSerial, setSelectedSerial] = useState<string | null>(null);
   const [preferredSerial, setPreferredSerial] = useState<string | null>(null);
@@ -283,6 +285,60 @@ function App() {
   const [diffExportStatus, setDiffExportStatus] = useState<string | null>(null);
   const [latestDiff, setLatestDiff] = useState<SnapshotDiff | null>(null);
   const [diffExpanded, setDiffExpanded] = useState(false);
+  const [mcpSharing, setMcpSharing] = useState(false);
+  const [mcpBusy, setMcpBusy] = useState(false);
+  const [debugState, setDebugState] = useState<DebugSessionState | null>(null);
+  const [debugStatus, setDebugStatus] = useState<string | null>(null);
+  const liveSnapshotRef = useRef<UiSnapshot | null>(null);
+  const currentSnapshotRef = useRef(snapshot);
+  currentSnapshotRef.current = snapshot;
+  const stopMcpSharing = useCallback(async () => {
+    try {
+      await window.electronApi.stopMcpSharing?.();
+      setMcpSharing(false);
+      setDebugStatus(null);
+    } catch { setDebugStatus("停止 MCP 共享失败，请关闭程序后重试。"); }
+  }, []);
+  useEffect(() => {
+    if (snapshot && snapshot === liveSnapshotRef.current) return;
+    void stopMcpSharing();
+  }, [snapshot, stopMcpSharing]);
+  useEffect(() => {
+    let active = true;
+    void window.electronApi.getDebugSession?.().then(state => { if (active) setDebugState(state); })
+      .catch(() => { if (active) setDebugStatus("读取自动调试状态失败，请重新打开程序。"); });
+    const off = window.electronApi.onDebugSession?.(event => {
+      setDebugState(event.state);
+      if (!event.snapshot) return;
+      liveSnapshotRef.current = event.snapshot;
+      setMcpSharing(false);
+      setPreferredSerial(event.state.serial);
+      setSelectedSerial(event.state.serial);
+      setSnapshot(event.snapshot);
+      setSelectedNode((event.selectedNodeId && event.snapshot.root ? flattenNodes(event.snapshot.root).get(event.selectedNodeId) : null) ?? event.snapshot.root);
+      setTreeExpandedIds(event.snapshot.root ? expandedTreeNodeIds(event.snapshot.root) : new Set());
+      setTreeQuery(""); setInteractiveOnly(false); setIdentifiedOnly(false);
+      setTreeRevealRequest(value => value + 1);
+      setInspectionError(null);
+      setLatestDiff(null);
+    });
+    return () => { active = false; off?.(); };
+  }, []);
+  const shareMcpSnapshot = useCallback(async () => {
+    if (!snapshot?.root || mcpBusy || !window.electronApi.shareMcpSnapshot) return;
+    setMcpBusy(true);
+    try {
+      const result = await window.electronApi.shareMcpSnapshot(snapshot, selectedNode?.id ?? null);
+      if (currentSnapshotRef.current !== snapshot) return;
+      if (result.shared) { setMcpSharing(true); setDebugStatus("MCP 已共享这一份快照；切换或重新采集会停止共享。"); }
+      else if (result.error) setDebugStatus(result.error);
+    } catch { setDebugStatus("MCP 共享失败。"); }
+    finally { setMcpBusy(false); }
+  }, [snapshot, selectedNode, mcpBusy]);
+  const copyMcpConfig = useCallback(async () => {
+    try { await window.electronApi.copyMcpConfig?.(); setDebugStatus("MCP 配置已复制；客户端需要 Node.js 22+。"); }
+    catch { setDebugStatus("复制 MCP 配置失败。"); }
+  }, []);
 
   const refreshDevices = useCallback(async () => {
     setLoading(true);
@@ -351,6 +407,7 @@ function App() {
   }, []);
 
   const closeInspector = useCallback(() => {
+    void stopMcpSharing();
     cancelInspection();
     setSelectedSerial(null);
     setSnapshot(null);
@@ -362,7 +419,7 @@ function App() {
     setSnapshotStatus(null);
     setLatestDiff(null);
     setDiffExpanded(false);
-  }, [cancelInspection]);
+  }, [cancelInspection, stopMcpSharing]);
 
   const handleScreenshotSelect = useCallback((node: UiNode) => {
     setSelectedNode(node);
@@ -439,7 +496,6 @@ function App() {
       : null,
     [identifiedOnly, interactiveOnly, snapshot?.root, treeQuery],
   );
-  const filteredNodeCount = useMemo(() => filteredRoot ? flattenNodes(filteredRoot).size : 0, [filteredRoot]);
   const selectorData = useMemo(() => snapshot?.root && detailNode
     ? {
         xpath: xpathForNode(snapshot.root, detailNode),
@@ -577,6 +633,7 @@ function App() {
   }, []);
 
   const viewSavedSnapshot = useCallback((entry: SavedSnapshot) => {
+    void stopMcpSharing();
     setTreeSession((value) => value + 1);
     setPreferredSerial(entry.snapshot.serial);
     setSelectedSerial(entry.snapshot.serial);
@@ -593,9 +650,10 @@ function App() {
     setLatestDiff(entry.diff);
     setDiffExpanded(false);
     setSnapshotStatus(`正在查看历史快照 ${entry.id.slice(0, 8)}`);
-  }, []);
+  }, [stopMcpSharing]);
 
   const selectDevice = useCallback((serial: string) => {
+    void stopMcpSharing();
     const nextSerial = serial || null;
     setPreferredSerial(nextSerial);
     if (selectedSerial && nextSerial) {
@@ -605,7 +663,7 @@ function App() {
     if (selectedSerial && !nextSerial) {
       closeInspector();
     }
-  }, [closeInspector, inspectDevice, selectedSerial]);
+  }, [closeInspector, inspectDevice, selectedSerial, stopMcpSharing]);
 
   const preferredDevice = preferredSerial ? devices.find((device) => device.serial === preferredSerial) ?? null : null;
   const selectedDevice = selectedSerial ? devices.find((device) => device.serial === selectedSerial) ?? null : null;
@@ -621,9 +679,72 @@ function App() {
   const captureSelected = useCallback(() => {
     if (captureSerial) void inspectDevice(captureSerial);
   }, [captureSerial, inspectDevice]);
+  const startDebugSession = useCallback(async () => {
+    if (!captureSerial || mcpBusy || inspectionLoading || !window.electronApi.startDebugSession) return;
+    setMcpBusy(true); setDebugStatus(null);
+    try {
+      const state = await window.electronApi.startDebugSession(captureSerial);
+      if (state) { setDebugState(state); setMcpSharing(false); }
+    } catch (error) { setDebugStatus(error instanceof Error ? error.message : "开启自动调试失败。"); }
+    finally { setMcpBusy(false); }
+  }, [captureSerial, inspectionLoading, mcpBusy]);
+
+  useEffect(() => {
+    if (!window.electronApi.runtime.nativeMenu || !window.electronApi.updateAppMenu) return;
+    let active = true;
+    void window.electronApi.updateAppMenu({
+      devices: devices.map(({ serial, model, state }) => ({ serial, model, state })),
+      selectedSerial: toolbarSerial, loading, capturing: inspectionLoading,
+      inspecting: Boolean(selectedSerial), hasSnapshot: Boolean(snapshot?.root), filtered: hasTreeFilter, mcpSharing,
+    }).then(() => { if (active) setNativeMenu(true); }, () => { if (active) setNativeMenu(false); });
+    return () => { active = false; };
+  }, [probe, toolbarSerial, loading, inspectionLoading, selectedSerial, snapshot, hasTreeFilter, mcpSharing]);
+
+  useEffect(() => window.electronApi.onAppMenuAction?.((action) => {
+    switch (action.type) {
+      case "capture": if (!loading && !inspectionLoading) captureSelected(); break;
+      case "cancel": cancelInspection(); break;
+      case "refresh": if (!loading) void refreshDevices(); break;
+      case "home": closeInspector(); break;
+      case "device": if (readyDevices.some(device => device.serial === action.serial)) selectDevice(action.serial); break;
+      case "search": document.querySelector<HTMLInputElement>(".inspection-active .tree-search")?.focus(); break;
+      case "save": if (!inspectionLoading) void saveCurrentSnapshot(); break;
+      case "mcp-share": if (!inspectionLoading) void shareMcpSnapshot(); break;
+      case "mcp-stop": void stopMcpSharing(); break;
+      case "mcp-config": void copyMcpConfig(); break;
+      case "debug-start": void startDebugSession(); break;
+      case "expand-all": if (snapshot?.root && !hasTreeFilter) setTreeExpandedIds(expandedTreeNodeIds(snapshot.root)); break;
+      case "collapse-all": if (!hasTreeFilter) setTreeExpandedIds(new Set()); break;
+    }
+  }), [loading, inspectionLoading, captureSelected, cancelInspection, refreshDevices, closeInspector, readyDevices, selectDevice, saveCurrentSnapshot, snapshot, hasTreeFilter, shareMcpSnapshot, stopMcpSharing, copyMcpConfig, startDebugSession]);
+
+  const debugControls = window.electronApi.startDebugSession && <>
+    {(debugState?.active || mcpSharing) && <button className="close-button debug-stop" type="button" onClick={() => void stopMcpSharing()}>立即停止</button>}
+    <details className="snapshot-drawer debug-drawer">
+      <summary aria-label="自动调试" title={debugState?.active ? debugState.busy ? "AI 调试中…" : "AI 已授权" : mcpSharing ? "MCP 已共享" : "自动调试"}>
+        {mcpSharing ? "MCP" : "AI"}<span className="visually-hidden">{debugState?.active ? "自动调试已授权" : mcpSharing ? "MCP 已共享" : "自动调试"}</span>
+      </summary>
+      <div className="snapshot-drawer-body">
+        <strong>{debugState?.active ? debugState.packageName : "自动 UI 调试"}</strong>
+        <p>{debugState?.active ? `设备 ${debugState.serial} · ${new Date(debugState.expiresAt).toLocaleTimeString()} 到期` : "只授权指定 Debug App；支持观察、点击、滚动、返回和结果验证。"}</p>
+        <div className="snapshot-actions">
+          <button className="close-button" type="button" disabled={!captureSerial || inspectionLoading || mcpBusy || debugState?.active} onClick={() => void startDebugSession()}>{mcpBusy ? "正在连接…" : "开启自动调试…"}</button>
+          <button className="close-button" type="button" onClick={() => void copyMcpConfig()}>复制 MCP 配置</button>
+          {debugState?.evidencePath && <button className="close-button" type="button" onClick={() => void window.electronApi.openDebugEvidence?.().catch(() => setDebugStatus("打开记录目录失败。"))}>打开失败证据</button>}
+        </div>
+        {debugStatus && <p role="status">{debugStatus}</p>}
+        <ol className="debug-step-list" aria-label="自动调试操作记录" aria-live="polite">
+          {debugState?.steps.slice(-10).reverse().map(step => <li key={step.id} data-status={step.status}>
+            <span>#{step.id} · {step.action} · {step.status === "running" ? "执行中" : step.status === "failed" ? "失败" : "完成"}</span>
+            <p>{step.message}</p>
+          </li>)}
+        </ol>
+      </div>
+    </details>
+  </>;
 
   return (
-    <div className={`app-shell ${selectedSerial ? "inspection-active" : ""}`}>
+    <div className={`app-shell ${selectedSerial ? "inspection-active" : ""} ${nativeMenu ? "native-menu" : ""}`}>
       <AppHeader
         inspectionActive={Boolean(selectedSerial)}
         selectedSerial={selectedSerial}
@@ -646,6 +767,8 @@ function App() {
         onSearchChange={setTreeQuery}
         setSceneToolbarHost={setSceneToolbarHost}
       />
+
+      {selectedSerial && sceneToolbarHost ? createPortal(debugControls, sceneToolbarHost) : <aside className="debug-home-controls">{debugControls}</aside>}
 
       <main className="workspace">
         <DeviceHomeView
@@ -674,10 +797,6 @@ function App() {
             {inspectionLoading ? (
               <div className="inspector-grid inspector-state-grid">
                 <div className="tree-pane inspector-state-pane">
-                  <div className="subpanel-heading">
-                    <span>层级树</span>
-                    <span className="tree-hint">读取中</span>
-                  </div>
                   <div className="workspace-empty-copy">
                     <span className="loading-orbit" />
                     <h4 role="status" aria-live="polite">{inspectionStage}</h4>
@@ -700,15 +819,11 @@ function App() {
             ) : inspectionError || snapshot?.error ? (
               <div className="inspector-grid inspector-state-grid">
                 <div className="tree-pane inspector-state-pane">
-                  <div className="subpanel-heading">
-                    <span>层级树</span>
-                    <span className="tree-hint">读取失败</span>
-                  </div>
                   <div className="workspace-empty-copy error-placeholder">
                     <div className="error-mark">!</div>
                     <h4>读取失败</h4>
                     <p>{inspectionError || snapshot?.error}</p>
-                    <span className="tree-hint">请使用顶部“采集截图”重新获取。</span>
+                    <span className="tree-hint">{nativeMenu ? "请使用“文件 → 采集当前画面”重新获取。" : "请使用顶部“采集截图”重新获取。"}</span>
                   </div>
                 </div>
                 <div className="preview-pane inspector-state-pane">
@@ -726,12 +841,8 @@ function App() {
             ) : snapshot?.root ? (
               <>
                 {snapshot.warning && <div className="snapshot-warning">{snapshot.warning}</div>}
-                <div className="inspector-grid">
-                  <div className="tree-pane">
-                    <div className="subpanel-heading">
-                      <span>层级树</span>
-                      <span className="tree-hint">{hasTreeFilter ? `${filteredNodeCount}/${snapshot.nodeCount} nodes` : `${snapshot.nodeCount} nodes`}</span>
-                    </div>
+                <div className="inspector-grid is-resizable">
+                  <div className="tree-pane" id="hierarchy-pane" aria-label="层级树">
                     <div className="tree-tools">
                       <div className="tree-search-row">
                         <input
@@ -739,7 +850,8 @@ function App() {
                           type="search"
                           value={treeQuery}
                           onChange={(event) => setTreeQuery(event.target.value)}
-                          placeholder="搜索文本、resource-id、class…"
+                          placeholder="搜索控件…"
+                          title="搜索文本、描述、资源 ID 或控件类型"
                           aria-label="搜索 UI 节点"
                         />
                         {hasTreeFilter && <button className="tree-clear tree-clear-inline" type="button" onClick={clearTreeFilter}>清除筛选</button>}
@@ -766,6 +878,8 @@ function App() {
                       onClearFilter={clearTreeFilter}
                     />
                   </div>
+
+                  <TreePaneResizer />
 
                   <div className="preview-pane">
                     <div className="subpanel-heading">
@@ -794,6 +908,11 @@ function App() {
                             {snapshotStoreError && <span className="snapshot-store-error">{snapshotStoreError}</span>}
                           </div>
                           <div className="snapshot-actions">
+                            {window.electronApi.shareMcpSnapshot && <>
+                              <button className="close-button" type="button" onClick={() => void shareMcpSnapshot()} disabled={mcpBusy || debugState?.active}>共享当前快照给 MCP</button>
+                              <button className="close-button" type="button" onClick={() => void stopMcpSharing()} disabled={!mcpSharing}>停止 MCP 共享</button>
+                              <button className="close-button" type="button" onClick={() => void copyMcpConfig()}>复制 MCP 配置</button>
+                            </>}
                             <button className="close-button" type="button" onClick={() => void saveCurrentSnapshot()} disabled={snapshotsLoading}>保存快照</button>
                             <button className="close-button" type="button" onClick={() => void clearSavedSnapshots()} disabled={snapshotsLoading || (savedSnapshots.length === 0 && !snapshotStoreError)}>清空记录</button>
                           </div>
@@ -851,7 +970,7 @@ function App() {
                     </details>, sceneToolbarHost)}
                     {snapshot.screenshotDataUrl ? (
                       <ScreenshotPreview key={treeSession} src={snapshot.screenshotDataUrl} root={snapshot.root}
-                        selectedNode={selectedNode} expandedNodeIds={treeExpandedIds} geometry={snapshot.captureGeometry} toolbarHost={sceneToolbarHost} onSelect={handleScreenshotSelect} onExpand={handleLayerExpand} />
+                        selectedNode={selectedNode} expandedNodeIds={treeExpandedIds} geometry={snapshot.captureGeometry} layersAvailable={snapshot.captureMode !== "fast"} toolbarHost={sceneToolbarHost} onSelect={handleScreenshotSelect} onExpand={handleLayerExpand} />
                     ) : <div className="screenshot-frame"><div className="no-screenshot">截图不可用</div></div>}
                     {detailNode && (
                       <NodePropertiesPanel
@@ -912,10 +1031,6 @@ function App() {
             ) : (
               <div className="inspector-grid inspector-empty-grid">
                 <div className="tree-pane empty-tree-pane">
-                  <div className="subpanel-heading">
-                    <span>层级树</span>
-                    <span className="tree-hint">等待 hierarchy</span>
-                  </div>
                   <div className="workspace-empty-copy">
                     <span className="workspace-empty-icon" aria-hidden="true">⌁</span>
                     <h4>{captureSerial ? "准备采集当前页面" : "请选择已授权设备"}</h4>
