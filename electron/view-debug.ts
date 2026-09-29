@@ -1,6 +1,7 @@
 import { createConnection, type Socket } from "node:net";
 import { crc32, deflate } from "node:zlib";
 import { promisify } from "node:util";
+import { decodeViewHierarchy } from "./view-hierarchy";
 
 const compress = promisify(deflate);
 
@@ -8,6 +9,7 @@ const JDWP_HANDSHAKE = Buffer.from("JDWP-Handshake");
 const DDMS_COMMAND_SET = 199;
 const DDMS_COMMAND = 1;
 const MAX_PACKET_BYTES = 256 * 1024 * 1024;
+const JDWP_HANDSHAKE_TIMEOUT_MS = 30_000;
 
 export type CapturedViewLayer = {
   name: string;
@@ -76,7 +78,9 @@ async function connect(port: number, signal?: AbortSignal) {
   signal?.throwIfAborted();
   const socket = createConnection({ host: "127.0.0.1", port, signal });
   socket.setNoDelay(true);
-  socket.setTimeout(5_000, () => socket.destroy(new Error("Debug View 连接超时。")));
+  // A canceled DDMS layer request can keep the App's debugger busy until its
+  // in-process capture finishes; the next handshake must wait for that work.
+  socket.setTimeout(JDWP_HANDSHAKE_TIMEOUT_MS, () => socket.destroy(new Error("Debug View 连接超时。")));
   await new Promise<void>((resolve, reject) => {
     socket.once("connect", resolve);
     socket.once("error", reject);
@@ -94,7 +98,7 @@ async function connect(port: number, signal?: AbortSignal) {
   }
 }
 
-async function requestChunk(socket: Socket, reader: SocketReader, id: number, type: string, data: Buffer = Buffer.alloc(0)) {
+async function requestChunk(socket: Socket, reader: SocketReader, id: number, type: string, data: Buffer = Buffer.alloc(0), onTiming?: (waitMs: number, readMs: number, bytes: number) => void) {
   const chunk = Buffer.alloc(8 + data.length);
   chunk.writeUInt32BE(fourCc(type), 0);
   chunk.writeUInt32BE(data.length, 4);
@@ -106,13 +110,16 @@ async function requestChunk(socket: Socket, reader: SocketReader, id: number, ty
   packet[9] = DDMS_COMMAND_SET;
   packet[10] = DDMS_COMMAND;
   chunk.copy(packet, 11);
+  const started = performance.now();
   socket.write(packet);
 
   while (true) {
     const header = await reader.take(11);
+    const headerAt = performance.now();
     const length = header.readUInt32BE(0);
     if (length < 11 || length > MAX_PACKET_BYTES) throw new Error("Debug View 返回了无效数据。");
     const payload = await reader.take(length - 11);
+    const payloadAt = performance.now();
     if (header[8] !== 0x80 || header.readUInt32BE(4) !== id) continue;
     const errorCode = header.readUInt16BE(9);
     if (errorCode !== 0) throw new Error(`Debug View 请求失败：${errorCode}`);
@@ -121,6 +128,7 @@ async function requestChunk(socket: Socket, reader: SocketReader, id: number, ty
     const responseLength = payload.readUInt32BE(4);
     if (responseLength !== payload.length - 8) throw new Error("Debug View 返回长度不一致。");
     if (responseType === "FAIL") throw new Error("Android 无法抓取独立控件画面。");
+    onTiming?.(headerAt - started, payloadAt - headerAt, responseLength);
     return payload.subarray(8, 8 + responseLength);
   }
 }
@@ -184,7 +192,7 @@ export function matchesViewRoot(expected: string, actual: string) {
     && (actual.endsWith(`.${expected}`) || actual.endsWith(`$${expected}`)));
 }
 
-export async function captureViewLayers(port: number, options: { rootRefs: readonly string[]; onHierarchy: (hierarchy: string, windowName: string) => void; signal?: AbortSignal }) {
+export async function captureViewLayers(port: number, options: { rootRefs: readonly string[]; onHierarchy: (hierarchy: string, windowName: string) => void | Promise<void>; onBatchTiming?: (timing: { waitMs: number; readMs: number; parseMs: number; bytes: number; layers: number }) => void; skipImages?: boolean; signal?: AbortSignal }) {
   const { socket, reader } = await connect(port, options.signal);
   try {
     const names = parseWindowNames(await requestChunk(socket, reader, 1, "VULW"));
@@ -206,50 +214,20 @@ export async function captureViewLayers(port: number, options: { rootRefs: reado
       selected = { request, name };
     }
     if (!selected) throw new Error("Debug 窗口与当前控件树不一致，请重新采集。");
-    const dump = Buffer.concat([selected.request, Buffer.from([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0])]);
-    const hierarchy = (await requestChunk(socket, reader, sequence++, "VURT", dump)).toString("utf8");
+    // Legacy reflection becomes prohibitively slow after the first JDWP attach.
+    // V2 calls View.encode directly; do not retry a malformed V2 dump with legacy.
+    const dump = Buffer.concat([selected.request, Buffer.from([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1])]);
+    const hierarchy = decodeViewHierarchy(await requestChunk(socket, reader, sequence++, "VURT", dump));
     if (!options.rootRefs.some((expected) => matchesViewRoot(expected, hierarchy.trimStart().split(/\s/)[0]))) throw new Error("Debug 窗口身份已变化，请重新采集。");
-    if (!hierarchy.trimEnd().endsWith("\nDONE.")) throw new Error("Android 未完成控件属性导出，请确认 App 正常响应后重新采集。");
-    options.onHierarchy(hierarchy, selected.name);
+    await options.onHierarchy(hierarchy, selected.name);
+    if (options.skipImages) return [];
     selected.request.writeUInt32BE(2, 0);
-    return parseCapturedViewLayers(await requestChunk(socket, reader, sequence, "VURT", selected.request));
-  } finally {
-    socket.destroy();
-  }
-}
-
-export async function captureViewBitmapsDdms(port: number, target: { windowName: string }, views: readonly { ref: string }[], signal?: AbortSignal) {
-  const deadline = AbortSignal.timeout(15_000);
-  const combinedSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
-  const { socket, reader } = await connect(port, combinedSignal);
-  const images = new Map<string, { width: number; height: number; pngDataUrl: string }>();
-  const failures = new Map<string, string>();
-  const int = (value: number) => { const buffer = Buffer.alloc(4); buffer.writeUInt32BE(value); return buffer; };
-  try {
-    if (!target.windowName) throw new Error("Debug 窗口名称为空，请重新采集");
-    for (let index = 0; index < views.length; index += 1) {
-      combinedSignal.throwIfAborted();
-      const view = views[index];
-      try {
-        const root = utf16be(target.windowName);
-        const ref = utf16be(view.ref);
-        const request = Buffer.concat([Buffer.alloc(4), int(target.windowName.length), root, int(view.ref.length), ref]);
-        request.writeUInt32BE(1, 0);
-        const png = await requestChunk(socket, reader, index + 1, "VUOP", request);
-        const size = pngSize(png);
-        if (!size) throw new Error("DDMS 未返回有效控件图片");
-        images.set(view.ref, { width: size.width, height: size.height, pngDataUrl: "data:image/png;base64," + png.toString("base64") });
-      } catch (error) {
-        if (socket.destroyed) throw error;
-        failures.set(view.ref, error instanceof Error ? error.message : "DDMS 控件图片采集失败");
-      }
-    }
-    return { images, failures };
-  } catch (error) {
-    combinedSignal.throwIfAborted();
-    if (!deadline.aborted) throw error;
-    for (const view of views) if (!images.has(view.ref) && !failures.has(view.ref)) failures.set(view.ref, "DDMS 控件图片采集达到 15 秒上限");
-    return { images, failures };
+    let waitMs = 0, readMs = 0, bytes = 0;
+    const batch = await requestChunk(socket, reader, sequence, "VURT", selected.request, (wait, read, size) => { waitMs = wait; readMs = read; bytes = size; });
+    const parseStarted = performance.now();
+    const layers = parseCapturedViewLayers(batch);
+    options.onBatchTiming?.({ waitMs, readMs, parseMs: performance.now() - parseStarted, bytes, layers: layers.length });
+    return layers;
   } finally {
     socket.destroy();
   }
@@ -265,9 +243,10 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
   const events: Buffer[] = [];
   const pinned = new Set<Buffer>();
   type Kind = "own" | "texture" | "surface";
-  const results = new Map<string, { width: number; height: number; pngDataUrl: string; kind: Kind }>();
+  const results = new Map<string, { width: number; height: number; pngDataUrl: string; kind: Kind; empty: boolean }>();
   const failures = new Map<string, string>();
   const kinds = new Map<string, Kind>();
+  const skipDraw = new Set<string>();
   let phase = "连接调试窗口";
   const int = (value: number) => { const b = Buffer.alloc(4); b.writeInt32BE(value); return b; };
   const string = (value: string) => { const b = Buffer.from(value); return Buffer.concat([int(b.length), b]); };
@@ -301,7 +280,7 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
       return id;
     };
     const members = new Map<string, Map<string, Buffer>>();
-    const memberFor = async (classId: Buffer, name: string, signature: string, fields = false) => {
+    const membersFor = async (classId: Buffer, fields = false) => {
       const key = `${classId.toString("hex")}/${fields ? "fields" : "methods"}`;
       let entries = members.get(key);
       if (!entries) {
@@ -325,6 +304,10 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
         if (offset !== data.length) throw new Error("Invalid JDWP member list");
         members.set(key, entries);
       }
+      return entries;
+    };
+    const memberFor = async (classId: Buffer, name: string, signature: string, fields = false) => {
+      const entries = await membersFor(classId, fields);
       const id = entries.get(`${name}:${signature}`);
       if (!id) throw new Error(`Debug ${fields ? "field" : "method"} unavailable: ${name}`);
       return id;
@@ -332,12 +315,13 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
     const methodFor = (classId: Buffer, name: string, signature: string) => memberFor(classId, name, signature);
     // Read the already-resolved object's real type instead of repeatedly scanning
     // ART's class loaders by name. Cache by class ID, not an ambiguous class name.
-    const typeKinds = new Map<string, Kind>();
-    const kindFor = async (object: Buffer): Promise<Kind> => {
+    const typeKinds = new Map<string, { kind: Kind; customDraw: boolean }>();
+    const kindFor = async (object: Buffer) => {
       const type = await command(9, 1, object);
       if (type.length !== 1 + classSize || type[0] !== 1) throw new Error("Invalid View reference type");
       let id = type.subarray(1);
       const path: string[] = [];
+      const customDrawTypes = new Set<string>();
       let kind: Kind = "own";
       while (!typeKinds.has(id.toString("hex"))) {
         const key = id.toString("hex");
@@ -351,14 +335,20 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
           classes.set(signature, id);
           break;
         }
+        // SKIP_DRAW bypasses onDraw, not dispatchDraw. Container decorations
+        // (including inherited overrides) still belong to this view's snapshot.
+        if ((await membersFor(id)).has("dispatchDraw:(Landroid/graphics/Canvas;)V")) customDrawTypes.add(key);
         const parent = await command(3, 1, id);
         if (parent.length !== classSize) throw new Error("Invalid JDWP superclass");
         if (parent.every((byte) => byte === 0)) throw new Error("Object is not an Android View");
         id = parent;
       }
-      kind = typeKinds.get(id.toString("hex")) ?? kind;
-      for (const key of path) typeKinds.set(key, kind);
-      return kind;
+      let result = typeKinds.get(id.toString("hex")) ?? { kind, customDraw: false };
+      for (const key of path.reverse()) {
+        result = { kind: result.kind, customDraw: result.customDraw || customDrawTypes.has(key) };
+        typeKinds.set(key, result);
+      }
+      return result;
     };
     const threads = await command(1, 4);
     for (let offset = 4; offset < threads.length; offset += objectSize) {
@@ -450,8 +440,17 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
         const found = await invokeStatic(debugClass, findMethod, [objectArg(rootObject), objectArg(name)]);
         if (found.every(byte => byte === 0)) throw new Error("控件已不在当前窗口，请重新采集");
         object = await pin(found);
-        const kind = await kindFor(object);
+        const { kind, customDraw } = await kindFor(object);
         kinds.set(view.ref, kind);
+        if (kind === "own" && view.captureOwn && ((await fieldValue(object, viewClass, "mPrivateFlags", "I")).readInt32BE() & 0x80) !== 0) {
+          // View.createSnapshot also draws overlays on otherwise empty layouts.
+          // A non-null overlay is conservatively captured, even if currently empty.
+          const overlay = await fieldValue(object, viewClass, "mOverlay", "Landroid/view/ViewOverlay;");
+          if (!customDraw && overlay.every(byte => byte === 0)) {
+            skipDraw.add(view.ref);
+            continue;
+          }
+        }
         if (view.captureOwn || kind !== "own") {
           requested.push({ ref: view.ref, kind, object });
           object = undefined; // Keep drawable objects pinned through capture.
@@ -592,11 +591,14 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
         if (arrayData.length !== 5 + width * height * 4 || arrayData[0] !== 73 || arrayData.readInt32BE(1) !== width * height) throw new Error("控件位图像素不完整");
         const pixels = arrayData.subarray(5);
         const scanlines = Buffer.alloc(height * (width * 4 + 1));
+        let empty = true;
         for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
           const source = (y * width + x) * 4, dest = y * (width * 4 + 1) + 1 + x * 4;
+          if (pixels[source]) empty = false;
           scanlines[dest] = pixels[source + 1]; scanlines[dest + 1] = pixels[source + 2];
           scanlines[dest + 2] = pixels[source + 3]; scanlines[dest + 3] = pixels[source];
         }
+        if (kind !== "own" && empty) throw new Error("独立缓冲区返回全透明像素，未确认取得视频画面；不代表控件本身没有内容");
         const chunk = (name: string, payload: Buffer) => {
           const body = Buffer.concat([Buffer.from(name), payload]);
           const checksum = Buffer.alloc(4); checksum.writeUInt32BE(crc32(body));
@@ -606,7 +608,7 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
         const compressed = await compress(scanlines);
         signal?.throwIfAborted();
         const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header), chunk("IDAT", compressed), chunk("IEND", Buffer.alloc(0))]);
-        results.set(view.ref, { width, height, pngDataUrl: `data:image/png;base64,${png.toString("base64")}`, kind });
+        results.set(view.ref, { width, height, pngDataUrl: `data:image/png;base64,${png.toString("base64")}`, kind, empty });
       } catch (error) {
         signal?.throwIfAborted();
         if (socket.destroyed) throw error;
@@ -623,12 +625,13 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
         }
       }
     }
-    return { images: results, failures, kinds };
+    return { images: results, failures, kinds, skipDraw };
   } catch (error) {
     signal?.throwIfAborted();
-    if (!deadline.aborted) throw error;
-    for (const view of views) if (!results.has(view.ref) && (view.captureOwn || kinds.get(view.ref) !== "own")) failures.set(view.ref, `独立画面补采达到 15 秒上限（${phase}）`);
-    return { images: results, failures, kinds };
+    if (!deadline.aborted && !results.size) throw error;
+    const reason = deadline.aborted ? `独立画面补采达到 15 秒上限（${phase}）` : error instanceof Error ? error.message : "独立画面补采中断";
+    for (const view of views) if (!results.has(view.ref) && !failures.has(view.ref) && !skipDraw.has(view.ref) && (view.captureOwn || kinds.get(view.ref) !== "own")) failures.set(view.ref, reason);
+    return { images: results, failures, kinds, skipDraw };
   } finally {
     for (const object of pinned) if (!socket.destroyed) await command(9, 8, object).catch(() => undefined);
     // Dispose clears event requests and releases every debugger suspension.

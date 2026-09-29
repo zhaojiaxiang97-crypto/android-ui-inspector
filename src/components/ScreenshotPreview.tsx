@@ -1,14 +1,15 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent } from "react";
 import { createPortal } from "react-dom";
-import type { CaptureGeometry, PixelSize, UiNode } from "../../shared/types";
+import type { CaptureGeometry, PixelSize, QmlGroupImage, UiNode } from "../../shared/types";
 import { assessCaptureGeometry, boundsPercent, clientToScreen, findNodeAtPoint, validSize } from "../../shared/screen-coordinates";
-import { nodeDisplayLabel } from "../../shared/tree-utils";
+import { flattenNodes, nodeDisplayLabel } from "../../shared/tree-utils";
 import { orbitFromDrag, orbitFromKeys, type OrbitCamera } from "../../shared/orbit-camera";
 import { Layer3DPreview, type LayerSceneHandle } from "./Layer3DPreview";
 
 type ViewMode = "flat" | "layers3d";
 
 type Props = {
+  sessionKey?: string | number;
   src: string;
   root: UiNode;
   selectedNode: UiNode | null;
@@ -18,6 +19,7 @@ type Props = {
   toolbarHost?: HTMLElement | null;
   onSelect: (node: UiNode) => void;
   onExpand?: (node: UiNode) => void;
+  onCaptureGroup?: (node: UiNode) => Promise<QmlGroupImage | null>;
 };
 
 type FrameSize = { width: number; height: number };
@@ -52,12 +54,11 @@ function clampZoom(value: number) {
 }
 
 export function ScreenshotPreview(props: Props) {
-  // Changing snapshots cannot reuse the preceding image's dimensions, camera,
-  // gesture state or selected layer collection.
-  return <LoadedScreenshot key={props.src} {...props} />;
+  // A capture may replace its preview image while keeping the same camera.
+  return <LoadedScreenshot key={props.sessionKey ?? props.src} {...props} />;
 }
 
-function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, layersAvailable = true, toolbarHost, onSelect, onExpand }: Props) {
+function LoadedScreenshot({ sessionKey, src, root, selectedNode, expandedNodeIds, geometry, layersAvailable = true, toolbarHost, onSelect, onExpand, onCaptureGroup }: Props) {
   const frameRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
@@ -96,6 +97,15 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
     setFocusedNode(null);
     setMenuError(null);
     return () => { menuRequestRef.current++; };
+  }, [sessionKey ?? root]);
+
+  useEffect(() => {
+    const nodes = flattenNodes(root);
+    setFocusedNode((current) => current ? nodes.get(current.id) ?? null : null);
+    setHiddenNodeIds((current) => {
+      const kept = [...current].filter((id) => nodes.has(id));
+      return kept.length === current.size ? current : new Set(kept);
+    });
   }, [root]);
 
   async function openLayerMenu(clientX?: number, clientY?: number) {
@@ -556,6 +566,7 @@ function LoadedScreenshot({ src, root, selectedNode, expandedNodeIds, geometry, 
             origin={sceneOrigin}
             camera={camera}
             onSelect={onSelect}
+            onCaptureGroup={onCaptureGroup}
             onFitScale={setSceneFitScale}
           />
         )}

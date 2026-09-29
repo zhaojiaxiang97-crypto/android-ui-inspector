@@ -1,11 +1,15 @@
 import { createConnection, type Socket } from "node:net";
 import { qmlStyleFrom, type QmlRectStyle } from "../shared/qml-style";
+import { textureDimensions } from "../shared/layer-textures";
 
 const QML_DEBUG_PLUGIN = "QmlDebugger";
 const MAX_PACKET_BYTES = 32 * 1024 * 1024;
 const MAX_OBJECTS = 20_000;
 const PACKET_TIMEOUT_MS = 15_000;
 const GEOMETRY_BATCH_SIZE = 200;
+const MAX_GRABS = 48;
+const MAX_GRAB_PIXELS = 2_000_000;
+export type QmlGrab = { debugId: number; path: string; width: number; height: number };
 export const GEOMETRY_EXPRESSION = `(function() {
   if (typeof this.width !== "number" || typeof this.height !== "number") return null;
   function rgba(c) { return c && typeof c.r === "number" ? [c.r, c.g, c.b, c.a] : null; }
@@ -418,7 +422,64 @@ async function populateGeometry(transport: PacketTransport, root: QmlDebugNode, 
   }
 }
 
-export async function inspectQmlHierarchy(port: number, signal?: AbortSignal): Promise<QmlDebugNode> {
+export function qmlGrabExpression(path: string, width: number, height: number, includeChildren = false) {
+  return `(function() {
+    if (typeof this.grabToImage !== "function"${includeChildren ? "" : " || !this.children || this.children.length"}) return false;
+    try { return this.grabToImage(function(result) { result.saveToFile(${JSON.stringify(path)}); }, Qt.size(${width}, ${height})); }
+    catch (error) { return false; }
+  }).call(this)`;
+}
+
+async function requestGroupGrab(transport: PacketTransport, root: QmlDebugNode, engineId: number, nextId: { value: number }, appDir: string, nonce: string, debugId: number) {
+  const pending = [root];
+  for (let cursor = 0; cursor < pending.length; cursor++) pending.push(...pending[cursor].children);
+  const node = pending.find(item => item.debugId === debugId);
+  const geometry = node?.geometry;
+  if (!node?.children.length || !geometry?.visible || geometry.effectiveOpacity <= 0 || geometry.width <= 0 || geometry.height <= 0) return { grabs: [], failed: false };
+  const size = textureDimensions(geometry.width, geometry.height, 100_000, 600);
+  const path = `${appDir}/cache/ui-inspector-${nonce}-${debugId}.png`;
+  const queryId = nextId.value++;
+  transport.send(pluginPacket([request("EVAL_EXPRESSION", queryId, int32(debugId), qString(qmlGrabExpression(path, size.width, size.height, true)), int32(engineId))]));
+  const reply = await readReply(transport, "EVAL_EXPRESSION_R", queryId);
+  return { grabs: decodeVariant(reply) === true ? [{ debugId, path, width: size.width, height: size.height }] : [], failed: false };
+}
+
+async function requestLeafGrabs(transport: PacketTransport, root: QmlDebugNode, engineId: number, nextId: { value: number }, appDir: string, nonce: string, signal?: AbortSignal) {
+  const grabs: QmlGrab[] = [];
+  const candidates: QmlDebugNode[] = [], pending = [root];
+  for (let cursor = 0; cursor < pending.length; cursor++) {
+    const node = pending[cursor], geometry = node.geometry;
+    pending.push(...node.children);
+    // ponytail: grabToImage includes descendants; parent-only pixels need a Qt scene-graph capture hook.
+    if (node.children.length || !geometry || !geometry.visible || geometry.effectiveOpacity <= 0
+      || geometry.width <= 0 || geometry.height <= 0 || !/(Image|Text|Canvas|Painted|Shader|Shape|Video|Framebuffer)/i.test(node.type)) continue;
+    candidates.push(node);
+  }
+  candidates.sort((left, right) => Number(/Image|Video/i.test(right.type)) - Number(/Image|Video/i.test(left.type)));
+  let pixelBudget = MAX_GRAB_PIXELS, attempts = 0;
+  let failed = false;
+  for (const node of candidates) {
+    if (attempts++ >= MAX_GRABS || pixelBudget <= 0) break;
+    const geometry = node.geometry!;
+    const size = textureDimensions(geometry.width, geometry.height, Math.min(pixelBudget, 65_536), 320);
+    const path = `${appDir}/cache/ui-inspector-${nonce}-${node.debugId}.png`;
+    const queryId = nextId.value++;
+    try {
+      transport.send(pluginPacket([request("EVAL_EXPRESSION", queryId, int32(node.debugId), qString(qmlGrabExpression(path, size.width, size.height)), int32(engineId))]));
+      const reply = await readReply(transport, "EVAL_EXPRESSION_R", queryId);
+      if (decodeVariant(reply) !== true) continue;
+    } catch {
+      signal?.throwIfAborted();
+      failed = true;
+      break;
+    }
+    grabs.push({ debugId: node.debugId, path, width: size.width, height: size.height });
+    pixelBudget -= size.width * size.height;
+  }
+  return { grabs, failed };
+}
+
+export async function inspectQmlHierarchy(port: number, signal?: AbortSignal, grab?: { appDir: string; nonce: string; groupDebugId?: number }): Promise<{ root: QmlDebugNode; grabs: QmlGrab[]; grabFailed: boolean }> {
   const transport = await PacketTransport.connect(port, signal);
   const nextId = { value: 1 };
   try {
@@ -465,7 +526,10 @@ export async function inspectQmlHierarchy(port: number, signal?: AbortSignal): P
     const root = trees.sort((left, right) => countTree(right) - countTree(left))[0];
     if (!root) throw new Error("未读取到 QML 对象树。");
     await populateGeometry(transport, root, engineId, nextId);
-    return root;
+    const result = grab?.groupDebugId !== undefined
+      ? await requestGroupGrab(transport, root, engineId, nextId, grab.appDir, grab.nonce, grab.groupDebugId)
+      : grab ? await requestLeafGrabs(transport, root, engineId, nextId, grab.appDir, grab.nonce, signal) : { grabs: [], failed: false };
+    return { root, grabs: result.grabs, grabFailed: result.failed };
   } finally {
     transport.close();
   }

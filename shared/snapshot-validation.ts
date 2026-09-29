@@ -49,7 +49,7 @@ export function isUiSnapshot(value: unknown): value is UiSnapshot {
     && isNullableString(value.screenshotDataUrl)
     && isNullableString(value.error)
     && isNullableString(value.warning)
-    && (value.inspectionSource === undefined || ["uiautomator", "debug-view", "debug-qml"].includes(value.inspectionSource as string))
+    && (value.inspectionSource === undefined || ["uiautomator", "debug-view", "debug-qml", "debug-hybrid"].includes(value.inspectionSource as string))
     && (value.hierarchyDumpMode === undefined || ["full", "compressed"].includes(value.hierarchyDumpMode as string))
     && (value.captureDurationMs === undefined || (typeof value.captureDurationMs === "number" && Number.isFinite(value.captureDurationMs) && value.captureDurationMs >= 0))
     && (value.captureTimings === undefined || (isRecord(value.captureTimings) && Object.values(value.captureTimings).every(duration => typeof duration === "number" && Number.isFinite(duration) && duration >= 0)))

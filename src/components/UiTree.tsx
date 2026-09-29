@@ -1,6 +1,6 @@
 import { memo, useCallback, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, SetStateAction } from "react";
-import { nodeDisplayLabel, nodeShortClass } from "../../shared/tree-utils";
+import { nodeDisplayLabel, nodeShortClass, treeNodeKind } from "../../shared/tree-utils";
 import { collapseTreeBranch, expandAncestors, indexTree, nearestVisibleId, scrollToTreeRow, TREE_ROW_HEIGHT, TREE_VIRTUAL_THRESHOLD, treeWindow, visibleTreeRows } from "../../shared/visible-tree";
 import type { TreeRow } from "../../shared/visible-tree";
 import type { UiNode } from "../../shared/types";
@@ -20,12 +20,33 @@ type UiTreeProps = {
 
 const FILTER_EXPANDED: ReadonlySet<string> = new Set();
 
-function treeNodeKind(node: UiNode, hasChildren: boolean) {
-  const className = nodeShortClass(node);
-  if (/Image(View|Button)$/.test(className)) return "image";
-  if (/(TextView|EditText|Button)$/.test(className)) return "text";
-  return hasChildren ? "container" : "leaf";
-}
+const TREE_ICONS: Record<ReturnType<typeof treeNodeKind>, { label: string; path: string }> = {
+  activity: { label: "应用页面", path: "M2 2.5h12v11H2zM2 5.5h12M4 4h.01M6 4h.01M5 8h6M5 10.5h4" },
+  window: { label: "窗口", path: "M3.5 1.5h11v10M1.5 4.5h10v10h-10zM1.5 7h10" },
+  linear: { label: "线性布局", path: "M2 2h12v12H2zM2 6h12M2 10h12" },
+  frame: { label: "叠放布局", path: "M2 2h9v9H2zM5 5h9v9H5z" },
+  constraint: { label: "约束 / 相对布局", path: "M5.5 5.5h5v5h-5zM8 1.5v4M8 10.5v4M1.5 8h4M10.5 8h4M6 1.5h4M6 14.5h4M1.5 6v4M14.5 6v4" },
+  drawer: { label: "抽屉 / 滑动面板", path: "M2 2.5h12v11H2zM6 2.5v11M8 8h4M10 6l2 2-2 2" },
+  pager: { label: "分页容器", path: "M4 2.5h8v9H4zM1.5 4v6M14.5 4v6M5 14h.01M8 14h.01M11 14h.01" },
+  list: { label: "列表", path: "M2 3h1M6 3h8M2 8h1M6 8h8M2 13h1M6 13h8" },
+  grid: { label: "网格", path: "M2 2h4.5v4.5H2zM9.5 2H14v4.5H9.5zM2 9.5h4.5V14H2zM9.5 9.5H14V14H9.5z" },
+  scroll: { label: "滚动区域", path: "M10 2H2v12h8M5 5h3M5 8h3M5 11h3M13 2v12M11 4l2-2 2 2M11 12l2 2 2-2" },
+  text: { label: "文字", path: "M3 4V2.5h10V4M8 2.5v11M5.5 13.5h5" },
+  image: { label: "图片", path: "M2 2h12v12H2zM2 12l4-4 3 3 2-3 3 4M5 5h.01" },
+  input: { label: "输入框", path: "M9 4H2v8h7M13 4h1v8h-1M4 8h3M9 2h4M11 2v12M9 14h4" },
+  button: { label: "按钮", path: "M3.5 4h9a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM5 8h6" },
+  checkbox: { label: "复选框", path: "M2.5 2.5h11v11h-11zM5 8l2 2 4-4" },
+  radio: { label: "单选框", path: "M13.5 8a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0M10 8a2 2 0 1 1-4 0 2 2 0 0 1 4 0" },
+  switch: { label: "开关", path: "M5 4h6a4 4 0 0 1 0 8H5a4 4 0 0 1 0-8zM7 8a2 2 0 1 1-4 0 2 2 0 0 1 4 0" },
+  slider: { label: "滑块", path: "M1.5 8H6M10 8h4.5M6 5h4v6H6z" },
+  progress: { label: "进度条 / 加载指示", path: "M1.5 5h13v6h-13zM4 7v2M6.5 7v2M9 7v2" },
+  web: { label: "网页", path: "M2 2h12v12H2zM2 5h12M6 7l-2 2 2 2M10 7l2 2-2 2" },
+  video: { label: "视频画面", path: "M2 2.5h12v11H2zM6.5 5l4 3-4 3z" },
+  surface: { label: "独立渲染画面", path: "M2 2h12v10H2zM5 14h6M8 12v2M4 6l2-2M4 9l5-5M8 9l4-4" },
+  stub: { label: "延迟加载占位", path: "M2.5 5v-2.5H5M11 2.5h2.5V5M13.5 11v2.5H11M5 13.5H2.5V11M5.5 8h5M8 5.5v5" },
+  container: { label: "容器", path: "M1.5 4h5l1.5-2h6.5v11h-13zM1.5 6h13" },
+  leaf: { label: "普通控件", path: "M2.5 2.5h11v11h-11zM5.5 5.5h5v5h-5z" },
+};
 
 type RowProps = {
   row: TreeRow;
@@ -44,12 +65,13 @@ const UiTreeRow = memo(function UiTreeRow({ row, domId, selected, active, expand
   const shortClass = nodeShortClass(node);
   const label = nodeDisplayLabel(node);
   const hasSecondaryLabel = label !== shortClass;
-  const resourceLabel = !node.text?.trim() && !node.contentDesc?.trim() && Boolean(node.resourceId);
-  const kind = treeNodeKind(node, hasChildren);
+  const resourceLabel = !node.attributes?.["debug-name"]?.trim() && !node.text?.trim() && !node.contentDesc?.trim() && Boolean(node.resourceId);
+  const kind = treeNodeKind(node);
+  const icon = TREE_ICONS[kind];
   const muted = !node.visibleToUser || !node.enabled;
   // ponytail: cap deep indentation so Android trees stay readable in a narrow inspector rail.
   const visualDepth = Math.min(depth, 7);
-  const title = [label, node.className, node.resourceId, node.contentDesc, `#${node.id} · 第 ${depth + 1} 层`, node.clickable && "可点击"].filter(Boolean).join("\n");
+  const title = [label, icon.label, node.className, node.resourceId, node.contentDesc, `#${node.id} · 第 ${depth + 1} 层`, node.clickable && "可点击"].filter(Boolean).join("\n");
   return (
     <div
       id={domId}
@@ -61,7 +83,7 @@ const UiTreeRow = memo(function UiTreeRow({ row, domId, selected, active, expand
       aria-setsize={row.setSize}
       aria-expanded={hasChildren ? expanded : undefined}
       aria-selected={selected}
-      aria-label={[label, hasSecondaryLabel && shortClass, node.clickable && "可点击", !node.enabled && "不可用", !node.visibleToUser && "不可见"].filter(Boolean).join("，")}
+      aria-label={[label, icon.label, hasSecondaryLabel && shortClass, node.clickable && "可点击", !node.enabled && "不可用", !node.visibleToUser && "不可见"].filter(Boolean).join("，")}
       data-tree-kind={kind}
       className={`tree-row tree-kind-${kind} ${hasSecondaryLabel ? "has-secondary-label" : ""} ${muted ? "is-muted" : ""} ${selected ? "selected" : ""} ${active ? "active" : ""}`}
       style={{ paddingLeft: 8 + visualDepth * 12, "--tree-indent": `${visualDepth * 12}px` } as CSSProperties}
@@ -81,8 +103,9 @@ const UiTreeRow = memo(function UiTreeRow({ row, domId, selected, active, expand
         }}
         onDoubleClick={(event) => event.stopPropagation()}
       >{hasChildren ? (expanded ? "▾" : "▸") : ""}</span>
-      <svg className="tree-node-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <path d={kind === "text" ? "M3 3h10M8 3v10M6 13h4" : kind === "image" ? "M2.5 2.5h11v11h-11zM3 11l3-3 2 2 2-3 3 4M5 5h.01" : kind === "container" ? "M2.5 4.5h9v9h-9zM5 2.5h8.5V11" : "M3 3h10v10H3z"} />
+      <svg className="tree-node-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+        <title>{icon.label} · {shortClass}</title>
+        <path d={icon.path} />
       </svg>
       <span className="tree-row-content">
         <span className={`tree-primary ${hasSecondaryLabel ? "tree-label" : "tree-class"} ${resourceLabel ? "is-resource" : ""}`}>{label}</span>

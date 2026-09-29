@@ -1,9 +1,39 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createTree, makeNode } from "../benchmarks/fixtures";
-import { filterTree, flattenNodes, selectionInBranch, type TreeFilter } from "../shared/tree-utils";
+import { filterTree, flattenNodes, nodeDisplayLabel, selectionInBranch, treeNodeKind, type TreeFilter } from "../shared/tree-utils";
 
 const noFilter: TreeFilter = { query: "", interactiveOnly: false, identifiedOnly: false };
+
+test("tree icons describe control types independently of labels, clickability and expansion", () => {
+  const node = { ...makeNode("0"), text: "播放视频", resourceId: "app:id/video_background_view", clickable: true, scrollable: false };
+  const cases = [
+    ["HomeActivity", "activity"], ["PhoneWindow$DecorView", "window"], ["ViewStubCompat", "stub"],
+    ["LinearLayout", "linear"], ["IsolationFrameLayout", "frame"], ["ConstraintLayout", "constraint"],
+    ["RelativeLayout", "constraint"], ["KwaiSlidingPaneLayout", "drawer"], ["DrawerLayout", "drawer"],
+    ["ViewPager", "pager"], ["ViewPager2", "pager"], ["RecyclerView", "list"], ["GridView", "grid"],
+    ["NestedScrollView", "scroll"], ["TextInputEditText", "input"], ["AppCompatImageButton", "button"],
+    ["MaterialButton", "button"], ["MaterialCheckBox", "checkbox"], ["RadioButton", "radio"],
+    ["SwitchCompat", "switch"], ["MaterialSwitch", "switch"], ["AppCompatSeekBar", "slider"],
+    ["ProgressBar", "progress"], ["CircularProgressIndicator", "progress"],
+    ["WebView", "web"], ["PlayerView", "video"], ["GLSurfaceView", "surface"], ["TextureView", "surface"],
+    ["AppCompatImageView", "image"], ["SimpleDraweeView", "image"], ["MaterialTextView", "text"],
+    ["ViewGroup", "container"], ["CoordinatorLayout", "container"], ["View", "leaf"],
+    ["QQuickImage", "image"], ["QQuickText", "text"], ["QQuickTextField_QMLTYPE_42", "input"],
+    ["Button_QMLTYPE_7", "button"], ["QQuickColumn", "linear"], ["QQuickItem", "container"],
+  ];
+  for (const [name, expected] of cases) {
+    node.className = `example.${name}`;
+    assert.equal(treeNodeKind(node), expected, name);
+    assert.equal(treeNodeKind({ ...node, clickable: false, visibleToUser: false, enabled: false }), expected, `state changed ${name}'s type`);
+  }
+  node.className = "example.CustomWidget";
+  assert.equal(treeNodeKind(node), "leaf", "a video label or clickable flag must not invent a video/button type");
+  assert.equal(treeNodeKind({ ...node, scrollable: true }), "scroll");
+  assert.equal(treeNodeKind({ ...node, children: [makeNode("0/0")] }), "container");
+  assert.equal(treeNodeKind({ ...node, className: "android.widget.FrameLayout", children: [] }), "frame", "an empty layout is still a layout");
+  assert.equal(treeNodeKind({ ...node, className: null }), "leaf");
+});
 
 test("fixture sizes and flattened preorder are deterministic", () => {
   for (const size of [1, 1_000, 25_000]) {
@@ -57,6 +87,21 @@ test("query, interactive and identified filters combine on the same node", () =>
   assert.equal(filterTree(root, { query: "wanted", interactiveOnly: true, identifiedOnly: true }), root);
   child.text = null;
   assert.equal(filterTree(root, { ...noFilter, identifiedOnly: true }), null);
+});
+
+test("explicit Debug name wins without replacing real text, class or resource ID", () => {
+  const node = makeNode("0");
+  node.text = "原文本";
+  node.resourceId = "app:id/real_id";
+  node.attributes = { "debug-name": "业务名称" };
+  assert.equal(nodeDisplayLabel(node), "业务名称");
+  assert.equal(filterTree(node, { ...noFilter, query: "业务名称" }), node);
+  node.text = null;
+  node.resourceId = null;
+  node.contentDesc = null;
+  assert.equal(filterTree(node, { ...noFilter, identifiedOnly: true }), node);
+  delete node.attributes["debug-name"];
+  assert.equal(nodeDisplayLabel(node), "ViewGroup");
 });
 
 test("deep input is traversed without recursive stack overflow", () => {

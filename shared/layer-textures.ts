@@ -1,5 +1,12 @@
 import type { UiNode } from "./types";
 
+export function layerPlaneOpacity(node: Pick<UiNode, "attributes">, collapsed: boolean, hasGroupImage: boolean) {
+  // Qt grabToImage omits the captured item's own opacity; a locally composed subtree already includes it.
+  if (collapsed && !hasGroupImage) return 1;
+  const value = Number(node.attributes?.["effective-alpha"] ?? 1);
+  return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 1;
+}
+
 export function layerOrdering(node: UiNode, fallback = Number.POSITIVE_INFINITY) {
   for (const key of ["drawing-order", "drawingOrder", "drawing_order"]) {
     const raw = node.attributes?.[key];

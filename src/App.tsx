@@ -19,6 +19,7 @@ function formatBytes(bytes: number) {
 }
 
 function inspectionSourceLabel(snapshot: UiSnapshot) {
+  if (snapshot.inspectionSource === "debug-hybrid") return "SDK 树 + 独立画面";
   if (snapshot.inspectionSource === "debug-qml") return "QML Debug";
   if (snapshot.inspectionSource === "debug-view") return "View Debug";
   if (snapshot.hierarchyDumpMode === "full") return "完整 hierarchy";
@@ -244,14 +245,35 @@ function App() {
   const [selectedSerial, setSelectedSerial] = useState<string | null>(null);
   const [preferredSerial, setPreferredSerial] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<UiSnapshot | null>(null);
+  const [qmlLiveRequestId, setQmlLiveRequestId] = useState<string | null>(null);
+  const [viewLiveRequestId, setViewLiveRequestId] = useState<string | null>(null);
+  const [viewRefreshingNodeId, setViewRefreshingNodeId] = useState<string | null>(null);
+  const viewRefreshActiveRef = useRef(false);
+  const [viewRefreshStatus, setViewRefreshStatus] = useState<{ nodeId: string; message: string } | null>(null);
+  const [warningDismissed, setWarningDismissed] = useState(false);
   const [selectedNode, setSelectedNode] = useState<UiNode | null>(null);
   const [inspectionLoading, setInspectionLoading] = useState(false);
   const activeInspectionRef = useRef<string | null>(null);
+  const previewShownRef = useRef(false);
   const inspectionStartedRef = useRef(0);
   const [inspectionStage, setInspectionStage] = useState("连接 Debug App");
   const [inspectionElapsed, setInspectionElapsed] = useState(0);
   useEffect(() => window.electronApi.onInspectionProgress((progress) => {
     if (progress.requestId === activeInspectionRef.current) setInspectionStage(progress.stage);
+  }), []);
+  useEffect(() => window.electronApi.onInspectionPreview(({ requestId, snapshot: preview }) => {
+    if (requestId !== activeInspectionRef.current || !preview.root) return;
+    const first = !previewShownRef.current;
+    previewShownRef.current = true;
+    setSnapshot(preview);
+    if (first) {
+      setSelectedNode(preview.root);
+      setTreeExpandedIds(expandedTreeNodeIds(preview.root));
+    } else {
+      const nodes = flattenNodes(preview.root);
+      setSelectedNode((current) => (current && nodes.get(current.id)) ?? preview.root);
+      setTreeExpandedIds((current) => new Set([...current].filter((id) => nodes.has(id))));
+    }
   }), []);
   useEffect(() => {
     if (!inspectionLoading) return;
@@ -264,6 +286,12 @@ function App() {
   const cancelInspection = useCallback(() => {
     const requestId = activeInspectionRef.current;
     activeInspectionRef.current = null;
+    if (previewShownRef.current) {
+      setSnapshot(null);
+      setSelectedNode(null);
+      setTreeExpandedIds(new Set());
+    }
+    previewShownRef.current = false;
     if (requestId) void window.electronApi.cancelInspection(requestId);
     setInspectionLoading(false);
     if (requestId) setInspectionError("已取消采集，可以重新开始。");
@@ -275,6 +303,7 @@ function App() {
   const [interactiveOnly, setInteractiveOnly] = useState(false);
   const [identifiedOnly, setIdentifiedOnly] = useState(false);
   const [treeSession, setTreeSession] = useState(0);
+  useEffect(() => setWarningDismissed(false), [treeSession]);
   const [treeExpandedIds, setTreeExpandedIds] = useState<ReadonlySet<string>>(new Set());
   const [treeRevealRequest, setTreeRevealRequest] = useState(0);
   const [sceneToolbarHost, setSceneToolbarHost] = useState<HTMLDivElement | null>(null);
@@ -311,6 +340,9 @@ function App() {
       setDebugState(event.state);
       if (!event.snapshot) return;
       liveSnapshotRef.current = event.snapshot;
+      setQmlLiveRequestId(null);
+      setViewLiveRequestId(null);
+      setWarningDismissed(false);
       setMcpSharing(false);
       setPreferredSerial(event.state.serial);
       setSelectedSerial(event.state.serial);
@@ -361,9 +393,11 @@ function App() {
   }, []);
 
   const inspectDevice = useCallback(async (serial: string) => {
+    currentSnapshotRef.current = null;
     if (activeInspectionRef.current) void window.electronApi.cancelInspection(activeInspectionRef.current);
     const requestId = crypto.randomUUID();
     activeInspectionRef.current = requestId;
+    previewShownRef.current = false;
     inspectionStartedRef.current = performance.now();
     setInspectionStage("连接 Debug App");
     setInspectionElapsed(0);
@@ -371,6 +405,9 @@ function App() {
     setPreferredSerial(serial);
     setSelectedSerial(serial);
     setSnapshot(null);
+    setQmlLiveRequestId(null);
+    setViewLiveRequestId(null);
+    setViewRefreshStatus(null);
     setSelectedNode(null);
     setTreeExpandedIds(new Set());
     setInspectionError(null);
@@ -387,14 +424,29 @@ function App() {
     try {
       const result = await window.electronApi.inspectDevice(serial, requestId);
       if (activeInspectionRef.current !== requestId) return;
+      const hadPreview = previewShownRef.current;
       setSnapshot(result);
-      setSelectedNode(result.root);
-      setTreeExpandedIds(result.root ? expandedTreeNodeIds(result.root) : new Set());
+      setQmlLiveRequestId(result.inspectionSource === "debug-qml" && result.root?.attributes?.["qml-process-id"] ? requestId : null);
+      setViewLiveRequestId((result.inspectionSource === "debug-view" || result.inspectionSource === "debug-hybrid")
+        && result.root?.attributes?.["debug-process-id"] && result.root.attributes["debug-window-name"] ? requestId : null);
+      if (hadPreview && result.root) {
+        const nodes = flattenNodes(result.root);
+        setSelectedNode((current) => (current && nodes.get(current.id)) ?? result.root);
+        setTreeExpandedIds((current) => new Set([...current].filter((id) => nodes.has(id))));
+      } else {
+        setSelectedNode(result.root);
+        setTreeExpandedIds(result.root ? expandedTreeNodeIds(result.root) : new Set());
+      }
       if (result.error) {
         setInspectionError(result.error);
       }
     } catch (error) {
       if (activeInspectionRef.current !== requestId) return;
+      if (previewShownRef.current) {
+        setSnapshot(null);
+        setSelectedNode(null);
+        setTreeExpandedIds(new Set());
+      }
       setInspectionError(
         typeof error === "string" ? error : "读取 UI hierarchy 失败，请确认设备仍保持连接。",
       );
@@ -407,10 +459,14 @@ function App() {
   }, []);
 
   const closeInspector = useCallback(() => {
+    currentSnapshotRef.current = null;
     void stopMcpSharing();
     cancelInspection();
     setSelectedSerial(null);
     setSnapshot(null);
+    setQmlLiveRequestId(null);
+    setViewLiveRequestId(null);
+    setViewRefreshStatus(null);
     setSelectedNode(null);
     setTreeExpandedIds(new Set());
     setInspectionError(null);
@@ -433,6 +489,45 @@ function App() {
     if (node.children.length === 0) return;
     setTreeExpandedIds((previous) => previous.has(node.id) ? previous : new Set([...previous, node.id]));
   }, []);
+
+  const requestQmlGroup = useCallback((node: UiNode) => qmlLiveRequestId
+    ? window.electronApi.captureQmlGroup(qmlLiveRequestId, node.id)
+    : Promise.resolve(null), [qmlLiveRequestId]);
+
+  const refreshViewNode = useCallback(async (node: UiNode, scope: "node" | "branch" = "node") => {
+    if (!snapshot?.root || !viewLiveRequestId || viewRefreshActiveRef.current || inspectionLoading) return;
+    viewRefreshActiveRef.current = true;
+    const sourceSnapshot = snapshot;
+    const sourceRoot = snapshot.root;
+    setViewRefreshingNodeId(node.id);
+    setViewRefreshStatus(null);
+    try {
+      const result = await window.electronApi.refreshViewNode(viewLiveRequestId, node.id, scope);
+      if (currentSnapshotRef.current !== sourceSnapshot || activeInspectionRef.current) return;
+      const sourceNodes = flattenNodes(sourceRoot);
+      const validId = (id: string) => sourceNodes.has(id) && (id === node.id || scope === "branch" && id.startsWith(`${node.id}/`));
+      if (!result.nodes.length || result.nodes.some(updated => !validId(updated.id)) || result.failures.some(failure => !validId(failure.id)))
+        throw new Error("控件已变化，请重新采集整页。");
+      const updates = new Map(result.nodes.map(updated => [updated.id, updated]));
+      for (const failure of result.failures) {
+        const old = sourceNodes.get(failure.id)!;
+        updates.set(failure.id, { ...old, attributes: { ...old.attributes, "image-refresh-error": failure.message } });
+      }
+      const replace = (current: UiNode): UiNode => {
+        const children = current.children.map(replace);
+        const updated = updates.get(current.id);
+        return updated ? { ...updated, children } : children.some((child, index) => child !== current.children[index]) ? { ...current, children } : current;
+      };
+      const replacement = replace(sourceRoot);
+      setSnapshot({ ...sourceSnapshot, root: replacement });
+      setSelectedNode(current => current ? findNodePath(replacement, current.id)?.at(-1) ?? current : current);
+      setViewRefreshStatus({ nodeId: node.id, message: scope === "branch"
+        ? `已刷新 ${result.nodes.length} 层${result.failures.length ? `，${result.failures.length} 层失败并保留旧画面` : ""}`
+        : "已刷新当前控件" });
+    } catch (error) {
+      if (currentSnapshotRef.current === sourceSnapshot) setViewRefreshStatus({ nodeId: node.id, message: error instanceof Error ? error.message : "当前控件刷新失败" });
+    } finally { viewRefreshActiveRef.current = false; setViewRefreshingNodeId(null); }
+  }, [snapshot, viewLiveRequestId, inspectionLoading]);
 
   useEffect(() => {
     void refreshDevices();
@@ -633,11 +728,15 @@ function App() {
   }, []);
 
   const viewSavedSnapshot = useCallback((entry: SavedSnapshot) => {
+    currentSnapshotRef.current = null;
     void stopMcpSharing();
     setTreeSession((value) => value + 1);
     setPreferredSerial(entry.snapshot.serial);
     setSelectedSerial(entry.snapshot.serial);
     setSnapshot(entry.snapshot);
+    setQmlLiveRequestId(null);
+    setViewLiveRequestId(null);
+    setViewRefreshStatus(null);
     setSelectedNode(entry.snapshot.root);
     setTreeExpandedIds(entry.snapshot.root ? expandedTreeNodeIds(entry.snapshot.root) : new Set());
     setInspectionError(entry.snapshot.error);
@@ -765,7 +864,6 @@ function App() {
         onRefresh={() => void refreshDevices()}
         onCapture={captureSelected}
         onSearchChange={setTreeQuery}
-        setSceneToolbarHost={setSceneToolbarHost}
       />
 
       {selectedSerial && sceneToolbarHost ? createPortal(debugControls, sceneToolbarHost) : <aside className="debug-home-controls">{debugControls}</aside>}
@@ -790,11 +888,15 @@ function App() {
               </div>
               <div className="inspector-heading-meta">
                 <span className="snapshot-summary">{snapshot ? `${snapshot.nodeCount} nodes · ${formatBytes(snapshot.xmlSize)} · ${inspectionSourceLabel(snapshot)}` : "读取中"}</span>
+                {inspectionLoading && snapshot?.root && <>
+                  <span role="status" title={inspectionStage}>{inspectionStage} · {inspectionElapsed}s</span>
+                  <button className="tree-clear" type="button" onClick={cancelInspection}>取消采集</button>
+                </>}
                 <button className="close-button" type="button" onClick={closeInspector}>返回设备</button>
               </div>
             </div>
 
-            {inspectionLoading ? (
+            {inspectionLoading && !snapshot?.root ? (
               <div className="inspector-grid inspector-state-grid">
                 <div className="tree-pane inspector-state-pane">
                   <div className="workspace-empty-copy">
@@ -840,7 +942,13 @@ function App() {
               </div>
             ) : snapshot?.root ? (
               <>
-                {snapshot.warning && <div className="snapshot-warning">{snapshot.warning}</div>}
+                {snapshot.warning && !warningDismissed && <div className="snapshot-warning">
+                  <span className="snapshot-warning-message" role="status">{snapshot.warning}</span>
+                  <button className="snapshot-warning-dismiss" type="button" aria-label="关闭采集提示" title="关闭提示" onClick={() => {
+                    setWarningDismissed(true);
+                    document.querySelector<HTMLInputElement>(".tree-search")?.focus();
+                  }}>×</button>
+                </div>}
                 <div className="inspector-grid is-resizable">
                   <div className="tree-pane" id="hierarchy-pane" aria-label="层级树">
                     <div className="tree-tools">
@@ -882,6 +990,7 @@ function App() {
                   <TreePaneResizer />
 
                   <div className="preview-pane">
+                    <div className="scene-toolbar-host" ref={setSceneToolbarHost} role="group" aria-label="画布工具栏" />
                     <div className="subpanel-heading">
                       <span>设备画面</span>
                       <span className="tree-hint">{selectedSerial}</span>
@@ -909,11 +1018,11 @@ function App() {
                           </div>
                           <div className="snapshot-actions">
                             {window.electronApi.shareMcpSnapshot && <>
-                              <button className="close-button" type="button" onClick={() => void shareMcpSnapshot()} disabled={mcpBusy || debugState?.active}>共享当前快照给 MCP</button>
+                              <button className="close-button" type="button" onClick={() => void shareMcpSnapshot()} disabled={inspectionLoading || mcpBusy || debugState?.active}>共享当前快照给 MCP</button>
                               <button className="close-button" type="button" onClick={() => void stopMcpSharing()} disabled={!mcpSharing}>停止 MCP 共享</button>
                               <button className="close-button" type="button" onClick={() => void copyMcpConfig()}>复制 MCP 配置</button>
                             </>}
-                            <button className="close-button" type="button" onClick={() => void saveCurrentSnapshot()} disabled={snapshotsLoading}>保存快照</button>
+                            <button className="close-button" type="button" onClick={() => void saveCurrentSnapshot()} disabled={inspectionLoading || snapshotsLoading}>保存快照</button>
                             <button className="close-button" type="button" onClick={() => void clearSavedSnapshots()} disabled={snapshotsLoading || (savedSnapshots.length === 0 && !snapshotStoreError)}>清空记录</button>
                           </div>
                         </div>
@@ -969,8 +1078,9 @@ function App() {
                       </div>
                     </details>, sceneToolbarHost)}
                     {snapshot.screenshotDataUrl ? (
-                      <ScreenshotPreview key={treeSession} src={snapshot.screenshotDataUrl} root={snapshot.root}
-                        selectedNode={selectedNode} expandedNodeIds={treeExpandedIds} geometry={snapshot.captureGeometry} layersAvailable={snapshot.captureMode !== "fast"} toolbarHost={sceneToolbarHost} onSelect={handleScreenshotSelect} onExpand={handleLayerExpand} />
+                      <ScreenshotPreview key={treeSession} sessionKey={treeSession} src={snapshot.screenshotDataUrl} root={snapshot.root}
+                        selectedNode={selectedNode} expandedNodeIds={treeExpandedIds} geometry={snapshot.captureGeometry} layersAvailable={snapshot.captureMode !== "fast"} toolbarHost={sceneToolbarHost} onSelect={handleScreenshotSelect} onExpand={handleLayerExpand}
+                        onCaptureGroup={qmlLiveRequestId && snapshot.inspectionSource === "debug-qml" ? requestQmlGroup : undefined} />
                     ) : <div className="screenshot-frame"><div className="no-screenshot">截图不可用</div></div>}
                     {detailNode && (
                       <NodePropertiesPanel
@@ -980,6 +1090,10 @@ function App() {
                         toolbarHost={sceneToolbarHost}
                         onCopy={() => void copyValue("节点 JSON", selectorData?.json ?? nodeJson(detailNode))}
                         copyStatus={copyStatus}
+                        onRefresh={viewLiveRequestId && detailNode.attributes?.["view-ref"] && !inspectionLoading && !debugState?.active ? () => void refreshViewNode(detailNode) : undefined}
+                        onRefreshBranch={snapshot.inspectionSource === "debug-view" && viewLiveRequestId && detailNode.children.length > 0 && detailNode.attributes?.["view-ref"] && !inspectionLoading && !debugState?.active ? () => void refreshViewNode(detailNode, "branch") : undefined}
+                        refreshBusy={viewRefreshingNodeId !== null}
+                        refreshStatus={viewRefreshStatus?.nodeId === detailNode.id ? viewRefreshStatus.message : null}
                       >
                         {detailAttributes.length > 0 ? (
                           <details className="node-attributes">
@@ -1016,9 +1130,9 @@ function App() {
                             </div>
                             <div className="selector-actions">
                               <button type="button" onClick={() => void copyValue("节点 JSON", selectorData.json)}>复制节点 JSON</button>
-                              <button type="button" onClick={() => void exportCurrentSnapshot("json")}>导出 JSON</button>
-                              <button type="button" onClick={() => void exportCurrentSnapshot("xml")} disabled={!snapshot.rawXml}>导出 XML</button>
-                              <button type="button" onClick={() => void exportCurrentSnapshot("png")} disabled={!snapshot.screenshotDataUrl}>导出 PNG</button>
+                              <button type="button" onClick={() => void exportCurrentSnapshot("json")} disabled={inspectionLoading}>导出 JSON</button>
+                              <button type="button" onClick={() => void exportCurrentSnapshot("xml")} disabled={inspectionLoading || !snapshot.rawXml}>导出 XML</button>
+                              <button type="button" onClick={() => void exportCurrentSnapshot("png")} disabled={inspectionLoading || !snapshot.screenshotDataUrl}>导出 PNG</button>
                             </div>
                             {exportStatus && <p className="export-status">{exportStatus}</p>}
                           </div>

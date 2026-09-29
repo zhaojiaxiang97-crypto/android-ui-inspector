@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { subtreeImageNodes, textureDimensions } from "../shared/layer-textures";
+import { layerPlaneOpacity, subtreeImageNodes, textureDimensions } from "../shared/layer-textures";
+
+test("live Qt group applies the root opacity once; local composite does not double it", () => {
+  const node = { attributes: { "effective-alpha": "0.5" } };
+  assert.equal(layerPlaneOpacity(node, true, true), 0.5);
+  assert.equal(layerPlaneOpacity(node, true, false), 1);
+  assert.equal(layerPlaneOpacity(node, false, false), 0.5);
+});
 import type { UiNode } from "../shared/types";
 
 test("texture allocations obey pixel/dimension limits and preserve small images", () => {

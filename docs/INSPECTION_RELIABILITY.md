@@ -40,7 +40,7 @@
 - DDMS 位图记录大多没有对象身份。歧义节点暂时保留边框，完整解决需要可返回每节点身份的采集通道。
 - 不支持任意变换矩阵、未暴露的 outline/圆角裁剪与自定义绘制顺序；不承诺逐像素还原任意自绘组件。相关字段未知时不编造值。
 - 树、独立位图、视频和整屏截图不是同一时刻。检查前台 Activity 变化不能覆盖所有动画或同一 Activity 内的布局变化。
-- QML Rectangle/Window 已补齐真实样式重建（见下文）；其他叶节点截图近似仍存在，复杂自绘尚无独立截图通道。Compose/Flutter/WebView 内部树未接入。
+- QML Rectangle/Window 已补齐真实样式重建；文字、图片等无可视子项的控件可取独立 PNG。缺图节点保留边框，不再使用整屏裁剪近似；带子项的复杂自绘仍无自身独立截图通道。Compose/Flutter/WebView 内部树未接入。
 - 保留单文件快照存储，尚未改为图片去重或增量存储。
 
 原生属性与裁剪语义参考 [AOSP View](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/view/View.java) 和 [AOSP ViewGroup](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/view/ViewGroup.java)。
@@ -171,6 +171,8 @@ Qt 默认 QQuickPen 会返回黑色/1px，但其内部启用状态不通过 QML 
 
 ## 连续采集超时：第二轮（2026-09-26）
 
+> 以下为当时的临时规避方案，已由下一节的 V2 属性导出与独立补采替代。
+
 根因不是属性解析本身，而是自动补采阶段的旧 JDWP 路径。即使只发送 `VirtualMachine/IDSizes`，Android 14 真机上的目标进程后续也可能让 `ViewDebug.dumpViewHierarchy` 超时，最终返回没有 `DONE.` 的半截属性树。
 
 - 自动补采改为只使用 DDMS `VUOP` 定点截图；不再在正常采集链路中发送 JDWP 类查找、断点、对象调用或 `Dispose`。
@@ -179,3 +181,26 @@ Qt 默认 QQuickPen 会返回黑色/1px，但其内部启用状态不通过 QML 
 - 103 项单元测试通过，生产构建通过。
 
 限制：自动链路现在优先保证连续采集稳定性；受保护 Surface 或 OpenGL 外部缓冲仍可能只能得到 DDMS 可见结果或边框，不再用会污染下一轮调试状态的 JDWP 方式强行补采。
+
+## 独立背景与视频恢复（2026-09-27）
+
+第二轮只保留叶子截图，导致父容器自身画面没有补采；TextureView 的 DDMS 透明占位图又被误记为成功，因此视频没有进入真实缓冲读取。
+
+进一步复测发现：进入调试模式后，旧完整属性导出卡在注解反射路径；并非所有层级导出都会失效。Android 的 V2 导出直接调用 `View.encode`，在同一进程中连续执行仍约 1 秒。依据：[AOSP ViewDebug](https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android-14.0.0_r1/core/java/android/view/ViewDebug.java)、[ViewHierarchyEncoder](https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android-14.0.0_r1/core/java/android/view/ViewHierarchyEncoder.java)。
+
+本轮修正：
+
+- 完整属性使用 V2 二进制导出，复用现有节点转换流程。校验完整尾部、对象身份、数量和深度；解析二维变换与父级滚动，无法还原的三维变换不猜坐标。轻量根身份探测保留。
+- 恢复已有的按对象身份补采：普通 View 使用 `skipChildren=true`，包含缺图的父容器；视频按真实继承关系读取自身缓冲。删除临时叶子 DDMS 补采路径。
+- 读取真实 `PFLAG_SKIP_DRAW` 区分结构容器；普通透明位图可合法保留，视频返回全透明像素则提示未确认取得画面。补采中途断线也保留先前成功图片。
+- 保留 64 个节点、400 万像素、15 秒补采限制，以及安全窗口拒绝、取消和资源释放。不复制父层或整屏内容填充子层。
+
+验证：
+
+- Android 14 同一进程连续三轮完整采集均成功，无需重启手机 App：26.15 / 26.11 / 26.01 秒，每轮 1037 个节点、130 张位图，两张 TextureView 均为 1247×2218，无图片采集错误。
+- 人工检查独立视频不含头像、点赞等上层控件；补采的 10 个父容器中 9 个实际透明，另一个只含自己的红色角标。不能把这些透明容器称为背景丢失。
+- 最后一轮只剩 2 个歧义节点，均在屏幕外；不放宽同名同坐标的匹配要求。
+- 104 项单测、树与采集生命周期交互检查、生产构建通过。新增二进制解析、变换、真实继承关系、透明视频拒绝、结构容器识别与部分失败保留回归。
+- macOS arm64 打包与签名校验通过，重启后从桌面再次采集成功；3D 中可见独立视频，TextureView 属性显示“已采集独立画面，含可见像素”。已清除临时搜索，程序保持在完整展开视图。
+
+边界：上述是当前 Android 14 测试页结果，不代表所有机型；采集仍不是同帧快照，Qt/QML 路径未改变。Surface/受保护缓冲与三维控件变换的限制仍保留。原始报告和图片只存于忽略目录 `.benchmarks/`，不随代码提交。

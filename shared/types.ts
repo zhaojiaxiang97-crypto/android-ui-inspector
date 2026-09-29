@@ -69,9 +69,10 @@ export type UiBounds = {
 };
 
 export type PixelSize = { width: number; height: number };
+export type QmlGroupImage = { dataUrl: string; size: PixelSize; capturedAt: string };
 export type DisplayRotation = 0 | 1 | 2 | 3;
 export type HierarchyDumpMode = "full" | "compressed";
-export type InspectionSource = "uiautomator" | "debug-view" | "debug-qml";
+export type InspectionSource = "uiautomator" | "debug-view" | "debug-qml" | "debug-hybrid";
 export type DisplayFrame = PixelSize & { rotation: DisplayRotation };
 export type CaptureGeometry = {
   hierarchyRotation: DisplayRotation | null;
@@ -107,6 +108,8 @@ export type UiNode = {
   children: UiNode[];
 };
 
+export type ViewRefreshResult = { nodes: UiNode[]; failures: { id: string; message: string }[] };
+
 export type UiSnapshot = {
   serial: string;
   root: UiNode | null;
@@ -129,6 +132,7 @@ export type UiSnapshot = {
 };
 
 export type InspectionProgress = { requestId: string; stage: string; elapsedMs: number };
+export type InspectionPreview = { requestId: string; phase: "tree" | "layers"; snapshot: UiSnapshot };
 
 export type ExportFormat = "json" | "xml" | "png";
 

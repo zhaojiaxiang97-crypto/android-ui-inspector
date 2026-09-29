@@ -264,4 +264,7 @@ test("only repeated confirmed-empty bounds compact; real, unknown and folded lay
   assert.equal(folded.records[1].z - folded.records[0].z, 100);
   const wider = buildLayerOverview(root, content, size, { layerGap: 240, expandedIds });
   assert.equal(wider.records[3].z - wider.records[2].z, 240);
+  const failed = buildLayerOverview({ ...root, children: [empty, { ...duplicate, layerImageStatus: "failed" }] }, null, size, { layerGap: 100, expandedIds });
+  assert.equal(failed.records[1].isCompact, false, "SKIP_DRAW does not prove an unread custom decoration is empty");
+  assert.equal(failed.records[1].z - failed.records[0].z, 100);
 });

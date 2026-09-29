@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
-import { GEOMETRY_EXPRESSION, geometryFrom, type QmlDebugNode } from "../electron/qml-debug";
-import { qmlUiTree } from "../electron/adb";
+import { GEOMETRY_EXPRESSION, geometryFrom, qmlGrabExpression, type QmlDebugNode } from "../electron/qml-debug";
+import { qmlGroupNodeMatches, qmlUiTree } from "../electron/adb";
 import { qmlStyleFrom, qmlStyleSvg } from "../shared/qml-style";
 import { buildLayerOverview } from "../shared/layer-layout";
 
@@ -66,4 +66,45 @@ test("QML conversion attaches bounded independent style images even to parents w
   const negative = { ...root, geometry: { ...root.geometry!, z: -1 }, children: [] };
   const ordered = qmlUiTree({ ...root, children: [{ ...root, children: [negative, child] }] }, "test.qml", null);
   assert.deepEqual(buildLayerOverview(ordered, null, { width: 100, height: 100 }).records.map((record) => record.id), ["0/0/0", "0/0", "0/0/1"]);
+});
+
+test("Qt image grabs only visual leaves and keeps their pixels off the parent plane", () => {
+  const path = '/data/user/0/sample/cache/own"image.png';
+  const expression = qmlGrabExpression(path, 80, 40);
+  let saved = "", target = { width: 0, height: 0 };
+  const leaf = { children: [], grabToImage(callback: (result: { saveToFile: (name: string) => boolean }) => void, size: typeof target) {
+    target = size;
+    callback({ saveToFile(name) { saved = name; return true; } });
+    return true;
+  } };
+  const evaluate = (subject: object) => runInNewContext(`(function() { return ${expression}; }).call(subject)`, { subject, Qt: { size: (width: number, height: number) => ({ width, height }) } });
+  assert.equal(evaluate(leaf), true);
+  assert.equal(saved, path);
+  assert.deepEqual(target, { width: 80, height: 40 });
+  saved = "";
+  assert.equal(evaluate({ ...leaf, children: [{}] }), false);
+  assert.equal(saved, "", "a parent must never capture child pixels");
+  const groupExpression = qmlGrabExpression(path, 80, 40, true);
+  const evaluateGroup = (subject: object) => runInNewContext(`(function() { return ${groupExpression}; }).call(subject)`, { subject, Qt: { size: (width: number, height: number) => ({ width, height }) } });
+  assert.equal(evaluateGroup({ ...leaf, children: [{}] }), true, "group grabs explicitly include children");
+  assert.equal(saved, path);
+
+  const text: QmlDebugNode = { debugId: 2, parentId: 1, contextId: 1, type: "QQuickText", idString: "label", objectName: "", url: "", line: 0, column: 0, geometry: read({ ...item, text: "label" }), children: [] };
+  const parent: QmlDebugNode = { ...text, debugId: 1, type: "QQuickRectangle", geometry: read(rectangle), children: [text] };
+  const result = qmlUiTree(parent, "sample", null, new Map([[2, { dataUrl: "data:image/png;base64,b3du", width: 56, height: 28 }]]));
+  assert.equal(result.layerImageStatus, "style");
+  assert.equal(result.children[0].layerImageStatus, "captured");
+  assert.deepEqual(result.children[0].layerImageSize, { width: 56, height: 28 });
+});
+
+test("Qt group refresh rejects a changed object, source or geometry", () => {
+  const child: QmlDebugNode = { debugId: 2, parentId: 1, contextId: 1, type: "QQuickText", idString: "label", objectName: "", url: "Card.qml", line: 8, column: 0, geometry: read({ ...item, text: "child" }), children: [] };
+  const parent: QmlDebugNode = { ...child, debugId: 1, type: "QQuickRectangle", idString: "card", line: 3, geometry: read(rectangle), children: [child] };
+  const expected = qmlUiTree(parent, "sample.debug", null);
+  const current = structuredClone(expected);
+  assert.equal(qmlGroupNodeMatches(expected, current), true);
+  assert.equal(qmlGroupNodeMatches(expected, { ...current, children: [] }), false);
+  assert.equal(qmlGroupNodeMatches(expected, { ...current, bounds: { ...current.bounds!, left: current.bounds!.left + 1 } }), false);
+  assert.equal(qmlGroupNodeMatches(expected, { ...current, attributes: { ...current.attributes, "qml-debug-id": "99" } }), false);
+  assert.equal(qmlGroupNodeMatches(expected, { ...current, attributes: { ...current.attributes, "qml-source": "Other.qml" } }), false);
 });

@@ -314,7 +314,7 @@ export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, si
     const isCollapsed = Boolean(entry.node.children.length && options.expandedIds && !options.expandedIds.has(entry.node.id));
     // Only confirmed empty/skip-draw nodes are compacted. Missing or failed
     // captures, real backgrounds and collapsed composites keep full spacing.
-    const isEmpty = !isCollapsed && (entry.node.layerImageEmpty === true || (!entry.node.layerImageDataUrl && entry.node.attributes?.["skip-draw"] === "true"));
+    const isEmpty = !isCollapsed && (entry.node.layerImageEmpty === true || (!entry.node.layerImageDataUrl && entry.node.layerImageStatus !== "failed" && entry.node.attributes?.["skip-draw"] === "true"));
     const boundsKey = `${renderBounds.left},${renderBounds.top},${renderBounds.right},${renderBounds.bottom}`;
     const isCompact = isEmpty && emptyBounds.has(boundsKey);
     if (isEmpty) emptyBounds.add(boundsKey);

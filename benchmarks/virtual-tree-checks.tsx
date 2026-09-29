@@ -197,9 +197,13 @@ export async function verifyVirtualTreeBehavior() {
     selectedId = root.id; expanded = new Set(indexTree(root).keys()); session += 1;
     host.className = "app-shell inspection-active";
     draw(); viewport().style.height = "420px";
-    for (const [id, name, kind] of [["0/0", "Leaks", "text"], ["0/1", "头像", "image"], ["0/2", "leak_canary_bottom_navigation_bar", "container"], ["0/3", "View", "leaf"]]) {
+    for (const [id, name, kind] of [["0", "LeakLauncherActivity", "activity"], ["0/0", "Leaks", "text"], ["0/1", "头像", "image"], ["0/2", "leak_canary_bottom_navigation_bar", "linear"], ["0/3", "View", "leaf"]]) {
       check(row(id)?.querySelector(".tree-primary")?.textContent === name && row(id)?.dataset.treeKind === kind, `compact name/type mismatch: ${id}`);
     }
+    check(row("0/2")?.querySelector(".tree-node-icon title")?.textContent === "线性布局 · LinearLayout", "icon tooltip does not explain the layout type");
+    check(row("0/2")?.getAttribute("aria-label")?.includes("线性布局"), "icon meaning is missing from the accessible row name");
+    const iconPaths = ["0", "0/0", "0/1", "0/2", "0/3"].map(id => row(id)?.querySelector(".tree-node-icon path")?.getAttribute("d"));
+    check(iconPaths.every(Boolean) && new Set(iconPaths).size === iconPaths.length, "control types rely only on color instead of distinct shapes");
     check(row("0/3")?.querySelectorAll(".tree-row-content > span").length === 1, "unnamed node repeats its class");
     check(row("0/2")?.title.includes("app:id/leak_canary_bottom_navigation_bar"), "complete resource ID lost from tooltip");
     check(getComputedStyle(row("0/2")!.querySelector(".tree-primary")!).direction === "rtl", "long resource ID no longer preserves its distinguishing suffix");
@@ -210,6 +214,8 @@ export async function verifyVirtualTreeBehavior() {
       check(viewport().scrollWidth <= viewport().clientWidth, `tree overflows at ${width}px`);
       for (const element of host.querySelectorAll<HTMLElement>(".tree-row")) {
         check(element.getBoundingClientRect().height === TREE_ROW_HEIGHT, "compact CSS and virtual row heights differ");
+        const icon = element.querySelector(".tree-node-icon")!.getBoundingClientRect();
+        check(icon.width === 16 && icon.height === 16, "type icon shrank in a narrow sidebar");
         const name = element.querySelector<HTMLElement>(".tree-primary")!;
         check(name.clientWidth >= Math.min(40, name.scrollWidth), `name crushed at ${width}px: ${element.dataset.treeId}`);
       }

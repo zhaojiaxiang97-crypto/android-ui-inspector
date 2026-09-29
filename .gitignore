@@ -22,6 +22,12 @@ dist-ssr
 src-tauri/target/
 src-tauri/gen/schemas/
 
+# Android Debug SDK sample build products.
+android/.gradle/
+android/.kotlin/
+android/**/build/
+android/local.properties
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

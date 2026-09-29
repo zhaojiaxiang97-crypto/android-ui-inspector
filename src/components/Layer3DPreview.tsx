@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import type { PixelSize, UiNode } from "../../shared/types";
+import type { PixelSize, QmlGroupImage, UiNode } from "../../shared/types";
 import { buildLayerLayout, buildLayerOverview, type LayerRecord } from "../../shared/layer-layout";
-import { composeSubtreeImage, subtreeImageNodes, textureDimensions } from "../../shared/layer-textures";
+import { composeSubtreeImage, layerPlaneOpacity, subtreeImageNodes, textureDimensions } from "../../shared/layer-textures";
 import { measureBounds, type BoundsMeasurement } from "../../shared/node-metrics";
 import { nodeDisplayLabel, nodeShortClass } from "../../shared/tree-utils";
 
@@ -35,6 +35,7 @@ type Props = {
   origin: Pick<Rect, "left" | "top">;
   camera: LayerCamera;
   onSelect: (node: UiNode) => void;
+  onCaptureGroup?: (node: UiNode) => Promise<QmlGroupImage | null>;
   onFitScale?: (scale: number) => void;
 };
 
@@ -162,17 +163,44 @@ function radians(value: number) {
   return value * Math.PI / 180;
 }
 
-function hasOwnVisualStyle(record: LayerRecord, size: PixelSize, hiddenNodeIds?: ReadonlySet<string>) {
+function subtreeHasHidden(node: UiNode, hiddenNodeIds: ReadonlySet<string>) {
+  if (!hiddenNodeIds.size) return false;
+  const pending = [node];
+  for (let cursor = 0; cursor < pending.length; cursor++) {
+    if (hiddenNodeIds.has(pending[cursor].id)) return true;
+    pending.push(...pending[cursor].children);
+  }
+  return false;
+}
+
+function groupImageFor(record: LayerRecord, groups: ReadonlyMap<string, QmlGroupImage>, hiddenNodeIds: ReadonlySet<string>) {
+  if (!record.isCollapsed || !groups.has(record.id) || subtreeHasHidden(record.node, hiddenNodeIds)) return null;
+  return groups.get(record.id)!;
+}
+
+function collapsedTextureKey(record: LayerRecord, visibilityKey: string, group: QmlGroupImage | null) {
+  if (group) return `qml-group:${record.id}:${group.capturedAt}`;
+  let refreshedAt = "";
+  const pending = [record.node];
+  for (let cursor = 0; cursor < pending.length; cursor++) {
+    const node = pending[cursor];
+    if ((node.attributes?.["image-refreshed-at"] ?? "") > refreshedAt) refreshedAt = node.attributes!["image-refreshed-at"];
+    pending.push(...node.children);
+  }
+  return `subtree:${record.id}:${visibilityKey}:${refreshedAt}`;
+}
+
+function hasOwnVisualStyle(record: LayerRecord, size: PixelSize, hiddenNodeIds: ReadonlySet<string>, groups: ReadonlyMap<string, QmlGroupImage>) {
   const node = record.node;
   // Collapsed branches combine independent images; expanded nodes keep their own.
-  if (record.isCollapsed) return subtreeImageNodes(node, hiddenNodeIds).length > 0;
+  if (record.isCollapsed) return Boolean(groupImageFor(record, groups, hiddenNodeIds)) || subtreeImageNodes(node, hiddenNodeIds).length > 0;
   if (node.layerImageEmpty) return false;
   if (node.layerImageDataUrl && node.layerImageSize) return true;
   // Without an independent bitmap, keep structural nodes as outlines.
   if (node.children.length > 0 || isNearFullScreen(record, size) || STRUCTURAL_CLASS_PATTERN.test(node.className ?? "")) return false;
-  // Debug View bitmaps are already isolated by Android. If one is missing,
-  // an outline is safer than leaking pixels from the flattened screenshot.
-  if (node.attributes?.["inspection-source"] === "debug-view") return false;
+  // Missing Debug View / Qt own images stay outlines, never screen crops
+  // that would leak pixels from unrelated layers.
+  if (node.attributes?.["inspection-source"] === "debug-view" || node.attributes?.["inspection-source"] === "debug-qml") return false;
   // A virtual accessibility leaf has no isolated bitmap. Its bounds crop is
   // the closest representation of the child window, including its background.
   if (record.isVirtual) return Boolean(node.text?.trim() || node.contentDesc?.trim());
@@ -195,10 +223,10 @@ function isNearFullScreen(record: LayerRecord, size: PixelSize) {
   return (widthRatio >= 0.9 && heightRatio >= 0.75) || (widthRatio >= 0.75 && heightRatio >= 0.9);
 }
 
-function layerPlaneRoles(records: readonly LayerRecord[], size: PixelSize, hiddenNodeIds?: ReadonlySet<string>) {
+function layerPlaneRoles(records: readonly LayerRecord[], size: PixelSize, hiddenNodeIds: ReadonlySet<string>, groups: ReadonlyMap<string, QmlGroupImage>) {
   const roles = new Map<string, LayerPlaneRole>();
   for (const record of records) {
-    roles.set(record.id, hasOwnVisualStyle(record, size, hiddenNodeIds) ? "surface" : "outline");
+    roles.set(record.id, hasOwnVisualStyle(record, size, hiddenNodeIds, groups) ? "surface" : "outline");
   }
   return roles;
 }
@@ -213,11 +241,18 @@ function sourceRect(record: LayerRecord): Rect {
   return { left, top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) };
 }
 
-function visualFor(record: LayerRecord, screenshotSize: PixelSize, visibilityKey: string) {
+function visualFor(record: LayerRecord, screenshotSize: PixelSize, visibilityKey: string, group: QmlGroupImage | null) {
   if (record.isCollapsed) {
     const rect = sourceRect(record);
+    if (group) {
+      const bounds = record.sourceBounds;
+      const scaleX = group.size.width / (bounds.right - bounds.left);
+      const scaleY = group.size.height / (bounds.bottom - bounds.top);
+      return { kind: "composite" as const, textureSrc: collapsedTextureKey(record, visibilityKey, group), textureSize: group.size,
+        source: { left: (rect.left - bounds.left) * scaleX, top: (rect.top - bounds.top) * scaleY, width: rect.width * scaleX, height: rect.height * scaleY } };
+    }
     const textureSize = { width: Math.ceil(rect.width), height: Math.ceil(rect.height) };
-    return { kind: "composite" as const, textureSrc: `subtree:${record.id}:${visibilityKey}`, textureSize, source: { left: 0, top: 0, ...textureSize } };
+    return { kind: "composite" as const, textureSrc: collapsedTextureKey(record, visibilityKey, null), textureSize, source: { left: 0, top: 0, ...textureSize } };
   }
   if (record.node.layerImageDataUrl && record.node.layerImageSize) {
     const textureSize = record.node.layerImageSize;
@@ -610,7 +645,7 @@ function drawScene(renderer: Renderer, planes: readonly ScenePlane[], camera: La
   canvas.dataset.layerDrawCalls = String(drawCalls);
 }
 
-export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer3DPreview({ src, root, selectedNode, expandedNodeIds, hiddenNodeIds = NO_HIDDEN_NODES, focusedNode = null, size, renderScale, origin, camera, onSelect, onFitScale }, ref) {
+export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer3DPreview({ src, root, selectedNode, expandedNodeIds, hiddenNodeIds = NO_HIDDEN_NODES, focusedNode = null, size, renderScale, origin, camera, onSelect, onCaptureGroup, onFitScale }, ref) {
   const sceneRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<Renderer | null>(null);
@@ -629,6 +664,9 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
   const [rendererStatus, setRendererStatus] = useState<RendererStatus>("loading");
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [textureWarning, setTextureWarning] = useState<string | null>(null);
+  const [groupImages, setGroupImages] = useState<ReadonlyMap<string, QmlGroupImage>>(() => new Map());
+  const attemptedGroups = useRef(new Set<string>());
+  const previousCollapsedGroups = useRef(new Set<string>());
   const layout = useMemo(() => {
     if (!focusedNode) return buildLayerOverview(root, selectedNode, size, { maxLayers: 512, layerGap: camera.layerGap, expandedIds: expandedNodeIds });
     // Isolation is independent of selection, tree folding and manually hidden
@@ -643,15 +681,18 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
   const records = useMemo(() => layout.records.filter((record) => !hiddenNodeIds.has(record.id)), [layout.records, hiddenNodeIds]);
   const parent = layout.parent && !hiddenNodeIds.has(layout.parent.id) ? layout.parent : null;
   const visibilityKey = useMemo(() => JSON.stringify([...hiddenNodeIds].sort()), [hiddenNodeIds]);
-  const textureRecords = [parent, ...records].filter((record): record is LayerRecord => Boolean(record && hasOwnVisualStyle(record, size, hiddenNodeIds) && (record.isCollapsed || record.node.layerImageDataUrl)));
+  const collapsedRecords = [parent, ...records].filter((record): record is LayerRecord => Boolean(record?.isCollapsed && record.node.attributes?.["inspection-source"] === "debug-qml" && !subtreeHasHidden(record.node, hiddenNodeIds)));
+  const groupRequestKey = `${visibilityKey}|${collapsedRecords.map(record => record.id).join("|")}`;
+  const shownGroupImages = collapsedRecords.map(record => groupImageFor(record, groupImages, hiddenNodeIds)).filter((image): image is QmlGroupImage => Boolean(image));
+  const textureRecords = [parent, ...records].filter((record): record is LayerRecord => Boolean(record && hasOwnVisualStyle(record, size, hiddenNodeIds, groupImages) && (record.isCollapsed || record.node.layerImageDataUrl)));
   // Camera/hover changes don't change the required images or restart decoding.
-  const textureKey = `${visibilityKey}|${textureRecords.map((record) => `${record.id}:${record.isCollapsed}`).join("|")}`;
-  const roles = useMemo(() => layerPlaneRoles(records, size, hiddenNodeIds), [records, size, hiddenNodeIds]);
+  const textureKey = `${visibilityKey}|${textureRecords.map((record) => `${record.id}:${record.isCollapsed ? collapsedTextureKey(record, visibilityKey, groupImageFor(record, groupImages, hiddenNodeIds)) : "own"}`).join("|")}`;
+  const roles = useMemo(() => layerPlaneRoles(records, size, hiddenNodeIds, groupImages), [records, size, hiddenNodeIds, groupImages]);
   const selectedRecord = records.find((record) => record.isSelected) ?? (parent?.isSelected ? parent : null);
   const hoveredRecord = records.find((record) => record.id === hoveredId) ?? (parent?.id === hoveredId ? parent : null);
   const measurement = useMemo(() => selectedRecord && hoveredRecord && selectedRecord.id !== hoveredRecord.id && rendererStatus === "webgl"
     ? measureBounds(selectedRecord.sourceBounds, hoveredRecord.sourceBounds) : null, [selectedRecord, hoveredRecord, rendererStatus]);
-  const parentRole = parent ? (hasOwnVisualStyle(parent, size, hiddenNodeIds) ? "surface" : "outline") : null;
+  const parentRole = parent ? (hasOwnVisualStyle(parent, size, hiddenNodeIds, groupImages) ? "surface" : "outline") : null;
   const textureCount = records.filter((record) => roles.get(record.id) === "surface").length + Number(parentRole === "surface");
   const compositeCount = records.filter((record) => record.isCollapsed).length + Number(Boolean(parent?.isCollapsed));
   const nativeTextureCount = records.filter((record) => roles.get(record.id) === "surface" && Boolean(record.node.layerImageDataUrl)).length;
@@ -700,18 +741,47 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
 
   useEffect(() => { setHoveredId(null); }, [root, src]);
 
+  useEffect(() => { attemptedGroups.current.clear(); previousCollapsedGroups.current.clear(); setGroupImages(new Map()); }, [root, src]);
+
+  useEffect(() => {
+    const activeIds = new Set(collapsedRecords.map(record => record.id));
+    const newRecords = collapsedRecords.filter(record => !previousCollapsedGroups.current.has(record.id));
+    previousCollapsedGroups.current = activeIds;
+    for (const id of attemptedGroups.current) if (!activeIds.has(id)) attemptedGroups.current.delete(id);
+    setGroupImages(previous => {
+      const kept = [...previous].filter(([id]) => activeIds.has(id));
+      return kept.length === previous.size ? previous : new Map(kept);
+    });
+    if (!onCaptureGroup) return;
+    let alive = true;
+    let pendingId: string | null = null;
+    void (async () => {
+      for (const record of [...newRecords, ...collapsedRecords.filter(record => !newRecords.includes(record))]) {
+        if (!alive || attemptedGroups.current.has(record.id) || groupImages.has(record.id)) continue;
+        attemptedGroups.current.add(record.id);
+        pendingId = record.id;
+        const image = await onCaptureGroup(record.node).catch(() => null);
+        pendingId = null;
+        if (alive && image) setGroupImages(previous => new Map(previous).set(record.id, image));
+      }
+    })();
+    return () => { alive = false; if (pendingId) attemptedGroups.current.delete(pendingId); };
+  }, [root, groupRequestKey, onCaptureGroup]);
+
   const scenePlanes = useMemo(() => {
     // Each visible plane owns its pixels. A full-screen screenshot behind the
     // stack duplicates child content and reads like a reflected surface.
     const planes: ScenePlane[] = [];
     if (parent) {
-      const visual = parentRole === "surface" ? visualFor(parent, size, visibilityKey) : null;
-      planes.push({ id: `${parent.id}:parent`, node: parent.hitTestable ? parent.node : null, rect: scaledRect(parent, renderScale, renderOrigin), source: visual?.source ?? sourceRect(parent), textureSrc: visual?.textureSrc ?? null, textureSize: visual?.textureSize ?? size, z: parent.z * renderScale, kind: visual?.kind ?? "outline", opacity: parentRole === "surface" ? (parent.isCollapsed ? 1 : Number(parent.node.attributes?.["effective-alpha"] ?? 1)) : 0.65, hitTestable: parent.hitTestable });
+      const group = groupImageFor(parent, groupImages, hiddenNodeIds);
+      const visual = parentRole === "surface" ? visualFor(parent, size, visibilityKey, group) : null;
+      planes.push({ id: `${parent.id}:parent`, node: parent.hitTestable ? parent.node : null, rect: scaledRect(parent, renderScale, renderOrigin), source: visual?.source ?? sourceRect(parent), textureSrc: visual?.textureSrc ?? null, textureSize: visual?.textureSize ?? size, z: parent.z * renderScale, kind: visual?.kind ?? "outline", opacity: parentRole === "surface" ? layerPlaneOpacity(parent.node, parent.isCollapsed, Boolean(group)) : 0.65, hitTestable: parent.hitTestable });
     }
     for (const record of records) {
       const role = roles.get(record.id) ?? "outline";
-      const visual = role === "surface" ? visualFor(record, size, visibilityKey) : null;
-      planes.push({ id: record.id, node: record.node, rect: scaledRect(record, renderScale, renderOrigin), source: visual?.source ?? sourceRect(record), textureSrc: visual?.textureSrc ?? null, textureSize: visual?.textureSize ?? size, z: record.z * renderScale, kind: visual?.kind ?? "outline", opacity: role === "outline" ? (record.isCompact ? 0.42 : 0.78) : record.isCollapsed ? 1 : Number(record.node.attributes?.["effective-alpha"] ?? 1), hitTestable: record.hitTestable });
+      const group = groupImageFor(record, groupImages, hiddenNodeIds);
+      const visual = role === "surface" ? visualFor(record, size, visibilityKey, group) : null;
+      planes.push({ id: record.id, node: record.node, rect: scaledRect(record, renderScale, renderOrigin), source: visual?.source ?? sourceRect(record), textureSrc: visual?.textureSrc ?? null, textureSize: visual?.textureSize ?? size, z: record.z * renderScale, kind: visual?.kind ?? "outline", opacity: role === "outline" ? (record.isCompact ? 0.42 : 0.78) : layerPlaneOpacity(record.node, record.isCollapsed, Boolean(group)), hitTestable: record.hitTestable });
     }
     for (const [record, kind] of [[selectedRecord, "selection"], [hoveredRecord?.isSelected ? null : hoveredRecord, "hover"]] as const) {
       if (!record) continue;
@@ -719,7 +789,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
       planes.push({ ...plane, id: `${record.id}:${kind}`, node: null, kind, opacity: 1, hitTestable: false });
     }
     return planes;
-  }, [hoveredRecord, parent, renderOrigin.left, renderOrigin.top, parentRole, records, renderScale, roles, selectedRecord, size, visibilityKey]);
+  }, [hoveredRecord, parent, renderOrigin.left, renderOrigin.top, parentRole, records, renderScale, roles, selectedRecord, size, visibilityKey, groupImages, hiddenNodeIds]);
 
   const targetPresentation = useMemo(() => ({
     depths: new Map(scenePlanes.map(plane => [plane.id.replace(/:(parent|selection|hover)$/, ""), plane.z / renderScale])),
@@ -837,7 +907,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
 
   // Fit after updating the camera. Selection, hover, hiding and free rotation
   // do not change framing; isolation, a changed tree, spacing or viewport do.
-  useEffect(() => { fitRef.current(); }, [root, expandedNodeIds, camera.layerGap, camera.distance, focusedNode]);
+  useEffect(() => { fitRef.current(); }, [src, expandedNodeIds, camera.layerGap, camera.distance, focusedNode, layout.candidateCount, center.x, center.y, center.z]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -876,14 +946,14 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
       if (rendererRef.current === renderer) rendererRef.current = null;
       disposeRenderer(renderer);
     };
-  }, [root, src]);
+  }, [src]);
 
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return;
     let alive = true;
     let repaint: number | null = null;
-    const wanted = new Map(textureRecords.map((record) => [record.isCollapsed ? `subtree:${record.id}:${visibilityKey}` : record.node.layerImageDataUrl!, record]));
+    const wanted = new Map(textureRecords.map((record) => [record.isCollapsed ? collapsedTextureKey(record, visibilityKey, groupImageFor(record, groupImages, hiddenNodeIds)) : record.node.layerImageDataUrl!, record]));
     const maxPixels = Math.min(2_000_000, Math.floor(MAX_LAYER_TEXTURE_PIXELS / Math.max(1, wanted.size)));
     setTextureWarning(null);
     for (const [key, texture] of renderer.layerTextures) {
@@ -907,8 +977,9 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
         if (renderer.layerTextures.has(key)) continue;
         let image: ImageBitmap | HTMLCanvasElement | null = null;
         try {
+          const group = groupImageFor(record, groupImages, hiddenNodeIds);
           image = record.isCollapsed
-            ? await composeSubtreeImage(record.node, sourceRect(record), load, maxPixels, hiddenNodeIds)
+            ? group ? await loadLayerImage(group.dataUrl) : await composeSubtreeImage(record.node, sourceRect(record), load, maxPixels, hiddenNodeIds)
             : await load(record.node);
           if (!alive || rendererRef.current !== renderer) return;
           if (!uploadLayerTexture(renderer, key, image, maxPixels)) throw new Error("图层纹理上传失败");
@@ -929,7 +1000,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
       if (repaint === null) repaint = requestAnimationFrame(() => { repaint = null; drawRef.current(); });
     })();
     return () => { alive = false; if (repaint !== null) cancelAnimationFrame(repaint); };
-  }, [textureKey, rendererStatus, root]);
+  }, [textureKey, rendererStatus, root, groupImages]);
 
   function pickNode(clientX: number, clientY: number) {
     const canvas = canvasRef.current;
@@ -989,7 +1060,11 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
         <span className="layer-measurement-status" role="status">{nodeDisplayLabel(selectedRecord!.node)} 到 {nodeDisplayLabel(hoveredRecord!.node)}：{measurement.guides.map((_, index) => measurementLabel(measurement, index)).join("，")}。按原始外框测量，不含 3D 展开层距。</span>
       </>}
       {rendererStatus === "fallback" && <span className="layer-webgl-fallback">{focusedNode ? "WebGL 不可用，请退出聚焦查看截图。" : "WebGL 不可用，已回退到截图预览。"}</span>}
-      {(layout.truncated || textureWarning) && <span className="layer-resource-note" role="status">{textureWarning ?? `当前显示 ${records.length} 层，另有 ${layout.omittedCount} 层未显示；可收起分支或从树中选中定位。`}</span>}
+      {(layout.truncated || textureWarning || shownGroupImages.length > 0) && <span className="layer-resource-note" role="status">{[
+        textureWarning,
+        layout.truncated ? `当前显示 ${records.length} 层，另有 ${layout.omittedCount} 层未显示` : null,
+        shownGroupImages.map(image => `折叠画面实时采集于 ${new Date(image.capturedAt).toLocaleTimeString()}，不与原快照保证同帧`).at(-1),
+      ].filter(Boolean).join(" · ")}</span>}
       <div className="layer-scene-metadata" hidden aria-hidden="true">
         {records.map((record) => {
           const role = roles.get(record.id) ?? "outline";

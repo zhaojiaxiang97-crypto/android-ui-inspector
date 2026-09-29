@@ -1,4 +1,4 @@
-import type { AdbProbeResult, AppMenuAction, AppMenuState, DebugSessionEvent, DebugSessionState, ExportSnapshotRequest, ExportSnapshotResult, InspectionProgress, LayerMenuAction, McpShareResult, SaveSnapshotRequest, SnapshotStoreResult, UiSnapshot } from "../shared/types";
+import type { AdbProbeResult, AppMenuAction, AppMenuState, DebugSessionEvent, DebugSessionState, ExportSnapshotRequest, ExportSnapshotResult, InspectionPreview, InspectionProgress, LayerMenuAction, McpShareResult, QmlGroupImage, SaveSnapshotRequest, SnapshotStoreResult, UiSnapshot, ViewRefreshResult } from "../shared/types";
 
 declare global {
   interface Window {
@@ -8,9 +8,12 @@ declare global {
       onAppMenuAction?: (callback: (action: AppMenuAction) => void) => () => void;
       probeAdb: () => Promise<AdbProbeResult>;
       inspectDevice: (serial: string, requestId: string) => Promise<UiSnapshot>;
+      captureQmlGroup: (requestId: string, nodeId: string) => Promise<QmlGroupImage | null>;
+      refreshViewNode: (requestId: string, nodeId: string, scope?: "node" | "branch") => Promise<ViewRefreshResult>;
       cancelInspection: (requestId: string) => Promise<void>;
       showLayerMenu: (canHide: boolean, canRestore: boolean, canExitFocus: boolean) => Promise<LayerMenuAction>;
       onInspectionProgress: (callback: (progress: InspectionProgress) => void) => () => void;
+      onInspectionPreview: (callback: (preview: InspectionPreview) => void) => () => void;
       copyText: (value: string) => Promise<void>;
       shareMcpSnapshot?: (snapshot: UiSnapshot, selectedNodeId: string | null) => Promise<McpShareResult>;
       stopMcpSharing?: () => Promise<void>;

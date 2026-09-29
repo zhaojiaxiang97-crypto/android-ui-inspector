@@ -6,19 +6,19 @@ import { setTimeout as wait } from "node:timers/promises";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import type { AdbProbeResult, CaptureGeometry, DeviceInfo, DisplayFrame, UiBounds, UiNode, UiSnapshot } from "../shared/types";
+import type { AdbProbeResult, CaptureGeometry, DeviceInfo, DisplayFrame, QmlGroupImage, UiBounds, UiNode, UiSnapshot, ViewRefreshResult } from "../shared/types";
 import { assessCaptureGeometry, isRotation } from "../shared/screen-coordinates";
 import { parseInputDisplay, pngSize } from "./capture-display";
-import { inspectQmlHierarchy, type QmlDebugNode } from "./qml-debug";
-import { captureViewLayers, captureViewBitmapsDdms, matchesViewRoot, type CapturedViewLayer } from "./view-debug";
+import { inspectQmlHierarchy, type QmlDebugNode, type QmlGrab } from "./qml-debug";
+import { captureViewLayers, captureViewBitmaps, matchesViewRoot, type CapturedViewLayer } from "./view-debug";
 import { qmlColorCss, qmlStyleSvg } from "../shared/qml-style";
 import { textureDimensions } from "../shared/layer-textures";
+import { joinSdkTreeAndDebugImages } from "./sdk-hybrid";
 
 const COMMAND_TIMEOUT_MS = 30_000;
 const MAX_UI_HIERARCHY_DEPTH = 200;
 const QML_DEBUG_PORT = 3768;
-const qmlDebugTargets = new Map<string, string>();
-type InspectionOptions = { signal?: AbortSignal; onProgress?: (stage: string, elapsedMs: number) => void; expectedPackage?: string; allowAppRestart?: boolean };
+type InspectionOptions = { signal?: AbortSignal; onProgress?: (stage: string, elapsedMs: number) => void; onPreview?: (phase: "tree" | "layers", snapshot: UiSnapshot) => void; onViewTreeReady?: (packageName: string, root: UiNode) => Promise<void>; expectedPackage?: string; allowAppRestart?: boolean };
 // Task-local cancellation also covers nested ADB commands, without affecting probes.
 const inspectionContext = new AsyncLocalStorage<InspectionOptions>();
 
@@ -406,6 +406,17 @@ function viewLayerName(node: UiNode) {
   return className.slice(className.lastIndexOf(".") + 1);
 }
 
+// Exact framework classes only: a custom subclass may still own a Surface.
+const ordinaryViewClasses = new Set([
+  "android.view.View", "android.view.ViewGroup", "android.widget.TextView", "android.widget.ImageView",
+  "android.widget.FrameLayout", "android.widget.LinearLayout", "android.widget.RelativeLayout",
+  "android.widget.Button", "android.widget.EditText", "android.widget.ImageButton",
+  "android.widget.ProgressBar", "android.widget.ScrollView", "android.widget.HorizontalScrollView",
+]);
+export function needsViewBitmapFallback(node: UiNode) {
+  return node.layerImageStatus !== "captured" || node.attributes?.["skip-draw"] === "true" || !ordinaryViewClasses.has(node.className ?? "");
+}
+
 export function attachViewLayerImages(root: UiNode, layers: readonly CapturedViewLayer[], windowOrigin = { x: 0, y: 0 }) {
   const nodes: UiNode[] = [];
   const stack = [...root.children].reverse();
@@ -460,10 +471,11 @@ export function attachViewLayerImages(root: UiNode, layers: readonly CapturedVie
   return attached;
 }
 
-async function captureDebugViewImages(adbPath: string, serial: string, packageName: string, root: UiNode, stage: (name: string) => void) {
+async function captureDebugViewImages(adbPath: string, serial: string, packageName: string, root: UiNode, stage: (name: string) => void, preview?: (phase: "tree" | "layers") => void | Promise<void>, timings?: Record<string, number>) {
   const pid = await runDeviceAdb(adbPath, serial, ["shell", "pidof", packageName]);
   const processId = pid.stdout.toString("utf8").trim().split(/\s+/)[0];
   if (pid.code !== 0 || !/^\d+$/.test(processId)) return 0;
+  root.attributes = { ...root.attributes, "debug-process-id": processId };
   // Let registration return its allocated port even if cancellation arrives;
   // killing the client midway could leave an unknown ADB server-side forward.
   const forwarded = await inspectionContext.exit(() => runDeviceAdb(adbPath, serial, ["forward", "tcp:0", `jdwp:${processId}`]));
@@ -473,41 +485,65 @@ async function captureDebugViewImages(adbPath: string, serial: string, packageNa
     let windowName = "";
     const layers = await captureViewLayers(Number(port), {
       rootRefs: root.children.map((node) => node.attributes?.["view-ref"]).filter((value): value is string => Boolean(value)),
-      onHierarchy: (dump, name) => { applyViewProperties(root, dump, true); windowName = name; stage("采集独立控件画面"); },
+      onHierarchy: async (dump, name) => { applyViewProperties(root, dump, true); windowName = name; root.attributes = { ...root.attributes, "debug-window-name": name }; await preview?.("tree"); await inspectionContext.getStore()?.onViewTreeReady?.(packageName, root); stage("采集独立控件画面"); },
+      onBatchTiming: ({ waitMs, readMs, parseMs, bytes, layers: layerCount }) => {
+        if (timings) {
+          timings["DDMS 等待首包"] = Math.round(waitMs);
+          timings["DDMS 接收包体"] = Math.round(readMs);
+          timings["DDMS 解析图片"] = Math.round(parseMs);
+        }
+        root.attributes = { ...root.attributes, "ddms-batch-bytes": String(bytes), "ddms-batch-layers": String(layerCount) };
+      },
       signal: inspectionContext.getStore()?.signal,
     });
     // DDMS images use window coordinates; the restored tree uses screen coordinates.
     const windowBounds = root.children[0].bounds;
+    const matchStarted = performance.now();
     let count = attachViewLayerImages(root, layers, { x: windowBounds?.left ?? 0, y: windowBounds?.top ?? 0 });
+    if (timings) timings["DDMS 匹配控件"] = Math.round(performance.now() - matchStarted);
+    await preview?.("layers");
     const fallback: UiNode[] = [];
     const pending = [root];
     while (pending.length) {
       const node = pending.pop()!;
       if (!node.visibleToUser) continue;
       const bounds = node.bounds;
-      if (node.attributes?.["view-ref"] && node.children.length === 0 && node.layerImageStatus !== "captured" && bounds && bounds.right > bounds.left && bounds.bottom > bounds.top && (bounds.right - bounds.left) * (bounds.bottom - bounds.top) <= 4_000_000 && bounds.right > 0 && bounds.bottom > 0 && bounds.left < (root.bounds?.right ?? Infinity) && bounds.top < (root.bounds?.bottom ?? Infinity)) fallback.push(node);
+      if (node.attributes?.["view-ref"] && needsViewBitmapFallback(node) && bounds && bounds.right > bounds.left && bounds.bottom > bounds.top && (bounds.right - bounds.left) * (bounds.bottom - bounds.top) <= 4_000_000 && bounds.right > 0 && bounds.bottom > 0 && bounds.left < (root.bounds?.right ?? Infinity) && bounds.top < (root.bounds?.bottom ?? Infinity)) fallback.push(node);
       pending.push(...node.children);
     }
     if (fallback.length) {
-      stage("补齐缺失叶子画面");
+      stage("补齐独立背景与视频画面");
       try {
         fallback.sort((a, b) => Number(b.layerImageStatus === "ambiguous") - Number(a.layerImageStatus === "ambiguous"));
-        const { images, failures } = await captureViewBitmapsDdms(Number(port), { windowName }, fallback.map((node) => ({ ref: node.attributes!["view-ref"] })), inspectionContext.getStore()?.signal);
-        if (failures.size) root.attributes = { ...root.attributes, "texture-capture-warning": `${failures.size} 个叶子控件未完成画面补采，原因可在属性栏查看；已保留其余采集结果。` };
+        const { images, failures, kinds, skipDraw } = await captureViewBitmaps(Number(port), { windowName, rootRef: root.children[0].attributes!["view-ref"] }, fallback.map((node) => ({ ref: node.attributes!["view-ref"], captureOwn: node.layerImageStatus !== "captured" })), inspectionContext.getStore()?.signal);
+        if (failures.size) root.attributes = { ...root.attributes, "texture-capture-warning": `${failures.size} 个控件未完成独立画面补采，原因可在属性栏查看；已保留其余采集结果。` };
         for (const node of fallback) {
-          const failure = failures.get(node.attributes!["view-ref"]);
-          if (failure) node.attributes!["image-capture-error"] = failure;
-          const image = images.get(node.attributes!["view-ref"]);
+          const ref = node.attributes!["view-ref"];
+          if (skipDraw.has(ref)) { node.attributes!["skip-draw"] = "true"; node.layerImageStatus = "unavailable"; }
+          const kind = kinds.get(ref);
+          // A DDMS placeholder is not the Surface/Texture buffer, even when it
+          // happens to contain opaque pixels. Never report it as captured video.
+          if (kind === "surface" || kind === "texture") {
+            if (node.layerImageStatus === "captured") count--;
+            delete node.layerImageDataUrl; delete node.layerImageSize; delete node.layerImageEmpty;
+            node.layerImageStatus = "failed";
+            node.attributes!["image-source"] = kind === "surface" ? "SurfaceView / OpenGL 独立缓冲层" : "TextureView 自身缓冲区";
+          }
+          const failure = failures.get(ref);
+          if (failure) { node.attributes!["image-capture-error"] = failure; if (!node.layerImageDataUrl) node.layerImageStatus = "failed"; }
+          const image = images.get(ref);
           if (!image) continue;
           if (image.width !== node.bounds!.right - node.bounds!.left || image.height !== node.bounds!.bottom - node.bounds!.top) {
             node.attributes!["image-capture-error"] = "采集期间控件尺寸变化，请重新采集";
+            if (!node.layerImageDataUrl) node.layerImageStatus = "failed";
             continue;
           }
           if (node.layerImageStatus !== "captured") count++;
           node.layerImageDataUrl = image.pngDataUrl;
           node.layerImageSize = { width: image.width, height: image.height };
           node.layerImageStatus = "captured";
-          node.attributes!["image-source"] = /SurfaceView|TextureView/.test(node.className ?? "") ? "DDMS 定点截图（特殊图层按控件自身返回）" : "DDMS 定点截图，不含子控件";
+          node.layerImageEmpty = image.empty;
+          node.attributes!["image-source"] = image.kind === "surface" ? "SurfaceView / OpenGL 独立缓冲层，不含父层或邻居" : image.kind === "texture" ? "TextureView 自身缓冲区" : "按对象身份独立采集，不含子节点";
         }
       } catch {
         inspectionContext.getStore()?.signal?.throwIfAborted();
@@ -594,6 +630,7 @@ export function applyViewProperties(root: UiNode, dump: string, restoreHierarchy
     node.attributes = { ...node.attributes, "effective-alpha": String(effectiveAlpha) };
     node.visibleToUser = visible && (values?.["getVisibility()"] !== undefined ? ["VISIBLE", "0"].includes(values["getVisibility()"]) : node.visibleToUser) && effectiveAlpha > 0;
     if (values) {
+      if (values["geometry-error"]) node.attributes["geometry-error"] = values["geometry-error"];
       node.attributes["alpha"] = String(ownAlpha);
       const layerName = values["mID"];
       if (layerName && layerName !== "NO_ID") {
@@ -638,7 +675,7 @@ export function applyViewProperties(root: UiNode, dump: string, restoreHierarchy
   }
 }
 
-export function qmlUiTree(root: QmlDebugNode, packageName: string, viewport: UiBounds | null): UiNode {
+export function qmlUiTree(root: QmlDebugNode, packageName: string, viewport: UiBounds | null, images: ReadonlyMap<number, { dataUrl: string; width: number; height: number }> = new Map()): UiNode {
   const rootGeometry = root.geometry;
   const scaleX = viewport && rootGeometry?.width ? (viewport.right - viewport.left) / rootGeometry.width : 1;
   const scaleY = viewport && rootGeometry?.height ? (viewport.bottom - viewport.top) / rootGeometry.height : scaleX;
@@ -707,6 +744,12 @@ export function qmlUiTree(root: QmlDebugNode, packageName: string, viewport: UiB
         "background-gradient": style.unsupportedGradient ? "不支持的渐变预设，未绘制填充" : style.gradient ? JSON.stringify(style.gradient) : "none",
       });
     }
+    const image = images.get(source.debugId);
+    if (image && bounds) {
+      node.layerImageDataUrl = image.dataUrl;
+      node.layerImageSize = { width: image.width, height: image.height };
+      node.layerImageStatus = "captured";
+    }
     node.children = source.children.map((child, childIndex) => convert(child, `${id}/${childIndex}`, childIndex));
     return node;
   };
@@ -717,7 +760,37 @@ function delay(milliseconds: number) {
   return wait(milliseconds, undefined, { signal: inspectionContext.getStore()?.signal });
 }
 
-async function qmlDebugTree(adbPath: string, serial: string, target: ForegroundTarget) {
+async function readQmlGrabs(adbPath: string, serial: string, packageName: string, appDir: string, grabs: QmlGrab[]) {
+  const images = new Map<number, { dataUrl: string; width: number; height: number }>();
+  if (!grabs.length) return images;
+  const prefix = `${appDir}/`;
+  try {
+    await delay(300);
+    for (let start = 0; start < grabs.length; start += 4) {
+      await Promise.all(grabs.slice(start, start + 4).map(async (grab) => {
+        if (!grab.path.startsWith(prefix)) return;
+        const file = grab.path.slice(prefix.length);
+        for (let attempt = 0; attempt < 4; attempt++) {
+          let result: CommandResult;
+          try { result = await runDeviceAdb(adbPath, serial, ["exec-out", "run-as", packageName, "head", "-c", "3000001", file]); }
+          catch { inspectionContext.getStore()?.signal?.throwIfAborted(); return; }
+          const size = result.code === 0 && result.stdout.length <= 3_000_000 ? pngSize(result.stdout) : null;
+          if (size && size.width * size.height <= 2_000_000
+            && Math.abs(size.width / size.height - grab.width / grab.height) <= grab.width / grab.height * 0.05) {
+            images.set(grab.debugId, { dataUrl: `data:image/png;base64,${result.stdout.toString("base64")}`, ...size });
+            return;
+          }
+          await delay(250);
+        }
+      }));
+    }
+  } finally {
+    await inspectionContext.exit(() => runDeviceAdb(adbPath, serial, ["shell", "run-as", packageName, "rm", "-f", ...grabs.map((grab) => grab.path.slice(prefix.length))])).catch(() => undefined);
+  }
+  return images;
+}
+
+async function qmlDebugTree(adbPath: string, serial: string, target: ForegroundTarget, groupDebugId?: number) {
   const signal = inspectionContext.getStore()?.signal;
   signal?.throwIfAborted();
   const forward = await inspectionContext.exit(() => runDeviceAdb(adbPath, serial, ["forward", "tcp:0", `tcp:${QML_DEBUG_PORT}`]));
@@ -727,17 +800,31 @@ async function qmlDebugTree(adbPath: string, serial: string, target: ForegroundT
 
   try {
     signal?.throwIfAborted();
+    let directory: CommandResult | null = null;
+    try { directory = await runDeviceAdb(adbPath, serial, ["shell", "run-as", target.packageName, "pwd"]); }
+    catch { signal?.throwIfAborted(); }
+    const appDir = directory?.stdout.toString("utf8").trim() ?? "";
+    const canGrab = directory?.code === 0 && /^\/data\/(?:user(?:_de)?\/\d+|data)\/[\w.]+$/.test(appDir) && appDir.endsWith(`/${target.packageName}`);
+    const capture = async () => {
+      const processId = await singleAppPid(adbPath, serial, target.packageName);
+      const inspected = await inspectQmlHierarchy(port, signal, canGrab ? { appDir, nonce: randomUUID(), groupDebugId } : undefined);
+      let images = new Map<number, { dataUrl: string; width: number; height: number }>();
+      let captureWarning = !canGrab ? "无法定位 Qt App 私有缓存目录，已保留控件树。" : inspected.grabFailed ? "部分 Qt 控件截图请求失败，已保留控件树。" : null;
+      try { images = await readQmlGrabs(adbPath, serial, target.packageName, appDir, inspected.grabs); }
+      catch { signal?.throwIfAborted(); captureWarning = "Qt 控件截图读取失败，已保留控件树。"; }
+      if (inspected.grabs.length && images.size < inspected.grabs.length) captureWarning ??= `仅取得 ${images.size}/${inspected.grabs.length} 张 Qt 独立画面。`;
+      if (processId !== await singleAppPid(adbPath, serial, target.packageName)) throw new Error("Qt App 进程已变化，请重新采集。");
+      return { root: inspected.root, images, captureWarning, processId };
+    };
     if (inspectionContext.getStore()?.allowAppRestart === false) {
       // Automated observation must never reset the page it is trying to verify.
-      return { root: await inspectQmlHierarchy(port, signal), restarted: false };
+      return { ...await capture(), restarted: false };
     }
-    if (qmlDebugTargets.get(serial) === target.packageName) {
-      try {
-        return { root: await inspectQmlHierarchy(port, signal), restarted: false };
-      } catch {
-        signal?.throwIfAborted();
-        qmlDebugTargets.delete(serial);
-      }
+    try {
+      const captured = await capture();
+      return { ...captured, restarted: false };
+    } catch {
+      signal?.throwIfAborted();
     }
 
     await runDeviceAdb(adbPath, serial, ["shell", "am", "force-stop", target.packageName]);
@@ -752,9 +839,8 @@ async function qmlDebugTree(adbPath: string, serial: string, target: ForegroundT
     let lastError: unknown = null;
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
-        const root = await inspectQmlHierarchy(port, signal);
-        qmlDebugTargets.set(serial, target.packageName);
-        return { root, restarted: true };
+        const captured = await capture();
+        return { ...captured, restarted: true };
       } catch (error) {
         signal?.throwIfAborted();
         lastError = error;
@@ -765,6 +851,171 @@ async function qmlDebugTree(adbPath: string, serial: string, target: ForegroundT
   } finally {
     await inspectionContext.exit(() => runDeviceAdb(adbPath, serial, ["forward", "--remove", `tcp:${port}`])).catch(() => undefined);
   }
+}
+
+function nodeById(root: UiNode, id: string): UiNode | null {
+  const pending = [root];
+  for (let cursor = 0; cursor < pending.length; cursor++) {
+    const node = pending[cursor];
+    if (node.id === id) return node;
+    pending.push(...node.children);
+  }
+  return null;
+}
+
+export function qmlGroupNodeMatches(expected: UiNode, current: UiNode): boolean {
+  const a = expected.bounds, b = current.bounds;
+  return expected.id === current.id && expected.className === current.className
+    && expected.package === current.package && expected.resourceId === current.resourceId
+    && expected.children.length > 0 && current.children.length > 0
+    && expected.visibleToUser && current.visibleToUser && Boolean(a && b)
+    && a!.left === b!.left && a!.top === b!.top && a!.right === b!.right && a!.bottom === b!.bottom
+    && ["qml-debug-id", "qml-context-id", "qml-parent-id", "qml-source", "qml-line"].every(key => expected.attributes?.[key] === current.attributes?.[key]);
+}
+
+export function nativeViewNodeMatches(expectedRoot: UiNode, currentRoot: UiNode, nodeId: string): boolean {
+  let expected = expectedRoot, current = currentRoot;
+  if (nodeId === expectedRoot.id) return false;
+  for (const part of nodeId.split("/").slice(1)) {
+    if (!/^\d+$/.test(part)) return false;
+    const index = Number(part);
+    expected = expected.children[index]; current = current.children[index];
+    if (!expected || !current || !expected.attributes?.["view-ref"]
+      || expected.attributes["view-ref"] !== current.attributes?.["view-ref"]
+      || expected.className !== current.className) return false;
+  }
+  return Boolean(expected.bounds && current.bounds && expected.visibleToUser && current.visibleToUser
+    && expected.children.length === current.children.length
+    && expected.children.every((child, index) => child.attributes?.["view-ref"] === current.children[index].attributes?.["view-ref"]));
+}
+
+export function nativeViewBranchMatches(expectedRoot: UiNode, currentRoot: UiNode, nodeId: string): boolean {
+  if (!nativeViewNodeMatches(expectedRoot, currentRoot, nodeId)) return false;
+  const expected = nodeById(expectedRoot, nodeId), current = nodeById(currentRoot, nodeId);
+  if (!expected || !current) return false;
+  const pending: [UiNode, UiNode][] = [[expected, current]];
+  for (let cursor = 0; cursor < pending.length; cursor++) {
+    const [a, b] = pending[cursor];
+    if (a.id !== b.id || a.className !== b.className || a.attributes?.["view-ref"] !== b.attributes?.["view-ref"] || a.children.length !== b.children.length) return false;
+    a.children.forEach((child, index) => pending.push([child, b.children[index]]));
+  }
+  return true;
+}
+
+export function captureViewNodes(serial: string, snapshot: UiSnapshot, nodeId: string, branch = false, signal?: AbortSignal): Promise<ViewRefreshResult> {
+  return inspectionContext.run({ signal, allowAppRestart: false }, async () => {
+    const root = snapshot.root, packageName = root?.package;
+    const target = root && nodeById(root, nodeId);
+    const rootRef = root?.children[0]?.attributes?.["view-ref"];
+    const processId = Number(root?.attributes?.["debug-process-id"]);
+    const windowName = root?.attributes?.["debug-window-name"];
+    const component = root?.attributes?.["debug-component"];
+    if ((snapshot.inspectionSource !== "debug-view" && snapshot.inspectionSource !== "debug-hybrid") || snapshot.serial !== serial || !root || !packageName || !target?.bounds
+      || !target.attributes?.["view-ref"] || !rootRef || !windowName || !component || !Number.isSafeInteger(processId) || processId < 1)
+      throw new Error("这份快照不支持控件刷新，请重新采集当前页面。");
+    const candidates = [target];
+    if (branch) for (let cursor = 0; cursor < candidates.length; cursor++) candidates.push(...candidates[cursor].children);
+    const requested = candidates.filter(node => node.visibleToUser && node.attributes?.["view-ref"] && node.bounds
+      && node.bounds.right > node.bounds.left && node.bounds.bottom > node.bounds.top);
+    if (requested.length > 64) throw new Error(`此分支有 ${requested.length} 个可见控件，超过单次 64 个上限；请选择较小分支。`);
+    if (!requested.length) throw new Error("此分支没有可刷新的可见控件。");
+    const adbPath = automationAdb(serial);
+    const sameProcess = async () => {
+      const result = await runDeviceAdb(adbPath, serial, ["shell", "pidof", packageName]);
+      return result.code === 0 && result.stdout.toString("utf8").trim().split(/\s+/).includes(String(processId));
+    };
+    const before = await checkedDebugTarget(adbPath, serial, packageName);
+    if (before.component !== component || !await sameProcess())
+      throw new Error("目标 App 或进程已变化，请重新采集整页。");
+    const activity = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", packageName]);
+    if (activity.code !== 0) throw new Error("无法核对当前控件树，请重新采集整页。");
+    const section = targetActivitySection(activity.stdout.toString("utf8"), before);
+    const forwarded = await inspectionContext.exit(() => runDeviceAdb(adbPath, serial, ["forward", "tcp:0", `jdwp:${processId}`]));
+    const port = forwarded.stdout.toString("utf8").trim();
+    if (forwarded.code !== 0 || !/^\d+$/.test(port)) throw new Error("无法连接当前 Debug App。");
+    try {
+      const readCurrent = async () => {
+        const current = debugViewTree(section, before);
+        let name = "";
+        await captureViewLayers(Number(port), {
+          rootRefs: [rootRef], skipImages: true, signal,
+          onHierarchy: (dump, window) => { applyViewProperties(current, dump, true); name = window; },
+        });
+        if (name !== windowName || !(branch ? nativeViewBranchMatches(root, current, nodeId) : nativeViewNodeMatches(root, current, nodeId)))
+          throw new Error("控件身份或层级已变化，请重新采集整页。");
+        return nodeById(current, nodeId)!;
+      };
+      const beforeCapture = await readCurrent();
+      const { images, failures, kinds, skipDraw } = await captureViewBitmaps(Number(port), { rootRef, windowName }, requested.map(node => ({ ref: node.attributes!["view-ref"], captureOwn: true })), signal);
+      const current = await readCurrent();
+      const after = await checkedDebugTarget(adbPath, serial, packageName);
+      if (after.component !== before.component || after.windowId !== before.windowId || !await sameProcess())
+        throw new Error("目标 App、进程或窗口已变化，请重新采集整页。");
+      const beforeNodes = new Map<string, UiNode>(), currentNodes = new Map<string, UiNode>();
+      for (const node of [beforeCapture, current]) {
+        const map = node === beforeCapture ? beforeNodes : currentNodes;
+        const pending = [node];
+        for (let cursor = 0; cursor < pending.length; cursor++) { map.set(pending[cursor].id, pending[cursor]); pending.push(...pending[cursor].children); }
+      }
+      const nodes: UiNode[] = [], nodeFailures: ViewRefreshResult["failures"] = [];
+      const refreshedAt = new Date().toISOString();
+      for (const original of requested) {
+        const ref = original.attributes!["view-ref"], latest = currentNodes.get(original.id)!;
+        const image = images.get(ref);
+        const reason = beforeNodes.get(original.id)?.bounds?.raw !== latest.bounds?.raw ? "控件在刷新期间移动了，请重试。"
+          : image && latest.bounds && (image.width !== latest.bounds.right - latest.bounds.left || image.height !== latest.bounds.bottom - latest.bounds.top) ? "控件画面尺寸已变化，请重新采集整页。"
+          : !image && !skipDraw.has(ref) ? failures.get(ref) ?? "未取得控件独立画面；原快照已保留。" : null;
+        if (reason) { nodeFailures.push({ id: original.id, message: reason }); continue; }
+        const kind = kinds.get(ref);
+        const attributes: Record<string, string> = { ...original.attributes, ...latest.attributes,
+          "image-source": image ? kind === "surface" ? "SurfaceView / OpenGL 独立缓冲层" : kind === "texture" ? "TextureView 自身缓冲区" : "按对象身份独立采集，不含子节点" : "结构容器，系统跳过自身绘制",
+          "image-refreshed-at": refreshedAt,
+        };
+        delete attributes["image-capture-error"];
+        delete attributes["image-refresh-error"];
+        nodes.push({
+          ...original, bounds: latest.bounds, text: latest.text, contentDesc: latest.contentDesc, clickable: latest.clickable,
+          enabled: latest.enabled, focusable: latest.focusable, focused: latest.focused,
+          selected: latest.selected, scrollable: latest.scrollable, attributes,
+          layerImageStatus: image ? "captured" : "unavailable", layerImageDataUrl: image?.pngDataUrl,
+          layerImageSize: image ? { width: image.width, height: image.height } : undefined,
+          layerImageEmpty: image?.empty, children: [], // The renderer keeps the original subtree.
+        });
+      }
+      if (!nodes.length) throw new Error(nodeFailures.length === 1 ? nodeFailures[0].message : `${nodeFailures.length} 个控件均未刷新；原快照已保留。`);
+      signal?.throwIfAborted();
+      return { nodes, failures: nodeFailures };
+    } finally {
+      await inspectionContext.exit(() => runDeviceAdb(adbPath, serial, ["forward", "--remove", `tcp:${port}`])).catch(() => undefined);
+    }
+  });
+}
+
+export function captureQmlGroupImage(serial: string, snapshot: UiSnapshot, nodeId: string, signal?: AbortSignal): Promise<QmlGroupImage | null> {
+  return inspectionContext.run({ signal, allowAppRestart: false }, async () => {
+    const root = snapshot.root, packageName = root?.package;
+    if (snapshot.inspectionSource !== "debug-qml" || !root || !packageName || snapshot.serial !== serial) return null;
+    const expected = nodeById(root, nodeId);
+    const debugId = Number(expected?.attributes?.["qml-debug-id"]);
+    const processId = Number(root.attributes?.["qml-process-id"]);
+    const windowId = root.attributes?.["qml-window-id"];
+    if (!expected?.bounds || !expected.children.length || !Number.isSafeInteger(debugId) || debugId < 1
+      || !Number.isSafeInteger(processId) || processId < 1 || !windowId) return null;
+    const adbPath = automationAdb(serial);
+    const before = await checkedDebugTarget(adbPath, serial, packageName);
+    if (before.windowId !== windowId || processId !== await singleAppPid(adbPath, serial, packageName)) return null;
+    const top = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", packageName]);
+    if (top.code !== 0) return null;
+    const section = targetActivitySection(top.stdout.toString("utf8"), before);
+    if (!section.includes("org.qtproject.qt.android.")) return null;
+    const captured = await qmlDebugTree(adbPath, serial, before, debugId);
+    const current = nodeById(qmlUiTree(captured.root, packageName, appBounds(section)), nodeId);
+    const image = captured.images.get(debugId);
+    const after = await checkedDebugTarget(adbPath, serial, packageName);
+    if (!current || !qmlGroupNodeMatches(expected, current) || !image || captured.processId !== processId
+      || after.windowId !== windowId || processId !== await singleAppPid(adbPath, serial, packageName)) return null;
+    return { dataUrl: image.dataUrl, size: { width: image.width, height: image.height }, capturedAt: new Date().toISOString() };
+  });
 }
 
 async function captureScreen(adbPath: string, serial: string) {
@@ -853,6 +1104,78 @@ export function inspectDevice(serial: string, options: InspectionOptions = {}): 
   return inspectionContext.run(options, () => readDeviceSnapshot(serial, options));
 }
 
+async function readSdkCapture(adbPath: string, serial: string, packageName: string): Promise<unknown> {
+  const reply = await runDeviceAdb(adbPath, serial, ["shell", "content", "call", "--uri", `content://${packageName}.inspector`, "--method", "capture"]);
+  if (reply.code !== 0 || reply.stdout.toString("utf8").trim() !== "Result: Bundle[{result=ok}]") {
+    throw new Error("目标 App 的 Debug SDK 控件树读取失败");
+  }
+  // The SDK caps its private file at 4 MB; head adds a host-side read cap.
+  const file = await runDeviceAdb(adbPath, serial, ["exec-out", "run-as", packageName, "head", "-c", "4000001", "no_backup/inspector-hierarchy.json"]);
+  if (file.code !== 0 || !file.stdout.length || file.stdout.length > 4_000_000) throw new Error("SDK 控件树文件无效或超过 4 MB");
+  return JSON.parse(file.stdout.toString("utf8")) as unknown;
+}
+
+async function singleAppPid(adbPath: string, serial: string, packageName: string) {
+  const result = await runDeviceAdb(adbPath, serial, ["shell", "pidof", "-s", packageName]);
+  const value = result.stdout.toString("utf8").trim();
+  if (result.code !== 0 || !/^\d+$/.test(value)) throw new Error("无法确认 SDK 前台 App 主进程");
+  return Number(value);
+}
+
+/** Explicit experiment: SDK owns the tree; DDMS/JDWP still owns independent pixels. */
+export function inspectHybridDevice(serial: string, packageName: string, options: InspectionOptions = {}): Promise<UiSnapshot> {
+  return inspectionContext.run(options, async () => {
+    const adbPath = automationAdb(serial);
+    const before = await checkedDebugTarget(adbPath, serial, packageName);
+    const expectedPid = await singleAppPid(adbPath, serial, packageName);
+    options.onProgress?.("读取 SDK 控件树", 0);
+    const sdk = await readSdkCapture(adbPath, serial, packageName);
+    const snapshot = await inspectDevice(serial, { ...options, expectedPackage: packageName });
+    if (snapshot.error) throw new Error(snapshot.error);
+    const after = await checkedDebugTarget(adbPath, serial, packageName);
+    if (before.component !== after.component || before.windowId !== after.windowId || expectedPid !== await singleAppPid(adbPath, serial, packageName)) {
+      throw new Error("SDK 与独立画面采集期间进程或窗口已变化");
+    }
+    return joinSdkTreeAndDebugImages(snapshot, sdk, packageName, expectedPid);
+  });
+}
+
+/** Existing capture remains the fallback; never attach SDK data when identity checks fail. */
+export function inspectPreferredDevice(serial: string, options: InspectionOptions = {}): Promise<UiSnapshot> {
+  return inspectionContext.run(options, async () => {
+    const sdkState: { capture: { packageName: string; pid: number; component: string; windowId: string; tree: unknown } | null; error: unknown } = { capture: null, error: null };
+    const snapshot = await inspectDevice(serial, { ...options, onViewTreeReady: async (packageName, root) => {
+      if (!/^[\w]+(?:\.[\w]+)+$/.test(packageName)) return;
+      try {
+        const adbPath = automationAdb(serial);
+        const installed = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "package", packageName]);
+        if (installed.code !== 0 || !installed.stdout.toString("utf8").includes(`${packageName}/com.androiduiinspector.sdk.HierarchyProvider:`)) return;
+        const before = await checkedDebugTarget(adbPath, serial, packageName);
+        const pid = await singleAppPid(adbPath, serial, packageName);
+        if (root.attributes?.["debug-process-id"] !== String(pid)) throw new Error("SDK 与独立画面主进程不一致");
+        const tree = await readSdkCapture(adbPath, serial, packageName);
+        const after = await checkedDebugTarget(adbPath, serial, packageName);
+        if (before.component !== after.component || before.windowId !== after.windowId || pid !== await singleAppPid(adbPath, serial, packageName)) throw new Error("进程或窗口已变化");
+        sdkState.capture = { packageName, pid, component: before.component, windowId: before.windowId, tree };
+      } catch (error) { sdkState.error = error; }
+    } });
+    if (snapshot.error || snapshot.inspectionSource !== "debug-view" || !sdkState.capture && !sdkState.error) return snapshot;
+    try {
+      if (sdkState.error) throw sdkState.error;
+      const capture = sdkState.capture!;
+      const adbPath = automationAdb(serial);
+      const after = await checkedDebugTarget(adbPath, serial, capture.packageName);
+      if (snapshot.root?.package !== capture.packageName || snapshot.root.attributes?.["debug-process-id"] !== String(capture.pid)
+          || capture.component !== after.component || capture.windowId !== after.windowId || capture.pid !== await singleAppPid(adbPath, serial, capture.packageName)) {
+        throw new Error("进程或窗口已变化");
+      }
+      return joinSdkTreeAndDebugImages(snapshot, capture.tree, capture.packageName, capture.pid);
+    } catch (error) {
+      return { ...snapshot, warning: [snapshot.warning, `SDK 树未采用（${error instanceof Error ? error.message : "未知错误"}）；已保留原独立画面。`].filter(Boolean).join(" ") };
+    }
+  });
+}
+
 async function readDeviceSnapshot(serial: string, options: InspectionOptions): Promise<UiSnapshot> {
   const started = performance.now();
   let stageStart = started;
@@ -891,20 +1214,50 @@ async function readDeviceSnapshot(serial: string, options: InspectionOptions): P
     let inspectionSource: UiSnapshot["inspectionSource"];
     let warning: string | null = null;
     let rawHierarchy: string;
+    let qmlIdentity: { processId: number; windowId: string } | null = null;
 
     if (isQml) {
       const qml = await qmlDebugTree(adbPath, serial, target);
-      root = qmlUiTree(qml.root, target.packageName, appBounds(section));
+      root = qmlUiTree(qml.root, target.packageName, appBounds(section), qml.images);
+      const confirmed = await checkedDebugTarget(adbPath, serial, target.packageName);
+      if (confirmed.component !== target.component || qml.processId !== await singleAppPid(adbPath, serial, target.packageName)) throw new Error("Qt App 进程或窗口已变化，请重新采集。");
+      qmlIdentity = { processId: qml.processId, windowId: confirmed.windowId };
+      root.attributes!["qml-process-id"] = String(qml.processId);
+      root.attributes!["qml-window-id"] = confirmed.windowId;
       inspectionSource = "debug-qml";
       rawHierarchy = JSON.stringify(qml.root);
       if (qml.restarted) warning = "已重启目标 App 并建立 QML Debug 连接。";
+      if (qml.captureWarning) warning = [warning, qml.captureWarning].filter(Boolean).join(" ");
     } else {
       root = debugViewTree(section, target);
+      root.attributes = { ...root.attributes, "debug-component": target.component };
       inspectionSource = "debug-view";
       rawHierarchy = section;
       stage("读取完整控件属性");
       try {
-        const imageCount = await captureDebugViewImages(adbPath, serial, target.packageName, root, stage);
+        let previewScreen: Awaited<ReturnType<typeof captureScreen>> | null = null;
+        const preview = options.onPreview ? async (phase: "tree" | "layers") => {
+          try {
+            if (phase === "tree") {
+              stage("读取首屏预览");
+              const screen = await captureScreen(adbPath, serial);
+              if (screen.screenshotDataUrl && screen.captureGeometry && assessCaptureGeometry(screen.captureGeometry).status === "checked") previewScreen = screen;
+            }
+            if (!previewScreen?.screenshotDataUrl) return;
+            const foreground = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]);
+            if (foreground.code !== 0 || foregroundTarget(foreground.stdout.toString("utf8"))?.component !== target.component) return;
+            options.signal?.throwIfAborted();
+            options.onPreview?.(phase, {
+              serial, root, nodeCount: countNodes(root), xmlSize: Buffer.byteLength(rawHierarchy, "utf8"), rawXml: null,
+              screenshotDataUrl: previewScreen.screenshotDataUrl, captureGeometry: previewScreen.captureGeometry,
+              error: null, warning: null, inspectionSource: "debug-view",
+              captureDurationMs: Math.round(performance.now() - started),
+            });
+          } catch {
+            options.signal?.throwIfAborted();
+          }
+        } : undefined;
+        const imageCount = await captureDebugViewImages(adbPath, serial, target.packageName, root, stage, preview, timings);
         if (imageCount === 0) warning = "未读取到独立 View 画面，缺失画面的控件仅显示边框。";
         if (root.attributes?.["texture-capture-warning"]) warning = root.attributes["texture-capture-warning"];
       } catch (error) {
@@ -937,6 +1290,12 @@ async function readDeviceSnapshot(serial: string, options: InspectionOptions): P
     const after = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]);
     if (after.code !== 0 || foregroundTarget(after.stdout.toString("utf8"))?.component !== target.component) {
       return errorSnapshot(serial, "采集期间前台窗口发生变化或无法校验，请保持页面稳定后重新采集。");
+    }
+    if (qmlIdentity) {
+      const confirmed = await checkedDebugTarget(adbPath, serial, target.packageName);
+      if (confirmed.windowId !== qmlIdentity.windowId || qmlIdentity.processId !== await singleAppPid(adbPath, serial, target.packageName)) {
+        return errorSnapshot(serial, "Qt App 进程或窗口已变化，请重新采集。");
+      }
     }
     if (!screenshot.screenshotDataUrl) {
       warning = [warning, commandError("控件树已读取，但截图失败或不是有效 PNG", screenshot.result)].filter(Boolean).join(" ");
@@ -1019,7 +1378,7 @@ export function observeDebugApp(serial: string, packageName: string, mode: "fast
     const before = await checkedDebugTarget(adbPath, serial, packageName);
     let snapshot: UiSnapshot;
     if (mode === "deep") {
-      snapshot = await inspectDevice(serial, { signal, expectedPackage: packageName, allowAppRestart: false });
+      snapshot = await inspectPreferredDevice(serial, { signal, expectedPackage: packageName, allowAppRestart: false });
       if (snapshot.error) throw new Error(snapshot.error);
     } else {
       // One unique temporary file per request; never consume a previous dump after failure.

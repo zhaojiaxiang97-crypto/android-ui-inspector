@@ -11,6 +11,10 @@ type Props = {
   toolbarHost: HTMLElement | null;
   onCopy: () => void;
   copyStatus: string | null;
+  onRefresh?: () => void;
+  onRefreshBranch?: () => void;
+  refreshBusy?: boolean;
+  refreshStatus?: string | null;
   children: ReactNode;
 };
 
@@ -22,17 +26,35 @@ function px(value: number | null | undefined) {
   return value === null || value === undefined || !Number.isFinite(value) ? "—" : `${Math.round(value * 100) / 100}px`;
 }
 
+function layoutDimension(value: string | undefined) {
+  return value === "-1" ? "match_parent" : value === "-2" ? "wrap_content" : value === undefined ? "—" : `${value}px`;
+}
+
+function gravityLabel(raw: string | undefined) {
+  if (raw === undefined) return "—";
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < -1) return "—";
+  if (value === -1) return "未指定";
+  const horizontal: Record<number, string> = { 0: "", 1: "水平居中", 3: "左", 5: "右", 7: "水平填充", 8388611: "起始侧", 8388613: "结束侧" };
+  const vertical: Record<number, string> = { 0: "", 16: "垂直居中", 48: "上", 80: "下", 112: "垂直填充" };
+  const x = value & 0x800007, y = value & 0x70;
+  const code = `0x${value.toString(16)}`;
+  if (horizontal[x] === undefined || vertical[y] === undefined || (value & ~(0x800007 | 0x70)) !== 0) return `原始值 ${code}`;
+  return `${[horizontal[x], vertical[y]].filter(Boolean).join(" · ") || "无"} (${code})`;
+}
+
 // Let a tall inspector shrink its scroll area while moving; keep its header reachable.
 function placeInspector(panel: HTMLElement, x: number, y: number) {
   const workspace = panel.parentElement;
   if (!workspace) return;
   const viewportHeight = Number.parseFloat(panel.style.getPropertyValue("--inspector-viewport-height")) || workspace.clientHeight;
+  const minTop = Number.parseFloat(panel.style.getPropertyValue("--inspector-min-top")) || 12;
   panel.style.left = `${Math.max(12, Math.min(x, workspace.clientWidth - panel.offsetWidth - 12))}px`;
   panel.style.right = "auto";
-  panel.style.setProperty("--inspector-top", `${Math.max(12, Math.min(y, viewportHeight - Math.min(panel.offsetHeight, 160) - 16))}px`);
+  panel.style.setProperty("--inspector-top", `${Math.max(minTop, Math.min(y, viewportHeight - Math.min(panel.offsetHeight, 160) - 16))}px`);
 }
 
-export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, onCopy, copyStatus, children }: Props) {
+export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, onCopy, copyStatus, onRefresh, onRefreshBranch, refreshBusy, refreshStatus, children }: Props) {
   const [visible, setVisible] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
   const [search, setSearch] = useState("");
@@ -48,6 +70,7 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
     const observer = new ResizeObserver(() => {
       const height = Math.min(workspace.clientHeight, canvas ? canvas.offsetTop + canvas.offsetHeight : workspace.clientHeight);
       panel.style.setProperty("--inspector-viewport-height", `${height}px`);
+      panel.style.setProperty("--inspector-min-top", `${(canvas?.offsetTop ?? 0) + 12}px`);
       if (panel.style.left) placeInspector(panel, panel.offsetLeft, panel.offsetTop);
     });
     observer.observe(panel);
@@ -70,6 +93,10 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
 
   const metrics = useMemo(() => nodeMetrics(root, node, screenshotSize), [node, root, screenshotSize]);
   const displayName = nodeDisplayLabel(node);
+  const nameSource = node.attributes?.["debug-name"]?.trim() ? "Debug App 显式名称"
+    : node.text?.trim() ? "控件文本" : node.contentDesc?.trim() ? "内容描述"
+    : node.resourceId ? "资源 ID" : "真实类名";
+  const classHierarchy = node.attributes?.["sdk-class-hierarchy"]?.split(" → ");
   const parent = metrics.parent;
   const parentName = parent ? nodeDisplayLabel(parent) : node.id === root.id ? "无（根节点）" : "未找到";
   const rect = metrics.rect;
@@ -80,6 +107,14 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
   });
   const borderWidth = node.attributes?.["border-status"] === "已读取" && node.attributes?.["border-width"]?.trim()
     ? Number(node.attributes["border-width"]) : null;
+  const margins = ["Top", "Right", "Bottom", "Left"].map(side => node.attributes?.[`sdk-margin${side}`]);
+  const marginLabel = margins.every(value => value !== undefined) ? margins.map(value => `${value}px`).join(" / ") : "—";
+  const hasSdkLayoutRule = node.attributes?.["sdk-layout-gravity"] !== undefined || node.attributes?.["sdk-layout-weight"] !== undefined;
+  const sdkInteractions = [
+    ["可长按", "sdk-longClickable"], ["可上下文点击", "sdk-contextClickable"],
+    ["点击监听器", "sdk-hasOnClickListeners"], ["按下中", "sdk-pressed"], ["已激活", "sdk-activated"],
+  ] as const;
+  const hasSdkInteraction = sdkInteractions.some(([, key]) => node.attributes?.[key] !== undefined);
   const flags = [
     node.clickable && "clickable",
     node.enabled && "enabled",
@@ -90,7 +125,8 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
     !node.visibleToUser && "hidden",
   ].filter(Boolean).join(" · ") || "none";
   const sourceValue = node.attributes?.["inspection-source"];
-  const source = sourceValue === "debug-qml" ? "QML Debug" : sourceValue === "debug-view" ? "View Debug" : sourceValue || "来源未标注";
+  const source = node.attributes?.["tree-source"] === "debug-sdk" ? "SDK + View Debug"
+    : sourceValue === "debug-qml" ? "QML Debug" : sourceValue === "debug-view" ? "View Debug" : sourceValue || "来源未标注";
   const imageStatus = node.layerImageStatus ? {
     captured: node.layerImageEmpty === true ? "采集画面全透明，仅显示边框" : node.layerImageEmpty === false ? "已采集独立画面，含可见像素" : "已采集独立画面（透明度未检测）",
     style: "QML 真实样式重建（非独立截图）",
@@ -106,9 +142,10 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
   const query = search.trim().toLocaleLowerCase();
   const matches = (...values: unknown[]) => values.some(value => String(value ?? "").toLocaleLowerCase().includes(query));
   const matching = {
-    type: matches("类型 class 资源 ID resource-id 文本 text content-desc 描述 package 包名", source, node.className, node.resourceId, node.package, node.text, node.contentDesc),
+    type: matches("类型 class 名称 来源 继承 父类 资源 ID resource-id 文本 text content-desc 描述 package 包名", source, displayName, nameSource, classHierarchy?.join(" "), node.className, node.resourceId, node.package, node.text, node.contentDesc),
     relation: matches("关系 relation 父容器 parent 子节点 children 层级 depth index 序号", parentName, parent?.className, parent?.id, metrics.childCount, metrics.depth, node.index),
-    layout: matches("布局 layout 位置 尺寸 geometry bounds 屏幕 px X Y W H width height 右 下 中心 面积 Z 父级内偏移 截图 padding 内边距 margin 外边距 border 边框", node.bounds?.raw, JSON.stringify(rect), JSON.stringify(padding), borderWidth, node.attributes?.z),
+    layout: matches("布局 layout 位置 尺寸 geometry bounds 屏幕 px X Y W H width height 右 下 中心 面积 Z 父级内偏移 截图 padding 内边距 margin 外边距 border 边框 LayoutParams gravity weight 重力 权重", node.bounds?.raw, JSON.stringify(rect), JSON.stringify(padding), marginLabel, node.attributes?.["sdk-layout-params-class"], node.attributes?.["sdk-layout-gravity"], node.attributes?.["sdk-layout-weight"], borderWidth, node.attributes?.z),
+    interaction: hasSdkInteraction && matches("交互 点击 长按 上下文 点击监听器 按下 激活 SDK View", ...sdkInteractions.map(([, key]) => node.attributes?.[key])),
     image: matches("画面 image 设备可见 visible 可点击 clickable 背景色 background-color 边框色 border-color 圆角 corner-radii", imageStatus, imageLabel, node.visibleToUser ? "是" : "否", node.clickable ? "是" : "否", ...["image-source", "image-capture-error", "background-color", "border-color", "corner-radii"].map(key => node.attributes?.[key])),
     raw: matches("原始属性 调试 定位 XPath UiSelector ADB JSON XML PNG 导出 flags", node.id, flags, JSON.stringify(node.attributes)),
   };
@@ -186,8 +223,16 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
               <div className="inspector-card-body">
                 <p className="inspector-class-name">{valueOrDash(node.className)}</p>
                 <dl className="inspector-property-list">
+                  <div><dt>显示名称</dt><dd title={displayName}>{displayName}</dd></div>
+                  <div><dt>名称来源</dt><dd>{nameSource}</dd></div>
                   <div><dt>资源 ID</dt><dd title={node.resourceId ?? undefined}>{valueOrDash(node.resourceId?.replace(/^.*:id\//, "@id/"))}</dd></div>
                 </dl>
+                {classHierarchy && <details className="inspector-subsection inspector-class-chain">
+                  <summary>继承链 · {classHierarchy.length} 层（SDK）</summary>
+                  <dl className="inspector-property-list">
+                    {classHierarchy.map((name, index) => <div key={`${index}-${name}`}><dt>{index === 0 ? "控件" : "父类"}</dt><dd title={name}>{name}</dd></div>)}
+                  </dl>
+                </details>}
                 <details className="inspector-subsection">
                   <summary>文本与标识</summary>
                   <dl className="inspector-property-list">
@@ -220,6 +265,13 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
                 <dl className="inspector-property-list">
                   <div><dt>父级内偏移</dt><dd>{parentOffset ? `${px(parentOffset.x)} / ${px(parentOffset.y)}` : "—"}</dd></div>
                 </dl>
+                {hasSdkLayoutRule && <details className="inspector-subsection inspector-layout-rules">
+                  <summary>原生布局规则（SDK）</summary>
+                  <dl className="inspector-property-list">
+                    {node.attributes?.["sdk-layout-gravity"] !== undefined && <div><dt>重力方向</dt><dd title={`Android gravity=${node.attributes["sdk-layout-gravity"]}`}>{gravityLabel(node.attributes["sdk-layout-gravity"])}</dd></div>}
+                    {node.attributes?.["sdk-layout-weight"] !== undefined && <div><dt>布局权重</dt><dd>{valueOrDash(node.attributes["sdk-layout-weight"])}</dd></div>}
+                  </dl>
+                </details>}
                 <details className="inspector-subsection">
                   <summary>更多几何信息</summary>
                   <dl className="inspector-property-list">
@@ -227,6 +279,8 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
                     <div><dt>中心点</dt><dd>{px(rect?.centerX)} / {px(rect?.centerY)}</dd></div>
                     <div><dt>面积</dt><dd>{rect ? `${Math.round(rect.area).toLocaleString("zh-CN")} px²` : "—"}</dd></div>
                     <div><dt>原生 Z</dt><dd>{valueOrDash(node.attributes?.z)}</dd></div>
+                    <div><dt>LayoutParams</dt><dd>{valueOrDash(node.attributes?.["sdk-layout-params-class"])}</dd></div>
+                    <div><dt>布局宽 / 高</dt><dd>{layoutDimension(node.attributes?.["sdk-layout-width"])} / {layoutDimension(node.attributes?.["sdk-layout-height"])}</dd></div>
                     <div><dt>bounds</dt><dd>{valueOrDash(node.bounds?.raw)}</dd></div>
                     <div><dt>截图尺寸</dt><dd>{screenshotSize ? `${screenshotSize.width} × ${screenshotSize.height}px` : "—"}</dd></div>
                   </dl>
@@ -247,7 +301,7 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
                         <div className="box-model-content"><span>内容区域</span><small>未采集</small></div>
                       </div> : <p className="box-model-empty">内边距未采集</p>}
                       <dl className="box-model-extra">
-                        <div><dt>margin</dt><dd title="外边距未采集">—</dd></div>
+                        <div><dt>margin</dt><dd title={marginLabel === "—" ? "外边距未采集" : "SDK LayoutParams：上 / 右 / 下 / 左，本地 px"}>{marginLabel}</dd></div>
                         <div><dt>border</dt><dd title={node.attributes?.["border-status"] ?? "边框宽度未采集"}>{px(borderWidth)}</dd></div>
                       </dl>
                     </div>
@@ -256,11 +310,30 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
                 </details>
               </div>
             </details>
+            {hasSdkInteraction && <details className="inspector-card inspector-interaction" hidden={!matching.interaction}>
+              <summary><span className="inspector-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3"><path d="M2 1.5v11l3.5-3 2.3 4 2-1-2.3-4L12 8z" /></svg></span><span>交互</span><small>SDK View 标志</small></summary>
+              <div className="inspector-card-body">
+                <dl className="inspector-property-list">
+                  <div><dt>可点击</dt><dd>{node.clickable ? "是" : "否"}</dd></div>
+                  {sdkInteractions.map(([label, key]) => {
+                    const flag = node.attributes?.[key];
+                    return <div key={key}><dt>{label}</dt><dd>{flag === "true" ? "是" : flag === "false" ? "否" : "—"}</dd></div>;
+                  })}
+                </dl>
+                <p className="inspector-image-note">点击监听器仅指标准 OnClickListener；“否”不代表控件或子项不能响应手势。</p>
+              </div>
+            </details>}
             <details className="inspector-card inspector-image" open hidden={!matching.image}>
               <summary><span className="inspector-card-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3"><rect x="2" y="3" width="12" height="10" rx="1" /><path d="m3 11 3-3 2 2 2-4 3 5" /></svg></span><span>画面</span></summary>
               <div className="inspector-card-body">
                 <div className="inspector-image-state" data-state={node.layerImageStatus} data-empty={node.layerImageEmpty}><span>{node.layerImageStatus === "style" ? "绘制方式" : "独立画面"}</span><strong>{imageLabel}</strong></div>
                 <p className="inspector-image-note">{imageStatus}</p>
+                {node.attributes?.["image-capture-error"] && <p className="inspector-image-note">原因：{node.attributes["image-capture-error"]}</p>}
+                {node.attributes?.["image-refresh-error"] && <p className="inspector-image-note">上次刷新失败，保留旧画面：{node.attributes["image-refresh-error"]}</p>}
+                {node.attributes?.["image-source"] && <p className="inspector-image-note">来源：{node.attributes["image-source"]}</p>}
+                {onRefresh && <button className="inspector-image-refresh" type="button" disabled={refreshBusy} onClick={onRefresh}>{refreshBusy ? "正在刷新…" : "刷新当前控件"}</button>}
+                {onRefreshBranch && <button className="inspector-image-refresh" type="button" disabled={refreshBusy} onClick={onRefreshBranch}>{refreshBusy ? "正在刷新…" : "刷新此分支"}</button>}
+                {refreshStatus && <p className="inspector-image-note" role="status">{refreshStatus}</p>}
                 <dl className="inspector-inline-values">
                   <div><dt>设备可见</dt><dd>{node.visibleToUser ? "是" : "否"}</dd></div>
                   <div><dt>可点击</dt><dd>{node.clickable ? "是" : "否"}</dd></div>
@@ -269,6 +342,7 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
                   <summary>采集与样式详情</summary>
                   <dl className="inspector-property-list">
                     {node.attributes?.["image-source"] && <div><dt>画面来源</dt><dd>{node.attributes["image-source"]}</dd></div>}
+                    {node.attributes?.["image-refreshed-at"] && <div><dt>刷新时间</dt><dd>{new Date(node.attributes["image-refreshed-at"]).toLocaleString()}</dd></div>}
                     {node.attributes?.["image-capture-error"] && <div><dt>补采说明</dt><dd>{node.attributes["image-capture-error"]}</dd></div>}
                     {node.layerImageStatus === "style" && <>
                       <div><dt>背景色</dt><dd>{valueOrDash(node.attributes?.["background-color"])}</dd></div>

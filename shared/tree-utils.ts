@@ -11,7 +11,36 @@ export function nodeShortClass(node: UiNode) {
 }
 
 export function nodeDisplayLabel(node: UiNode) {
-  return node.text?.trim() || node.contentDesc?.trim() || node.resourceId?.split("/").pop() || nodeShortClass(node);
+  return node.attributes?.["debug-name"]?.trim() || node.text?.trim() || node.contentDesc?.trim() || node.resourceId?.split("/").pop() || nodeShortClass(node);
+}
+
+export function treeNodeKind(node: UiNode) {
+  // ponytail: class suffixes cover known types; custom types stay generic until snapshots expose superclass metadata.
+  const name = nodeShortClass(node).replace(/_(?:QMLTYPE|QML)_\d+$/, "");
+  if (/Activity$/.test(name)) return "activity";
+  if (/(DecorView|Window|Dialog)$/.test(name)) return "window";
+  if (/ViewStub(?:Compat)?$/.test(name)) return "stub";
+  if (/(EditText|TextInput|TextField|TextArea|SearchView)$/.test(name)) return "input";
+  if (/CheckBox$/.test(name)) return "checkbox";
+  if (/RadioButton$/.test(name)) return "radio";
+  if (/(Switch(?:Compat|Material)?|ToggleButton)$/.test(name)) return "switch";
+  if (/(SeekBar|Slider)$/.test(name)) return "slider";
+  if (/(ProgressBar|ProgressIndicator|BusyIndicator)$/.test(name)) return "progress";
+  if (/Button$/.test(name)) return "button";
+  if (/(WebView|WebEngineView)$/.test(name)) return "web";
+  if (/(VideoView|PlayerView|VideoOutput)$/.test(name)) return "video";
+  if (/(SurfaceView|TextureView)$/.test(name)) return "surface";
+  if (/(ImageView|DraweeView)$/.test(name) || /^(?:QQuick)?(?:Animated)?Image$/.test(name)) return "image";
+  if (/TextView$/.test(name) || /^(?:QQuick)?(?:Text|Label)$/.test(name)) return "text";
+  if (/(ViewPager2?|PagerView|SwipeView)$/.test(name)) return "pager";
+  if (/(DrawerLayout|SlidingPaneLayout|SlidingPanelLayout)$/.test(name)) return "drawer";
+  if (/GridView$/.test(name)) return "grid";
+  if (/(RecyclerView|ListView)$/.test(name)) return "list";
+  if (/(ScrollView|Flickable)$/.test(name) || node.scrollable) return "scroll";
+  if (/(ConstraintLayout|RelativeLayout)$/.test(name)) return "constraint";
+  if (/LinearLayout$/.test(name) || /^(?:QQuick)?(?:Row|Column)(?:Layout)?$/.test(name)) return "linear";
+  if (/FrameLayout$/.test(name)) return "frame";
+  return node.children.length > 0 || /(Layout|ViewGroup)$/.test(name) || /^(?:QQuick)?Item$/.test(name) ? "container" : "leaf";
 }
 
 // The parser assigns slash-separated positional IDs. Include the separator so
@@ -39,9 +68,9 @@ export function filterTree(root: UiNode, filter: TreeFilter): UiNode | null {
 
   const matches = (node: UiNode) => {
     if (filter.interactiveOnly && !node.clickable && !node.focusable && !node.scrollable) return false;
-    if (filter.identifiedOnly && !node.text && !node.resourceId && !node.contentDesc) return false;
+    if (filter.identifiedOnly && !node.attributes?.["debug-name"] && !node.text && !node.resourceId && !node.contentDesc) return false;
     if (!query) return true;
-    return [node.id, node.className, node.text, node.resourceId, node.contentDesc]
+    return [node.id, node.className, node.attributes?.["debug-name"], node.text, node.resourceId, node.contentDesc]
       .filter(Boolean).join(" ").toLocaleLowerCase().includes(query);
   };
 

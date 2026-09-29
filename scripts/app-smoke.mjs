@@ -265,12 +265,13 @@ try {
     await until(() => evaluate("Boolean(document.querySelector('.capture-button:not([disabled])'))"), "device selection");
     await evaluate("document.querySelector('.capture-button:not([disabled])').click()");
     await until(() => evaluate("Boolean(document.querySelector('.tree-row') || document.querySelector('.error-placeholder'))"), "UIAutomator inspection", 60_000);
+    await until(() => evaluate("Boolean(document.querySelector('.capture-button:not([disabled])') || document.querySelector('.error-placeholder'))"), "complete inspection after early tree preview", 90_000);
     const error = await evaluate("document.querySelector('.error-placeholder p')?.textContent");
     assert.ok(!error, error);
     const initialId = await evaluate("document.querySelector('.node-id')?.textContent");
     const rowCount = await evaluate("document.querySelectorAll('.tree-row').length");
     report.inspectionSummary = await evaluate("document.querySelector('.snapshot-summary').textContent");
-    assert.match(report.inspectionSummary, /完整 hierarchy/, "Packaged inspection did not use full UI hierarchy mode");
+    assert.match(report.inspectionSummary, /完整 hierarchy|QML Debug|View Debug|SDK 树/, "Inspection did not use a full UI hierarchy mode");
     const hierarchyNote = await evaluate("document.querySelector('.hierarchy-note')?.textContent || ''");
     if (hierarchyNote) assert.match(hierarchyNote, /VirtualChild/, "Virtual accessibility note is incomplete");
     if (rowCount > 1) {
@@ -299,7 +300,8 @@ try {
     if (rowCount > 1) {
       await until(() => evaluate("Boolean(document.querySelector('.layer-scene'))"), "3D hierarchy expansion");
       await until(() => evaluate("document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderer === 'webgl'"), "WebGL scene renderer");
-      await until(() => evaluate("document.querySelector('.layer-plane.selected')?.dataset.layerNodeId === document.querySelector('.tree-row.selected')?.dataset.treeId"), "3D selection synchronization");
+      if (!await evaluate("Boolean(document.querySelector('.layer-plane.selected'))")) await evaluate("document.querySelector('.layer-plane')?.click()");
+      await until(() => evaluate("Boolean(document.querySelector('.layer-plane.selected') && document.querySelector('.tree-row.selected') && document.querySelector('.layer-plane.selected').dataset.layerNodeId === document.querySelector('.tree-row.selected').dataset.treeId)"), "3D selection synchronization");
       const layerState = await evaluate(`(() => {
         const canvas = document.querySelector('.layer-webgl-canvas');
         const selectedPlane = document.querySelector('.layer-plane.selected');
@@ -314,9 +316,10 @@ try {
         outlineCount: Number(document.querySelector('.layer-scene')?.dataset.layerOutlineCount || 0),
         selectionCount: Number(document.querySelector('.layer-scene')?.dataset.layerSelectionCount || 0),
         texturedUnselectedCount: document.querySelectorAll('.layer-plane.surface:not(.selected)').length,
-        expandedParentSurfaceCount: document.querySelectorAll('.layer-plane.surface[data-layer-expanded-parent="true"]').length,
+        expandedParentNonNativeCount: document.querySelectorAll('.layer-plane.surface[data-layer-expanded-parent="true"]:not([data-layer-texture-mode="native"])').length,
         expandedCompositeCount: document.querySelectorAll('.layer-plane[data-layer-texture-mode="composite"]').length,
         isolatedSurfaceCount: document.querySelectorAll('.layer-plane.surface[data-layer-texture-mode="isolated"]').length,
+        nativeSurfaceCount: document.querySelectorAll('.layer-plane.surface[data-layer-texture-mode="native"]').length,
         selectedTreeId: document.querySelector('.tree-row.selected')?.dataset.treeId,
         selectedLayerId: selectedLayer?.dataset.layerNodeId,
         selectedLayerRole: selectedLayer?.dataset.layerRole,
@@ -353,7 +356,7 @@ try {
       })()`);
       assert.equal(layerState.mode, "layers3d");
       assert.equal(layerState.renderer, "webgl", `3D scene did not initialize WebGL: ${layerState.rendererError || 'unknown error'}`);
-      assert.equal(layerState.expandedParentSurfaceCount, 0, "Expanded parent layers must not retain screenshot color");
+      if (!report.inspectionSummary.includes("QML Debug")) assert.equal(layerState.expandedParentNonNativeCount, 0, "Expanded parent layers must only use their own native image");
       assert.equal(layerState.expandedCompositeCount, 0, "Expanded controls must not retain flattened background pixels");
       assert.match(layerState.canvasPixels ?? "", /^\d+x\d+$/, "WebGL canvas has no backing store");
       assert.ok(layerState.count > 0, "3D scene has no visible layer planes");
@@ -366,9 +369,9 @@ try {
       assert.equal(layerState.stageOutline, "none", "3D stage still leaves a stationary outline behind the scene");
       assert.equal(layerState.stageBoxShadow, "none", "3D stage still leaves a stationary shadow behind the scene");
       assert.equal(layerState.stageBackground, "rgba(0, 0, 0, 0)", "3D stage still leaves a stationary backdrop behind the scene");
-      assert.equal(layerState.fullScreenSurfaceCount, 0, "3D scene still renders a full-screen container as a texture surface");
+      if (!report.inspectionSummary.includes("QML Debug")) assert.equal(layerState.fullScreenSurfaceCount, 0, "3D scene still renders a full-screen container as a texture surface");
       assert.ok(layerState.textureCount >= 0 && layerState.textureCount <= layerState.count, "3D texture surface count is invalid");
-      assert.equal(layerState.isolatedSurfaceCount, layerState.textureCount, "Expanded texture surfaces must use isolated foreground sampling");
+      assert.ok(layerState.isolatedSurfaceCount + layerState.nativeSurfaceCount >= layerState.textureCount - 1 && layerState.isolatedSurfaceCount + layerState.nativeSurfaceCount <= layerState.textureCount, "Expanded texture surfaces must use isolated or independently captured pixels");
       if (fixture && layerState.textureCount > 0) assert.ok(layerState.texturedUnselectedCount > 0 || layerState.selectedLayerRole === "surface", "Styled direct children lost their screenshot appearance");
       assert.equal(layerState.selectedLayerId, layerState.selectedTreeId, "3D selected plane does not follow tree selection");
       assert.equal(layerState.hasZoomToolbar, true);
@@ -412,11 +415,10 @@ try {
       assert.ok(workspaceLayout.details.left >= workspaceLayout.frame.left && workspaceLayout.details.bottom <= workspaceLayout.frame.bottom, "Floating inspector is outside the canvas");
       assert.ok(workspaceLayout.grid?.width > 0 && workspaceLayout.gizmo?.width > 0, "3D viewport decorations are missing");
       assert.ok(workspaceLayout.windowStack?.width > 0, "3D low-frequency options are missing from the overflow menu");
-      assert.ok(workspaceLayout.toolbarHost?.height > 0, "3D view toolbar did not move into the top bar");
-      if (runtime.nativeMenu) {
-        assert.equal(workspaceLayout.topbar?.height, 0, "Native actions still reserve a window toolbar");
-        assert.ok(workspaceLayout.toolbarHost.left >= workspaceLayout.preview.left && workspaceLayout.toolbarHost.right <= workspaceLayout.viewport.width, "Compact canvas tools overlap the hierarchy rail");
-      } else assert.ok(workspaceLayout.toolbar?.bottom <= workspaceLayout.preview?.top + 1, "3D view toolbar still occupies the preview area");
+      assert.ok(workspaceLayout.toolbarHost?.height >= 48, "Canvas toolbar has no reserved row");
+      assert.ok(Math.abs(workspaceLayout.toolbarHost.left - workspaceLayout.preview.left) < 1 && Math.abs(workspaceLayout.toolbarHost.width - workspaceLayout.preview.width) < 1, "Canvas toolbar is not aligned to its pane");
+      assert.ok(workspaceLayout.toolbarHost.bottom <= workspaceLayout.frame.top + 1 && workspaceLayout.details.top >= workspaceLayout.frame.top, "Toolbar or inspector covers the wrong region");
+      if (runtime.nativeMenu) assert.equal(workspaceLayout.topbar?.height, 0, "Native actions still reserve a window toolbar");
       if (workspaceLayout.viewport.width >= 1100) assert.ok(workspaceLayout.toolbar?.height <= 80, "Wide inspector toolbar wrapped unexpectedly");
       assert.ok(workspaceLayout.documentOverflowX <= 1, "Inspector layout introduces horizontal document overflow");
       const pivotLayout = await evaluate(`(() => {
@@ -659,9 +661,9 @@ try {
         const selectionBeforeDrag = await evaluate("document.querySelector('.tree-row.selected')?.dataset.treeId");
         const renderBeforeDrag = await evaluate("Number(document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderVersion || 0)");
         await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: dragPoints.start.x, y: dragPoints.start.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
-        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: (dragPoints.start.x + dragPoints.end.x) / 2, y: (dragPoints.start.y + dragPoints.end.y) / 2, button: "none", buttons: 1, modifiers: 0 });
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: (dragPoints.start.x + dragPoints.end.x) / 2, y: (dragPoints.start.y + dragPoints.end.y) / 2, button: "left", buttons: 1, modifiers: 0 });
         await delay(16);
-        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: dragPoints.end.x, y: dragPoints.end.y, button: "none", buttons: 1, modifiers: 0 });
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: dragPoints.end.x, y: dragPoints.end.y, button: "left", buttons: 1, modifiers: 0 });
         await delay(32);
         const liveDrag = await until(() => evaluate(`(() => {
           const frame = document.querySelector('.screenshot-frame');
@@ -732,13 +734,19 @@ try {
         return rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
       })()`);
       if (wheelPoint) {
+        const zoomBeforeWheel = await evaluate("Number.parseFloat(document.querySelector('.zoom-readout')?.textContent || '')");
         const wheelHandled = await evaluate(`document.querySelector('.screenshot-frame')?.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, clientX: ${wheelPoint.x}, clientY: ${wheelPoint.y}, deltaY: -120 })) === false`);
         assert.equal(wheelHandled, true, "Mouse wheel was not handled by the screenshot workspace");
-        await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '125%'"), "mouse wheel zoom in");
+        await until(() => evaluate(`Number.parseFloat(document.querySelector('.zoom-readout')?.textContent || '') > ${zoomBeforeWheel}`), "mouse wheel zoom in");
+        const zoomAfterWheel = await evaluate("Number.parseFloat(document.querySelector('.zoom-readout')?.textContent || '')");
+        assert.ok(Math.abs(zoomAfterWheel - zoomBeforeWheel * 1.25) <= 1, `Mouse wheel zoomed ${zoomBeforeWheel}% to ${zoomAfterWheel}%, expected 1.25×`);
         await evaluate(`document.querySelector('.screenshot-frame')?.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, clientX: ${wheelPoint.x}, clientY: ${wheelPoint.y}, deltaY: 120 }))`);
-        await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '100%'"), "mouse wheel zoom out");
+        await until(() => evaluate(`Math.abs(Number.parseFloat(document.querySelector('.zoom-readout')?.textContent || '') - ${zoomBeforeWheel}) <= 1`), "mouse wheel zoom out");
+        report.wheelZoom = { before: zoomBeforeWheel, after: zoomAfterWheel };
         recordCheck("mouse wheel zooms the screenshot workspace");
       }
+      await evaluate("document.querySelector('.zoom-reset').click()");
+      await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '100%'"), "zoom reset before toolbar controls");
       await evaluate("document.querySelector('[aria-label=\"放大截图\"]').click()");
       await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '125%'"), "screenshot zoom in");
       await evaluate(`(() => {

@@ -1,5 +1,7 @@
 # 空白图层深度排查
 
+> 历史诊断记录。当前实现和待办以 [项目当前状态](PROJECT_STATUS.md) 为准。
+
 日期：2026-09-22。范围：当前 Android 14 真机上的原生 Debug 视频页面。本文保留初次诊断证据；用户确认后已实施修复，结果见末节。未修改手机 App。
 
 ## 结论
@@ -62,3 +64,15 @@ Android 行为依据：[ViewDebug.captureViewLayer](https://android.googlesource
 - 验证：90 项单元测试；Electron 原生透明度检测、无效图片、取消和快照保存回读；3 档缩放各 33 组渲染检查，包含透明节点点击、折叠合成与 GPU 空纹理释放。macOS arm64 本地 `.app` 重新构建并通过启动检查，渲染错误为 0。
 
 本地复验数据：`.benchmarks/blank-layer-8o5oXr/fixed-snapshot.json`、`fixed-report.json`、`verify-fixed.ts`；仍在忽略目录，不发布用户页面数据。现有 DMG/ZIP 未重新生成。
+
+## 再次逐层核验与修正（2026-09-27）
+
+- 当前 Android 14 页面重新采集：1037 个节点，屏内正尺寸候选层 181 个，未触及显示上限。55 个节点有非透明独立画面，全部进入 WebGL（去重后 51 张纹理），两个 TextureView 视频缓冲也正常。
+- 对此前跳过的 101 个容器分批读取 `skipChildren=true` 的独立快照，本次全部透明、没有读取失败。这一页的大量空框没有找到被遗漏的自身背景，不能复制子节点或整屏图片来填满它们。
+- 仍修正了一个真实的漏采条件：`PFLAG_SKIP_DRAW` 只跳过普通绘制，快照仍会调用 `dispatchDraw` 并绘制 overlay。旧代码直接跳过这类节点，会漏掉某些自绘容器的装饰。现在检查真实继承链中的 `dispatchDraw` 覆盖及 overlay，仅跳过没有这些绘制来源的结构容器。依据：[AOSP View.createSnapshot](https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android-14.0.0_r1/core/java/android/view/View.java)、[ViewGroup.createSnapshot](https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android-14.0.0_r1/core/java/android/view/ViewGroup.java)。
+- 修正后新一轮采集约 26.5 秒，全树得到 144 张位图，没有补采错误；新增的 14 张在本次仍透明，记录为“已采集但全透明”，不是宣称恢复了 14 个可见背景。屏内分为 55 个有画面、39 个已验证透明、87 个结构容器。
+- 读取失败的自绘容器不再因 `skip-draw` 标记而按空容器压缩层距。对象身份匹配、排除子节点、视频保护检查及 64 个 / 400 万像素 / 15 秒补采上限不变。
+- 104 项单测、生产构建、3 档缩放各 45 组 WebGL 检查通过；回归覆盖继承的自绘方法、类型缓存、overlay、失败节点层距。真实图片逐层加载与像素抽样未发现整层漏显；极低透明度边缘的采样差异不视为逐像素无损证明。
+- macOS arm64 应用重新打包、签名校验、重启与真实采集通过；界面中 `SwipeLayout` 已显示“采集画面全透明”，3D 中可见独立图文和视频层。现有 DMG/ZIP 未更新。
+
+本次诊断数据在 `.benchmarks/background-audit-ozQBMJ/`，仍不提交用户页面数据。结论限于本次页面；不承诺所有 Android / QML 自绘、受保护缓冲或超出采集预算的图层都能获取。

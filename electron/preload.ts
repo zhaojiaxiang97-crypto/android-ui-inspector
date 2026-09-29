@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { AppMenuAction, AppMenuState, DebugSessionEvent, ExportSnapshotRequest, InspectionProgress, SaveSnapshotRequest, UiSnapshot } from "../shared/types";
+import type { AppMenuAction, AppMenuState, DebugSessionEvent, ExportSnapshotRequest, InspectionPreview, InspectionProgress, SaveSnapshotRequest, UiSnapshot } from "../shared/types";
 
 contextBridge.exposeInMainWorld("electronApi", {
   runtime: { sandboxed: process.sandboxed, contextIsolated: process.contextIsolated, fixtureMode: process.argv.includes("--visual-fixture"), nativeMenu: process.platform === "darwin" },
@@ -11,12 +11,19 @@ contextBridge.exposeInMainWorld("electronApi", {
   },
   probeAdb: () => ipcRenderer.invoke("probe-adb"),
   inspectDevice: (serial: string, requestId: string) => ipcRenderer.invoke("inspect-device", serial, requestId),
+  captureQmlGroup: (requestId: string, nodeId: string) => ipcRenderer.invoke("capture-qml-group", requestId, nodeId),
+  refreshViewNode: (requestId: string, nodeId: string, scope: "node" | "branch" = "node") => ipcRenderer.invoke("refresh-view-node", requestId, nodeId, scope),
   cancelInspection: (requestId: string) => ipcRenderer.invoke("cancel-inspection", requestId),
   showLayerMenu: (canHide: boolean, canRestore: boolean, canExitFocus: boolean) => ipcRenderer.invoke("layer-context-menu", canHide, canRestore, canExitFocus),
   onInspectionProgress: (callback: (progress: InspectionProgress) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, progress: InspectionProgress) => callback(progress);
     ipcRenderer.on("inspection-progress", listener);
     return () => ipcRenderer.removeListener("inspection-progress", listener);
+  },
+  onInspectionPreview: (callback: (preview: InspectionPreview) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, preview: InspectionPreview) => callback(preview);
+    ipcRenderer.on("inspection-preview", listener);
+    return () => ipcRenderer.removeListener("inspection-preview", listener);
   },
   copyText: (value: string) => ipcRenderer.invoke("copy-text", value),
   shareMcpSnapshot: (snapshot: UiSnapshot, selectedNodeId: string | null) => ipcRenderer.invoke("mcp-share", snapshot, selectedNodeId),

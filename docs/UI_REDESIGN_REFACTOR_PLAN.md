@@ -1,5 +1,7 @@
 # UI 设计稿对齐改造计划
 
+> 历史专项记录。当前实现和待办以 [项目当前状态](PROJECT_STATUS.md) 为准。
+
 状态：Windows 版和固定视觉基线已实施，跨平台原生任务已接入 CI
 版本：v0.2 视觉对齐与结构重构
 日期：2026-09-13
@@ -771,7 +773,7 @@ node scripts/app-smoke.mjs --packaged --require-device
 
 ## 12. 关联文档
 
-- 总体路线：[ANDROID_UI_INSPECTOR_PLAN.md](../../ANDROID_UI_INSPECTOR_PLAN.md)
+- 当前状态：[PROJECT_STATUS.md](PROJECT_STATUS.md)
 - 开发目录：[DEVELOPMENT_STRUCTURE.md](DEVELOPMENT_STRUCTURE.md)
 - 截图坐标：[SCREEN_COORDINATES.md](SCREEN_COORDINATES.md)
 - Windows 启动和打包记录：[WINDOWS_STARTUP.md](WINDOWS_STARTUP.md)

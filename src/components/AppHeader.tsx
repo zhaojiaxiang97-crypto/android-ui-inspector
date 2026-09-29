@@ -23,7 +23,6 @@ type Props = {
   onRefresh: () => void;
   onCapture: () => void;
   onSearchChange: (value: string) => void;
-  setSceneToolbarHost: (node: HTMLDivElement | null) => void;
 };
 
 function formatCheckedAt(date: Date | null) {
@@ -67,7 +66,6 @@ export function AppHeader({
   onRefresh,
   onCapture,
   onSearchChange,
-  setSceneToolbarHost,
 }: Props) {
   const [helpOpen, setHelpOpen] = useState(false);
   const statusMessage = runtimeError || probeError;
@@ -147,7 +145,6 @@ export function AppHeader({
         </label>
       </div>
 
-      <div className="scene-toolbar-host" ref={setSceneToolbarHost} />
       <div className="toolbar-help-wrap">
         <button
           className="toolbar-help-button"

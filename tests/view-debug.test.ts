@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:net";
 import { inflateSync } from "node:zlib";
-import { applyViewProperties, attachViewLayerImages, debugViewTree } from "../electron/adb";
-import { captureViewBitmaps, captureViewBitmapsDdms, captureViewLayers, matchesViewRoot, parseCapturedViewLayers } from "../electron/view-debug";
+import { applyViewProperties, attachViewLayerImages, debugViewTree, nativeViewBranchMatches, nativeViewNodeMatches, needsViewBitmapFallback } from "../electron/adb";
+import { captureViewBitmaps, captureViewLayers, matchesViewRoot, parseCapturedViewLayers } from "../electron/view-debug";
 import { inspectQmlHierarchy } from "../electron/qml-debug";
 import { makeNode } from "../benchmarks/fixtures";
+import { decodeViewHierarchy } from "../electron/view-hierarchy";
 import type { UiNode } from "../shared/types";
 
 const activityTarget = { packageName: "example.app", activityName: "example.app.MainActivity", component: "example.app/example.app.MainActivity" };
@@ -16,6 +17,61 @@ const activityHierarchy = `mAppBounds=Rect(0, 104 - 1080, 2355)
           android.widget.TextView{abc V.ED..... ........ 10,20-110,60 #7f001 app:id/title}
     Looper (main)
 `;
+
+type EncodedProperties = { [key: string]: string | number | boolean | EncodedProperties };
+function encodedHierarchy(root: EncodedProperties, complete = true) {
+  const names = new Map<string, number>();
+  const short = (value: number) => { const b = Buffer.alloc(3); b[0] = 83; b.writeUInt16BE(value, 1); return b; };
+  const key = (name: string) => { if (!names.has(name)) names.set(name, names.size + 1); return short(names.get(name)!); };
+  const value = (item: EncodedProperties[string]): Buffer => {
+    if (typeof item === "boolean") return Buffer.from([90, Number(item)]);
+    if (typeof item === "number") { const b = Buffer.alloc(5); b[0] = Number.isInteger(item) ? 73 : 70; if (b[0] === 73) b.writeInt32BE(item, 1); else b.writeFloatBE(item, 1); return b; }
+    if (typeof item === "string") { const bytes = Buffer.from(item), header = Buffer.alloc(3); header[0] = 82; header.writeUInt16BE(bytes.length, 1); return Buffer.concat([header, bytes]); }
+    return Buffer.concat([Buffer.from("M"), ...Object.entries(item).flatMap(([name, data]) => [key(name), value(data)]), short(0)]);
+  };
+  const body = Buffer.concat([key("window:left"), value(7), key("window:top"), value(104), value(root)]);
+  const marker = [Buffer.from("M"), key("__name__"), value("propertyIndex")];
+  return complete ? Buffer.concat([body, ...marker, ...[...names].flatMap(([name, id]) => [short(id), value(name)]), short(0)]) : body;
+}
+function encodedView(hash: number, extra: EncodedProperties = {}): EncodedProperties {
+  return { "meta:__name__": "android.view.View", "meta:__hash__": hash, "layout:left": 0, "layout:top": 0, "layout:width": 100, "layout:height": 40, "misc:visibility": 0, ...extra };
+}
+
+test("V2 decoding preserves identity, text, scroll, transforms and rejects incomplete hierarchies", () => {
+  const root = debugViewTree(activityHierarchy, activityTarget);
+  const child = encodedView(-1, { "layout:left": 10, "layout:top": 20, "drawing:translationX": 3, "text:text": "背景 = 😀", "id": "id/title", "drawing:alpha": 0.5, "padding:paddingLeft": 2 });
+  const properties = encodedView(0x9c5dabe, { "meta:__name__": "com.android.internal.policy.DecorView", "drawing:scaleX": 2, "drawing:scaleY": 2, "drawing:pivotX": 0, "drawing:pivotY": 0, "scrolling:scrollX": 4, "scrolling:scrollY": 5, "meta:__childCount__": 1, "meta:__child__0": child });
+  const bytes = encodedHierarchy(properties);
+  applyViewProperties(root, decodeViewHierarchy(bytes), true);
+  const node = root.children[0].children[0];
+  assert.equal(node.attributes?.["view-ref"], "android.view.View@ffffffff");
+  assert.equal(node.bounds?.raw, "[25,134][125,174]");
+  assert.equal(node.text, "背景 = 😀");
+  assert.equal(node.attributes?.["effective-alpha"], "0.5");
+  assert.equal(node.attributes?.["padding-left"], "2");
+  assert.equal(node.attributes?.["skip-draw"], undefined, "willNotDraw must not be mistaken for PFLAG_SKIP_DRAW");
+  const current = structuredClone(root);
+  assert.equal(nativeViewNodeMatches(root, current, node.id), true);
+  const nested = makeNode(`${node.id}/0`);
+  nested.attributes = { "view-ref": "android.view.View@nested" };
+  node.children.push(nested);
+  current.children[0].children[0].children.push(structuredClone(nested));
+  assert.equal(nativeViewBranchMatches(root, current, node.id), true);
+  current.children[0].children[0].children[0].attributes!["view-ref"] = "android.view.View@replaced";
+  assert.equal(nativeViewBranchMatches(root, current, node.id), false, "a replaced descendant must invalidate a branch refresh");
+  current.children[0].children[0].children[0].attributes!["view-ref"] = "android.view.View@nested";
+  current.children[0].children[0].bounds!.left++;
+  assert.equal(nativeViewNodeMatches(root, current, node.id), true, "the same View may move between initial capture and refresh");
+  current.children[0].children[0].bounds!.left--;
+  current.children[0].children[0].attributes!["view-ref"] = "android.view.View@other";
+  assert.equal(nativeViewNodeMatches(root, current, node.id), false, "replaced views cannot receive a stale bitmap");
+  assert.equal(nativeViewNodeMatches(root, structuredClone(root), "0/99"), false);
+  for (const data of [bytes.subarray(0, 12), bytes.subarray(0, bytes.length - 1), Buffer.concat([bytes, Buffer.from([0])]), encodedHierarchy(properties, false), encodedHierarchy({ ...properties, "meta:__childCount__": 2 }), encodedHierarchy({ ...properties, "meta:__child__0": properties }), encodedHierarchy({ ...properties, "layout:width": NaN })]) assert.throws(() => decodeViewHierarchy(data), /Debug V2/);
+  const rotated = decodeViewHierarchy(encodedHierarchy(encodedView(1, { "drawing:rotation": 90, "drawing:pivotX": 0, "drawing:pivotY": 0, "meta:__childCount__": 1, "meta:__child__0": child })));
+  assert.match(rotated, /layout:getLocationOnScreen_x\(\)=3,-13 layout:getLocationOnScreen_y\(\)=3,117/);
+  const perspective = decodeViewHierarchy(encodedHierarchy(encodedView(1, { "drawing:rotationY": 30, "meta:__childCount__": 1, "meta:__child__0": child })));
+  assert.equal(perspective.includes("getLocationOnScreen"), false, "do not guess unavailable camera/perspective geometry");
+});
 
 test("Activity hierarchy retains shorthand DecorView and fills its measured geometry from DDMS", () => {
   const root = debugViewTree(activityHierarchy, activityTarget);
@@ -38,6 +94,25 @@ test("Activity hierarchy retains shorthand DecorView and fills its measured geom
   const ordinary = debugViewTree(activityHierarchy.replace("DecorView@9c5dabe[MainActivity]", "com.android.internal.policy.DecorView{9c5dabe V.E...... ........ 0,0-1080,2355}"), activityTarget);
   assert.equal(ordinary.children[0].attributes?.["view-ref"], ref);
   assert.equal(ordinary.children[0].children[0].className, "android.widget.LinearLayout");
+});
+
+test("captured framework views skip duplicate JDWP lookup, custom and surface views do not", () => {
+  const node = makeNode("view");
+  node.layerImageStatus = "captured";
+  for (const className of ["android.view.View", "android.widget.TextView", "android.widget.FrameLayout"]) {
+    node.className = className;
+    assert.equal(needsViewBitmapFallback(node), false);
+  }
+  for (const className of ["android.view.SurfaceView", "android.view.TextureView", "com.example.CustomSurface", "android.widget.VideoView"]) {
+    node.className = className;
+    assert.equal(needsViewBitmapFallback(node), true);
+  }
+  node.className = "android.widget.TextView";
+  node.layerImageStatus = "unavailable";
+  assert.equal(needsViewBitmapFallback(node), true);
+  node.layerImageStatus = "captured";
+  node.attributes = { "skip-draw": "true" };
+  assert.equal(needsViewBitmapFallback(node), true);
 });
 
 test("only DecorView shorthand is accepted as an alias of a qualified root identity", () => {
@@ -81,50 +156,6 @@ test("DDMS restores omitted custom parents and images, preserving identity and n
   }
 });
 
-test("DDMS leaf capture stays on the read-only VUOP protocol", async () => {
-  const int = (value: number) => { const buffer = Buffer.alloc(4); buffer.writeUInt32BE(value); return buffer; };
-  const png = Buffer.alloc(33);
-  png.set([137, 80, 78, 71, 13, 10, 26, 10]);
-  png.writeUInt32BE(13, 8); png.write("IHDR", 12); png.writeUInt32BE(48, 16); png.writeUInt32BE(24, 20);
-  const refs: string[] = [];
-  const server = createServer((socket) => {
-    let buffer = Buffer.alloc(0), handshaken = false;
-    socket.on("data", (data) => {
-      buffer = Buffer.concat([buffer, data]);
-      if (!handshaken) {
-        if (buffer.length < 14) return;
-        socket.write(buffer.subarray(0, 14)); buffer = buffer.subarray(14); handshaken = true;
-      }
-      while (buffer.length >= 11 && buffer.length >= buffer.readUInt32BE()) {
-        const packet = buffer.subarray(0, buffer.readUInt32BE()); buffer = buffer.subarray(packet.length);
-        assert.equal(`${packet[9]}/${packet[10]}`, "199/1");
-        const body = packet.subarray(11);
-        assert.equal(body.subarray(0, 4).toString(), "VUOP");
-        const request = body.subarray(8);
-        assert.equal(request.readUInt32BE(0), 1);
-        const rootLength = request.readUInt32BE(4);
-        const rootBytes = request.subarray(8, 8 + rootLength * 2);
-        const swap = (value: Buffer) => { const copy = Buffer.from(value); for (let i = 0; i < copy.length; i += 2) [copy[i], copy[i + 1]] = [copy[i + 1], copy[i]]; return copy.toString("utf16le"); };
-        const root = swap(rootBytes), refLength = request.readUInt32BE(8 + rootBytes.length);
-        refs.push(swap(request.subarray(12 + rootBytes.length, 12 + rootBytes.length + refLength * 2)));
-        assert.equal(root, "activity-window");
-        const response = Buffer.concat([Buffer.from("VUOP"), int(png.length), png]);
-        const header = Buffer.alloc(11); header.writeUInt32BE(11 + response.length, 0); packet.copy(header, 4, 4, 8); header[8] = 0x80;
-        socket.write(Buffer.concat([header, response]));
-      }
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  try {
-    const address = server.address(); assert.ok(address && typeof address !== "string");
-    const result = await captureViewBitmapsDdms(address.port, { windowName: "activity-window" }, [{ ref: "android.widget.TextView@a" }, { ref: "android.widget.ImageView@b" }]);
-    assert.deepEqual(refs, ["android.widget.TextView@a", "android.widget.ImageView@b"]);
-    assert.equal(result.images.size, 2);
-    assert.equal(result.images.get(refs[0])?.width, 48);
-    assert.equal(result.failures.size, 0);
-  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
-});
-
 test("fallback preserves own pixels, handles cold startup and bounds capture work", async () => {
   const int = (n: number) => { const b = Buffer.alloc(4); b.writeInt32BE(n); return b; };
   const string = (s: string) => Buffer.concat([int(Buffer.byteLength(s)), Buffer.from(s)]);
@@ -142,7 +173,8 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
   ] as const;
   const strings = new Map<number, string>(), classes = new Map<string, number>(), arrays = new Map<number, number>();
   const pins: number[] = [], released: number[] = [], recycled: number[] = [], drawn: number[] = [];
-  let next = 1000, disposed = false, suspendCount = 0, resumes = 0, brokenPixels = false;
+  let next = 1000, disposed = false, suspendCount = 0, resumes = 0, brokenPixels = false, emptyTexture = false, skipOwn = false, disconnect = false;
+  let customDraw = false, overlayOwn = false;
   const refs = ["example.Image@aaa", "example.Image@bbb", "example.Image@ccc", "android.view.TextureView@ddd"];
   const args = (data: Buffer, start: number, count: number) => {
     const values: number[] = [];
@@ -187,6 +219,10 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
             payload = Buffer.concat([int(1), Buffer.from([1]), int(classes.get(name)!), int(7)]); break;
           }
           case "3/1":
+            if (customDraw && body.readInt32BE() === classes.get("Lexample/Image;")) {
+              if (!classes.has("Lexample/DecoratedLayout;")) classes.set("Lexample/DecoratedLayout;", classes.size + 1);
+              payload = int(classes.get("Lexample/DecoratedLayout;")!); break;
+            }
             if (!classes.has("Landroid/view/View;")) classes.set("Landroid/view/View;", classes.size + 1);
             payload = int(classes.get("Landroid/view/View;")!); break;
           case "2/1": payload = string([...classes].find(([, id]) => id === body.readInt32BE())![0]); break;
@@ -195,7 +231,16 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
             if (!classes.has(name)) classes.set(name, classes.size + 1);
             payload = Buffer.concat([Buffer.from([1]), int(classes.get(name)!)]); break;
           }
-          case "2/5": payload = Buffer.concat([int(methods.length), ...methods.flatMap(([id, name, sig]) => [int(id), string(name), string(sig), int(0)])]); break;
+          case "2/5": {
+            const extra = customDraw && body.readInt32BE() === classes.get("Lexample/DecoratedLayout;")
+              ? [int(16), string("dispatchDraw"), string("(Landroid/graphics/Canvas;)V"), int(0)] : [];
+            payload = Buffer.concat([int(methods.length + Number(extra.length > 0)), ...methods.flatMap(([id, name, sig]) => [int(id), string(name), string(sig), int(0)]), ...extra]); break;
+          }
+          case "2/4": payload = Buffer.concat([int(2), int(99), string("mPrivateFlags"), string("I"), int(0), int(100), string("mOverlay"), string("Landroid/view/ViewOverlay;"), int(0)]); break;
+          case "9/2": {
+            const field = body.readInt32BE(8); assert.ok(field === 99 || field === 100);
+            payload = Buffer.concat([int(1), field === 99 ? tagged("I", skipOwn ? 0x80 : 0) : tagged("L", overlayOwn ? 900 : 0)]); break;
+          }
           case "9/7": pins.push(body.readInt32BE()); break;
           case "9/8": released.push(body.readInt32BE()); break;
           case "17/1": payload = Buffer.concat([Buffer.from([1]), int(body.readInt32BE() - 4000)]); break;
@@ -222,6 +267,7 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
               case 1: payload = result("I", 0xabc); break;
               case 3: case 4: payload = result("I", 1); break;
               case 7:
+                if (disconnect) { socket.destroy(); return; }
                 assert.deepEqual(values, [200, 1], "snapshot must skip children"); drawn.push(object);
                 payload = object === 502 ? result("L", 0, 999) : result("L", object + 100); break;
               case 9: assert.deepEqual(values, [300, 0]); payload = result("L", object + 100); break;
@@ -234,7 +280,7 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
             break;
           }
           case "4/1": payload = tagged("[", ++next); break;
-          case "13/2": payload = Buffer.concat([Buffer.from("I"), int(1), Buffer.from([1, arrays.get(body.readInt32BE())! - 700, 0, 0]).subarray(0, brokenPixels ? 3 : 4)]); break;
+          case "13/2": payload = Buffer.concat([Buffer.from("I"), int(1), Buffer.from([emptyTexture && arrays.get(body.readInt32BE()) === 704 ? 0 : 1, arrays.get(body.readInt32BE())! - 700, 0, 0]).subarray(0, brokenPixels ? 3 : 4)]); break;
           case "1/6": disposed = true; break;
           default: assert.fail(`unexpected command ${command}`);
         }
@@ -281,6 +327,26 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
     assert.equal(disposed, true);
     assert.deepEqual(drawn, capturedObjects, "a stale window never captures another view's pixels");
     assert.deepEqual(released.sort(), pins.sort());
+    brokenPixels = false; emptyTexture = true; skipOwn = true;
+    const empty = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [{ ref: refs[0], captureOwn: true }, { ref: refs[3], captureOwn: false }]);
+    assert.equal(empty.images.size, 0, "a transparent video buffer is not a successful capture");
+    assert.match(empty.failures.get(refs[3])!, /未确认取得视频画面/);
+    assert.equal(empty.kinds.get(refs[3]), "texture", "probe video buffers even when DDMS already supplied a bitmap");
+    assert.equal(empty.skipDraw.has(refs[0]), true);
+    assert.deepEqual(drawn, capturedObjects, "skip-draw containers should not consume the capture budget");
+    customDraw = true;
+    const decorated = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [refs[0], refs[2]].map(ref => ({ ref, captureOwn: true })));
+    assert.deepEqual([...decorated.images.keys()], [refs[0], refs[2]], "inherited dispatchDraw pixels survive SKIP_DRAW, including cached types");
+    assert.equal(decorated.skipDraw.size, 0);
+    customDraw = false; overlayOwn = true;
+    const overlay = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [{ ref: refs[0], captureOwn: true }]);
+    assert.equal(overlay.images.has(refs[0]), true, "an overlay must be captured even without an own background");
+    assert.equal(overlay.skipDraw.size, 0);
+    overlayOwn = false;
+    emptyTexture = false; skipOwn = false; disconnect = true;
+    const partial = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [{ ref: refs[0], captureOwn: true }, { ref: refs[3], captureOwn: false }]);
+    assert.deepEqual([...partial.images.keys()], [refs[3]], "disconnect must preserve already captured video pixels");
+    assert.match(partial.failures.get(refs[0])!, /提前关闭/);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
 
@@ -616,8 +682,9 @@ test("exported native z, clipping and padding are preserved without inventing mi
 
 test("Debug capture chooses the window whose root identity matches, not the first window", async () => {
   const captured: string[] = [];
+  let layerRequests = 0;
   let duplicateRoot = false, changedRoot = false, truncate = false, incomplete = false;
-  const padding = " property=12,hello world ".repeat(100_000);
+  const padding = "hello world ".repeat(1024);
   const int = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
   const utf16 = (s: string) => Buffer.from(s, "utf16le").swap16();
   const server = createServer((socket) => {
@@ -637,6 +704,7 @@ test("Debug capture chooses the window whose root identity matches, not the firs
           const operation = packet.readUInt32BE(19), length = packet.readUInt32BE(23);
           const name = Buffer.from(packet.subarray(27, 27 + length * 2)).swap16().toString("utf16le");
           if (operation === 2) {
+            layerRequests++;
             assert.equal(name, "activity", "capture only the matching window");
             data = Buffer.concat([Buffer.alloc(8), Buffer.from([2])]);
           } else {
@@ -644,10 +712,12 @@ test("Debug capture chooses the window whose root identity matches, not the firs
           const flags = packet.subarray(27 + length * 2);
           if (flags.readUInt32BE(0) === 0) {
             assert.equal(flags.readUInt32BE(4), 1);
+            assert.equal(flags.readUInt32BE(8), 1, "never use reflection for full properties after JDWP attach");
             captured.push(name);
           } else assert.equal(flags.readUInt32BE(4), 0, "identity probes need no properties");
           const full = flags.readUInt32BE(0) === 0;
-          data = Buffer.from(`${name === "activity" || duplicateRoot ? `com.android.internal.policy.DecorView@${full && changedRoot ? "deadbeef" : "9c5dabe"}` : "com.android.internal.policy.DecorView@1b9116c"} properties\n${full ? padding : ""}${incomplete ? "" : "\nDONE.\n"}`);
+          const hash = name === "activity" || duplicateRoot ? full && changedRoot ? -559038737 : 0x9c5dabe : 0x1b9116c;
+          data = full ? encodedHierarchy(encodedView(hash, { "meta:__name__": "com.android.internal.policy.DecorView", "text:text": padding }), !incomplete) : Buffer.from(`com.android.internal.policy.DecorView@${(hash >>> 0).toString(16)} properties\n\nDONE.\n`);
           }
         }
         const payload = Buffer.concat([Buffer.from(type), int(data.length), data]);
@@ -676,12 +746,23 @@ test("Debug capture chooses the window whose root identity matches, not the firs
     let dump = "";
     const root = debugViewTree(activityHierarchy, activityTarget);
     const rootRefs = root.children.map((node) => node.attributes!["view-ref"]);
-    assert.deepEqual(await captureViewLayers(address.port, { rootRefs, onHierarchy: (value) => { dump = value; } }), []);
+    let batchTiming: { waitMs: number; readMs: number; parseMs: number; bytes: number; layers: number } | undefined;
+    assert.deepEqual(await captureViewLayers(address.port, { rootRefs, onHierarchy: (value) => { dump = value; }, onBatchTiming: (timing) => { batchTiming = timing; } }), []);
+    assert.equal(batchTiming?.bytes, 9);
+    assert.equal(batchTiming?.layers, 0);
+    assert.ok(batchTiming && batchTiming.waitMs >= 0 && batchTiming.readMs >= 0 && batchTiming.parseMs >= 0);
     assert.deepEqual(captured, ["activity"]);
     assert.match(dump, /^com\.android\.internal\.policy\.DecorView@9c5dabe/);
-    assert.ok(dump.endsWith(`${padding}\nDONE.\n`), "fragmented replies must retain all properties");
+    assert.ok(dump.includes(`text:mText=${padding.length},${padding}`), "fragmented replies must retain all properties");
+    assert.deepEqual(await captureViewLayers(address.port, { rootRefs, onHierarchy: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(layerRequests, 1, "bulk capture started before the early preview finished");
+    } }), []);
+    assert.equal(layerRequests, 2);
+    assert.deepEqual(await captureViewLayers(address.port, { rootRefs, skipImages: true, onHierarchy: () => undefined }), []);
+    assert.equal(layerRequests, 2, "single-view refresh must not launch the bulk DDMS image capture");
     await assert.rejects(captureViewLayers(address.port, { rootRefs: ["stale"], onHierarchy: () => assert.fail("wrong window properties") }), /窗口与当前控件树不一致/);
-    assert.deepEqual(captured, ["activity"]);
+    assert.deepEqual(captured, ["activity", "activity", "activity"]);
     duplicateRoot = false;
     changedRoot = true;
     await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchy: () => assert.fail("stale full hierarchy") }), /身份已变化/);
@@ -690,10 +771,10 @@ test("Debug capture chooses the window whose root identity matches, not the firs
     await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchy: () => assert.fail("truncated hierarchy") }), /提前关闭/);
     truncate = false;
     incomplete = true;
-    await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchy: () => assert.fail("unfinished Android export") }), /未完成控件属性导出/);
+    await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchy: () => assert.fail("unfinished Android export") }), /Debug V2/);
     duplicateRoot = true;
     await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchy: () => assert.fail("ambiguous window properties") }), /多个 Debug 窗口匹配/);
-    assert.deepEqual(captured, Array(4).fill("activity"));
+    assert.deepEqual(captured, Array(6).fill("activity"));
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
 
@@ -712,4 +793,28 @@ test("cancel closes stalled native and QML connections promptly", async () => {
       await assert.rejects(capture(address.port, controller.signal));
     } finally { clearTimeout(timeout); await new Promise<void>((resolve) => server.close(() => resolve())); }
   }
+});
+
+test("next debugger handshake survives an earlier canceled layer capture", { timeout: 10_000 }, async () => {
+  const server = createServer((socket) => {
+    socket.once("data", (handshake) => {
+      setTimeout(() => {
+        if (socket.destroyed) return;
+        socket.write(handshake);
+        socket.once("data", (request) => {
+          const payload = Buffer.from([86, 85, 76, 87, 0, 0, 0, 4, 0, 0, 0, 0]);
+          const reply = Buffer.alloc(11);
+          reply.writeUInt32BE(11 + payload.length);
+          request.copy(reply, 4, 4, 8);
+          reply[8] = 0x80;
+          socket.end(Buffer.concat([reply, payload]));
+        });
+      }, 5_200);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address(); assert.ok(address && typeof address !== "string");
+    await assert.rejects(captureViewLayers(address.port, { rootRefs: ["DecorView@a"], onHierarchy: () => undefined, signal: AbortSignal.timeout(8_000) }), /窗口与当前控件树不一致/);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });

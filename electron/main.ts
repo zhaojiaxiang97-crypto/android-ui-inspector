@@ -3,14 +3,14 @@ import type { MenuItemConstructorOptions, SaveDialogOptions } from "electron";
 import { writeFile } from "node:fs/promises";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { getDebugTarget, inspectDevice, observeDebugApp, parseUiHierarchy, probeAdb } from "./adb";
+import { captureQmlGroupImage, captureViewNodes, getDebugTarget, inspectPreferredDevice, observeDebugApp, parseUiHierarchy, probeAdb } from "./adb";
 import { DebugSession } from "./debug-session";
 import { clearLiveEndpoint, openLiveBridge } from "./mcp-live";
 import { clearSnapshots, loadSnapshots, saveSnapshot } from "./snapshot-store";
 import { measureLayerImages } from "./layer-images";
 import { publishMcpSnapshot, revokeMcpSnapshot } from "./mcp-snapshot";
 import { isUiSnapshot } from "../shared/snapshot-validation";
-import type { AppMenuAction, AppMenuState, DeviceInfo, ExportFormat, ExportSnapshotRequest, ExportSnapshotResult, LayerMenuAction, UiNode, UiSnapshot } from "../shared/types";
+import type { AppMenuAction, AppMenuState, DeviceInfo, ExportFormat, ExportSnapshotRequest, ExportSnapshotResult, LayerMenuAction, QmlGroupImage, UiNode, UiSnapshot, ViewRefreshResult } from "../shared/types";
 
 const rendererUrl = process.env.ELECTRON_RENDERER_URL;
 const visualFixtureMode = process.argv.includes("--visual-fixture");
@@ -26,6 +26,9 @@ const visualFixtureState = requestedFixtureState();
 let mainWindow: BrowserWindow | null = null;
 let quitting = false;
 const inspections = new Map<number, { requestId: string; controller: AbortController; done: Promise<UiSnapshot> }>();
+const liveSessions = new Map<number, { requestId: string; snapshot: UiSnapshot }>();
+const qmlGroups = new Map<number, { controller: AbortController; done: Promise<QmlGroupImage | null> }>();
+const viewRefreshes = new Map<number, { controller: AbortController; done: Promise<ViewRefreshResult> }>();
 let mcpRevision = 0;
 const mcpSnapshotPath = () => join(app.getPath("userData"), "mcp", "current.json");
 let debugSession: DebugSession | null = null;
@@ -202,6 +205,7 @@ function createWindow() {
     },
   });
   mainWindow = window;
+  const windowId = window.webContents.id;
   let failureReported = false;
   const reportFailure = (reason: string) => {
     if (failureReported || quitting || window.isDestroyed()) return;
@@ -226,7 +230,14 @@ function createWindow() {
   });
   window.webContents.on("preload-error", (_event, _path, error) => reportFailure(`界面桥接加载失败：${error.message}`));
   window.webContents.on("did-start-navigation", (_event, _url, inPlace, isMainFrame) => {
-    if (isMainFrame && !inPlace) stopMcpSharing();
+    if (isMainFrame && !inPlace) {
+      stopMcpSharing();
+      qmlGroups.get(windowId)?.controller.abort();
+      qmlGroups.delete(windowId);
+      viewRefreshes.get(windowId)?.controller.abort();
+      viewRefreshes.delete(windowId);
+      liveSessions.delete(windowId);
+    }
   });
 
   const loading = !app.isPackaged && rendererUrl
@@ -235,6 +246,11 @@ function createWindow() {
   void loading.catch((error: unknown) => reportFailure(`页面加载失败：${error instanceof Error ? error.message : String(error)}`));
 
   window.on("closed", () => {
+    qmlGroups.get(windowId)?.controller.abort();
+    qmlGroups.delete(windowId);
+    viewRefreshes.get(windowId)?.controller.abort();
+    viewRefreshes.delete(windowId);
+    liveSessions.delete(windowId);
     if (mainWindow === window) { stopMcpSharing(); mainWindow = null; updateApplicationMenu(); }
   });
 }
@@ -315,6 +331,11 @@ ipcMain.handle("inspect-device", async (event, serial: unknown, requestId: unkno
   const sender = event.sender;
   const ownerId = sender.id;
   const previous = inspections.get(ownerId);
+  const previousGroup = qmlGroups.get(ownerId);
+  const previousView = viewRefreshes.get(ownerId);
+  previousGroup?.controller.abort();
+  previousView?.controller.abort();
+  liveSessions.delete(ownerId);
   previous?.controller.abort();
   const controller = new AbortController();
   const onDestroyed = () => controller.abort();
@@ -322,15 +343,25 @@ ipcMain.handle("inspect-device", async (event, serial: unknown, requestId: unkno
   const done = (async () => {
     // Release the previous debugger/port before starting another capture.
     await previous?.done.catch(() => undefined);
+    await previousGroup?.done.catch(() => undefined);
+    await previousView?.done.catch(() => undefined);
     await debugSession?.settled();
     controller.signal.throwIfAborted();
-    const snapshot = visualFixtureMode ? fixtureSnapshot(serial) : await inspectDevice(serial, {
+    const snapshot = visualFixtureMode ? fixtureSnapshot(serial) : await inspectPreferredDevice(serial, {
       signal: controller.signal,
       onProgress: (stage, elapsedMs) => {
         if (!sender.isDestroyed()) sender.send("inspection-progress", { requestId, stage, elapsedMs });
       },
+      onPreview: (phase, snapshot) => {
+        if (!sender.isDestroyed() && !controller.signal.aborted) sender.send("inspection-preview", { requestId, phase, snapshot });
+      },
     });
     await measureLayerImages(snapshot.root, controller.signal);
+    controller.signal.throwIfAborted();
+    if ((snapshot.inspectionSource === "debug-qml" && snapshot.root?.attributes?.["qml-process-id"] && snapshot.root.attributes["qml-window-id"])
+      || ((snapshot.inspectionSource === "debug-view" || snapshot.inspectionSource === "debug-hybrid") && snapshot.root?.attributes?.["debug-process-id"] && snapshot.root.attributes["debug-window-name"])) {
+      liveSessions.set(ownerId, { requestId, snapshot });
+    }
     return snapshot;
   })();
   inspections.set(ownerId, { requestId, controller, done });
@@ -339,6 +370,48 @@ ipcMain.handle("inspect-device", async (event, serial: unknown, requestId: unkno
     sender.removeListener("destroyed", onDestroyed);
     if (inspections.get(ownerId)?.controller === controller) inspections.delete(ownerId);
   }
+});
+ipcMain.handle("capture-qml-group", async (event, requestId: unknown, nodeId: unknown) => {
+  if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) throw new Error("无效的抓图来源。");
+  if (typeof requestId !== "string" || requestId.length > 128 || typeof nodeId !== "string" || !/^0(?:\/\d+)*$/.test(nodeId) || nodeId.length > 600) return null;
+  const ownerId = event.sender.id;
+  const session = liveSessions.get(ownerId);
+  if (!session || session.snapshot.inspectionSource !== "debug-qml" || session.requestId !== requestId || inspections.has(ownerId) || debugSession?.state.busy) return null;
+  const previous = qmlGroups.get(ownerId);
+  previous?.controller.abort();
+  const controller = new AbortController();
+  const done = (async () => {
+    await previous?.done.catch(() => undefined);
+    controller.signal.throwIfAborted();
+    return captureQmlGroupImage(session.snapshot.serial, session.snapshot, nodeId, controller.signal);
+  })();
+  qmlGroups.set(ownerId, { controller, done });
+  try { return await done; }
+  catch { return null; }
+  finally { if (qmlGroups.get(ownerId)?.controller === controller) qmlGroups.delete(ownerId); }
+});
+ipcMain.handle("refresh-view-node", async (event, requestId: unknown, nodeId: unknown, scope: unknown = "node") => {
+  if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) throw new Error("无效的抓图来源。");
+  if (typeof requestId !== "string" || requestId.length > 128 || typeof nodeId !== "string" || !/^0(?:\/\d+)*$/.test(nodeId) || nodeId.length > 600)
+    throw new Error("控件标识无效。");
+  if (scope !== "node" && scope !== "branch") throw new Error("刷新范围无效。");
+  const ownerId = event.sender.id;
+  const session = liveSessions.get(ownerId);
+  if (!session || (session.snapshot.inspectionSource !== "debug-view" && session.snapshot.inspectionSource !== "debug-hybrid")
+      || session.requestId !== requestId || inspections.has(ownerId) || debugSession?.state.active)
+    throw new Error("当前快照已失效，请重新采集页面。");
+  if (session.snapshot.inspectionSource === "debug-hybrid" && scope === "branch") throw new Error("混合快照暂不支持分支刷新，请选择单个控件。");
+  const previous = viewRefreshes.get(ownerId);
+  previous?.controller.abort();
+  const controller = new AbortController();
+  const done = (async () => {
+    await previous?.done.catch(() => undefined);
+    controller.signal.throwIfAborted();
+    return captureViewNodes(session.snapshot.serial, session.snapshot, nodeId, scope === "branch", controller.signal);
+  })();
+  viewRefreshes.set(ownerId, { controller, done });
+  try { return await done; }
+  finally { if (viewRefreshes.get(ownerId)?.controller === controller) viewRefreshes.delete(ownerId); }
 });
 ipcMain.handle("cancel-inspection", (event, requestId: unknown) => {
   const active = inspections.get(event.sender.id);
@@ -474,9 +547,11 @@ app.on("before-quit", (event) => {
   stopMcpSharing();
   const captures = [...inspections.values()];
   for (const capture of captures) capture.controller.abort();
-  if (captures.length) {
+  const groups = [...qmlGroups.values()];
+  for (const group of groups) group.controller.abort();
+  if (captures.length || groups.length) {
     event.preventDefault();
-    void Promise.allSettled(captures.map((capture) => capture.done)).then(() => app.quit());
+    void Promise.allSettled([...captures.map((capture) => capture.done), ...groups.map((group) => group.done)]).then(() => app.quit());
   } else if (debugSession?.state.busy) {
     event.preventDefault();
     void debugSession.settled().then(() => app.quit());
