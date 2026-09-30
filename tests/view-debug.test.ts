@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:net";
-import { inflateSync } from "node:zlib";
-import { applyViewProperties, attachViewLayerImages, debugViewTree, nativeViewBranchMatches, nativeViewNodeMatches, needsViewBitmapFallback } from "../electron/adb";
-import { captureViewBitmaps, captureViewLayers, matchesViewRoot, parseCapturedViewLayers } from "../electron/view-debug";
+import { crc32, deflateSync, inflateSync } from "node:zlib";
+import { applyViewProperties, attachViewLayerImages, captureSignal, debugViewTree, hasActivityHierarchy, matchSdkVisibleLayers, nativeViewBranchContextMatches, nativeViewBranchMatches, nativeViewNodeMatches, needsViewBitmapFallback, parsePureViewRefs, parseViewStyleReply } from "../electron/adb";
+import { captureViewBitmaps, captureViewLayers, matchesViewRoot, parseCapturedViewLayers, parseCapturedViewLayerPrefix } from "../electron/view-debug";
 import { inspectQmlHierarchy } from "../electron/qml-debug";
 import { makeNode } from "../benchmarks/fixtures";
 import { decodeViewHierarchy } from "../electron/view-hierarchy";
@@ -17,6 +17,75 @@ const activityHierarchy = `mAppBounds=Rect(0, 104 - 1080, 2355)
           android.widget.TextView{abc V.ED..... ........ 10,20-110,60 #7f001 app:id/title}
     Looper (main)
 `;
+
+test("selected style requires the same View, process and geometry", () => {
+  const bounds = { left: 10, top: 20, right: 110, bottom: 60, raw: "[10,20][110,60]" };
+  const reply = "Result: Bundle[{result=ok, ref=example.TextView@a, rootRef=example.Decor@b, processInstance=11111111-1111-1111-1111-111111111111, x=10, y=20, width=100, height=40, backgroundType=android.graphics.drawable.ColorDrawable, backgroundColor=#FF123456, textColor=#FFFF0000, textSizePx=22.5, capturedAtMillis=1780000000000}]";
+  const read = (value: string) => parseViewStyleReply(value, "example.TextView@a", "example.Decor@b", "11111111-1111-1111-1111-111111111111", bounds);
+  assert.equal(read(reply).backgroundColor, "#FF123456");
+  assert.equal(read(reply).textSizePx, 22.5);
+  assert.throws(() => read(reply.replace("width=100", "width=101")), /尺寸/);
+  assert.throws(() => read(reply.replace("example.TextView@a", "example.TextView@c")), /身份/);
+  assert.throws(() => read(reply.replace("textColor=#FFFF0000", "textColor=red")), /样式数据/);
+  assert.throws(() => read("Result: Bundle[{error=Unauthorized or unsupported request}]"), /SDK/);
+});
+
+test("SDK pure layout hints are bounded and older SDKs keep the fallback", () => {
+  assert.equal(parsePureViewRefs(undefined).size, 0);
+  assert.equal(parsePureViewRefs("-").size, 0);
+  assert.deepEqual([...parsePureViewRefs("android.widget.FrameLayout@a;example.Custom$View@b")],
+    ["android.widget.FrameLayout@a", "example.Custom$View@b"]);
+  assert.throws(() => parsePureViewRefs("example.View@a;example.View@a"), /身份无效/);
+  assert.throws(() => parsePureViewRefs("example.View@a,evil"), /身份无效/);
+  assert.throws(() => parsePureViewRefs("x".repeat(16_001)), /身份无效/);
+});
+
+test("branch refresh accepts changes inside the target but rejects a changed outside path", () => {
+  const root = makeNode("0"), parent = makeNode("0/0"), target = makeNode("0/0/0"), sibling = makeNode("0/0/1");
+  for (const node of [root, parent, target, sibling]) node.attributes = { "view-ref": `example.View@${node.id.replace(/\//g, "")}` };
+  target.children = [makeNode("0/0/0/0")];
+  target.children[0].attributes = { "view-ref": "example.View@old" };
+  parent.children = [target, sibling]; root.children = [parent];
+  const changed = structuredClone(root);
+  changed.children[0].children[0].children = [makeNode("0/0/0/0"), makeNode("0/0/0/1")];
+  changed.children[0].children[0].children[0].attributes = { "view-ref": "example.View@new" };
+  changed.children[0].children[0].children[1].attributes = { "view-ref": "example.View@old" };
+  changed.children[0].children[0].bounds = { ...target.bounds!, right: target.bounds!.right + 10, raw: "[0,0][370,48]" };
+  assert.equal(nativeViewBranchContextMatches(root, changed, target.id), true);
+  changed.children[0].children[1].attributes!["view-ref"] = "example.View@replaced";
+  assert.equal(nativeViewBranchContextMatches(root, changed, target.id), false);
+  changed.children[0].children[1].attributes!["view-ref"] = sibling.attributes!["view-ref"];
+  changed.children[0].attributes!["view-ref"] = "example.View@parent-rebuilt";
+  assert.equal(nativeViewBranchContextMatches(root, changed, target.id), false);
+  changed.children[0].attributes!["view-ref"] = parent.attributes!["view-ref"];
+  changed.children[0].children[1].bounds = { ...sibling.bounds!, left: sibling.bounds!.left + 1, raw: "[1,0][360,48]" };
+  assert.equal(nativeViewBranchContextMatches(root, changed, target.id), true, "an unrelated sibling may move during a scoped refresh");
+  changed.children[0].children[1].bounds = sibling.bounds;
+  changed.children[0].children[1].visibleToUser = false;
+  assert.equal(nativeViewBranchContextMatches(root, changed, target.id), false, "an outside visibility change needs a full refresh");
+  changed.children[0].children[1].visibleToUser = sibling.visibleToUser;
+  changed.children[0].bounds = { ...parent.bounds!, top: parent.bounds!.top + 1, raw: "[0,1][360,49]" };
+  assert.equal(nativeViewBranchContextMatches(root, changed, target.id), false, "a moved ancestor invalidates the target placement");
+});
+
+test("capture deadline respects both timeout and caller cancellation", async () => {
+  const timed = captureSignal(undefined, 1);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(timed.aborted, true);
+  const caller = new AbortController();
+  const combined = captureSignal(caller.signal, 1_000);
+  caller.abort();
+  assert.equal(combined.aborted, true);
+});
+
+test("startup waits for a non-empty Activity hierarchy", () => {
+  assert.equal(hasActivityHierarchy("", activityTarget), false);
+  assert.equal(hasActivityHierarchy("ACTIVITY example.app/.MainActivity\n", activityTarget), false);
+  assert.equal(hasActivityHierarchy("View Hierarchy:\n    Looper (main)", activityTarget), false);
+  assert.equal(hasActivityHierarchy("View Hierarchy:\n    null\n    Looper (main)", activityTarget), false);
+  assert.equal(hasActivityHierarchy(activityHierarchy, activityTarget), true);
+  assert.equal(hasActivityHierarchy("org.qtproject.qt.android.QtActivity", activityTarget), true);
+});
 
 type EncodedProperties = { [key: string]: string | number | boolean | EncodedProperties };
 function encodedHierarchy(root: EncodedProperties, complete = true) {
@@ -110,9 +179,36 @@ test("captured framework views skip duplicate JDWP lookup, custom and surface vi
   node.className = "android.widget.TextView";
   node.layerImageStatus = "unavailable";
   assert.equal(needsViewBitmapFallback(node), true);
+  node.className = "com.example.CustomView";
+  node.layerImageStatus = "captured";
+  assert.equal(needsViewBitmapFallback(node), true);
+  assert.equal(needsViewBitmapFallback(node, true), false, "a verified SDK own image needs no second JDWP capture");
+  node.layerImageStatus = "unavailable";
+  assert.equal(needsViewBitmapFallback(node, true), true, "a missing SDK bitmap still needs targeted fallback");
   node.layerImageStatus = "captured";
   node.attributes = { "skip-draw": "true" };
-  assert.equal(needsViewBitmapFallback(node), true);
+  assert.equal(needsViewBitmapFallback(node, true), true);
+  node.layerImageStatus = "unavailable";
+  assert.equal(needsViewBitmapFallback(node, true, true), false, "SDK-confirmed pure layouts need no JDWP lookup");
+});
+
+test("SDK visible images keep only stable View identities and bound stale images", () => {
+  const root = makeNode("0"), node = makeNode("0/0");
+  node.attributes = { "view-ref": "example.CustomView@1" };
+  node.bounds = { left: 2, top: 3, right: 12, bottom: 13, raw: "[2,3][12,13]" };
+  root.children = [node];
+  const layer = { name: "example.CustomView@1", x: 2, y: 3, width: 10, height: 10, visible: true, pngDataUrl: "data:image/png;base64,AA==" };
+  assert.deepEqual(matchSdkVisibleLayers(root, [layer]).matched, [layer]);
+  assert.throws(() => matchSdkVisibleLayers(root, [{ ...layer, x: 4 }]), /回退完整抓图/);
+  assert.throws(() => matchSdkVisibleLayers(root, [{ ...layer, width: 9 }]), /回退完整抓图/);
+  assert.throws(() => matchSdkVisibleLayers(root, [{ ...layer, name: "example.CustomView@2" }]), /回退完整抓图/);
+  assert.throws(() => matchSdkVisibleLayers(root, [layer, layer]), /对象重复/);
+  assert.throws(() => matchSdkVisibleLayers(root, Array.from({ length: 9 }, (_, index) => ({ ...layer, name: `example.CustomView@${index + 2}` }))), /回退完整抓图/);
+  root.children = Array.from({ length: 12 }, (_, index) => ({ ...node, id: `0/${index}`, attributes: { "view-ref": `example.CustomView@${index + 10}` } }));
+  const changing = root.children.map((child, index) => ({ ...layer, name: child.attributes!["view-ref"], width: index < 9 ? 10 : 11 }));
+  const partial = matchSdkVisibleLayers(root, changing);
+  assert.equal(partial.matched.length, 9, "matching own images survive unrelated changes");
+  assert.equal(partial.unmatched, 3, "changed images are left for per-View fallback");
 });
 
 test("only DecorView shorthand is accepted as an alias of a qualified root identity", () => {
@@ -216,8 +312,14 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
             const name = body.subarray(4).toString();
             assert.notEqual(name, "Landroid/view/ViewDebug$HardwareCanvasProvider;", "load the snapshot provider on cold startup");
             if (!classes.has(name)) classes.set(name, classes.size + 1);
-            payload = Buffer.concat([int(1), Buffer.from([1]), int(classes.get(name)!), int(7)]); break;
+            payload = name === "Ljava/lang/Class;"
+              ? Buffer.concat([int(2), Buffer.from([1]), int(9999), int(7), Buffer.from([1]), int(classes.get(name)!), int(7)])
+              : Buffer.concat([int(1), Buffer.from([1]), int(classes.get(name)!), int(7)]);
+            break;
           }
+          case "2/2":
+            assert.ok([9999, classes.get("Ljava/lang/Class;")].includes(body.readInt32BE()));
+            payload = int(body.readInt32BE() === 9999 ? 777 : 0); break;
           case "3/1":
             if (customDraw && body.readInt32BE() === classes.get("Lexample/Image;")) {
               if (!classes.has("Lexample/DecoratedLayout;")) classes.set("Lexample/DecoratedLayout;", classes.size + 1);
@@ -254,6 +356,7 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
               payload = result("L", strings.get(values[1]) === "example.DecorView@abc" ? 100 : index < 0 ? 0 : 501 + index);
             } else if (method === 13) payload = result("L", 400);
             else if (method === 15) {
+              assert.equal(body.readInt32BE(), classes.get("Ljava/lang/Class;"), "use the bootstrap Class, not the duplicate loader");
               const signature = `L${strings.get(values[0])!.replace(/\./g, "/")};`;
               if (!classes.has(signature)) classes.set(signature, classes.size + 1);
               payload = result("L", 4000 + classes.get(signature)!);
@@ -599,7 +702,44 @@ test("Debug View layer parser keeps transparent PNGs and tolerates null captures
   assert.equal(layers[1].pngDataUrl, null);
 });
 
-test("Debug View bitmaps only attach to an exact matching rectangle", () => {
+test("SDK partial parser publishes only complete, CRC-checked PNG records", () => {
+  const chunk = (name: string, body: Buffer) => {
+    const type = Buffer.from(name);
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(body.length);
+    const checksum = Buffer.alloc(4);
+    checksum.writeUInt32BE(crc32(Buffer.concat([type, body])));
+    return Buffer.concat([header, type, body, checksum]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(1, 0);
+  ihdr.writeUInt32BE(1, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(Buffer.from([0, 1, 2, 3, 255]))), chunk("IEND", Buffer.alloc(0))]);
+  const name = Buffer.from("View@a");
+  const record = Buffer.alloc(1 + 2 + name.length + 1 + 8 + 4 + png.length);
+  let at = 0;
+  record[at++] = 1;
+  record.writeUInt16BE(name.length, at); at += 2;
+  name.copy(record, at); at += name.length;
+  record[at++] = 1;
+  record.writeUInt32BE(png.length, at + 8);
+  png.copy(record, at + 12);
+  const prefix = Buffer.concat([Buffer.alloc(8), record]);
+  assert.equal(parseCapturedViewLayerPrefix(prefix.subarray(0, prefix.length - 1)).length, 0);
+  assert.equal(parseCapturedViewLayerPrefix(Buffer.concat([prefix, record.subarray(0, 10)])).length, 1);
+  assert.equal(parseCapturedViewLayerPrefix(prefix)[0].name, "View@a");
+  const identified = Buffer.from(prefix);
+  Buffer.from("0123456789abcdef", "hex").copy(identified);
+  assert.equal(parseCapturedViewLayerPrefix(identified, "0123456789abcdef").length, 1);
+  assert.equal(parseCapturedViewLayerPrefix(identified, "fedcba9876543210").length, 0);
+  const damaged = Buffer.from(prefix);
+  damaged[damaged.length - 1] ^= 1;
+  assert.throws(() => parseCapturedViewLayerPrefix(damaged), /PNG 校验失败/);
+});
+
+test("Debug View bitmaps prefer exact matches and tolerate only unique one-pixel drift", () => {
   const node = (id: string, left: number): UiNode => ({
     id, index: 0, className: "android.widget.TextView", package: "app", text: null, resourceId: null, contentDesc: null,
     bounds: { left, top: 20, right: left + 32, bottom: 36, raw: `[${left},20][${left + 32},36]` },
@@ -614,6 +754,11 @@ test("Debug View bitmaps only attach to an exact matching rectangle", () => {
   assert.equal(attachViewLayerImages(root, [{ name: "TextView", visible: true, x: 10, y: 20, width: 32, height: 16, pngDataUrl }]), 1);
   assert.equal(exact.layerImageDataUrl, pngDataUrl);
   assert.equal(nearby.layerImageDataUrl, undefined);
+  assert.equal(attachViewLayerImages(root, [{ name: "TextView", visible: true, x: 12, y: 20, width: 32, height: 16, pngDataUrl }]), 1);
+  assert.equal(nearby.layerImageDataUrl, pngDataUrl);
+  assert.equal(exact.layerImageDataUrl, undefined);
+  assert.equal(attachViewLayerImages(root, [{ name: "TextView", visible: true, x: 13, y: 20, width: 32, height: 16, pngDataUrl }]), 0);
+  assert.equal(attachViewLayerImages(root, [{ name: "TextView", visible: true, x: 9, y: 20, width: 32, height: 16, pngDataUrl }, { name: "TextView", visible: true, x: 10, y: 21, width: 32, height: 16, pngDataUrl }]), 0);
 });
 
 test("real alpha hides transparent overlays and descendants; screen coordinates include translation", () => {
@@ -683,7 +828,7 @@ test("exported native z, clipping and padding are preserved without inventing mi
 test("Debug capture chooses the window whose root identity matches, not the first window", async () => {
   const captured: string[] = [];
   let layerRequests = 0;
-  let duplicateRoot = false, changedRoot = false, truncate = false, incomplete = false;
+  let duplicateRoot = false, changedRoot = false, truncate = false, incomplete = false, incompleteOnce = false;
   const padding = "hello world ".repeat(1024);
   const int = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
   const utf16 = (s: string) => Buffer.from(s, "utf16le").swap16();
@@ -717,7 +862,8 @@ test("Debug capture chooses the window whose root identity matches, not the firs
           } else assert.equal(flags.readUInt32BE(4), 0, "identity probes need no properties");
           const full = flags.readUInt32BE(0) === 0;
           const hash = name === "activity" || duplicateRoot ? full && changedRoot ? -559038737 : 0x9c5dabe : 0x1b9116c;
-          data = full ? encodedHierarchy(encodedView(hash, { "meta:__name__": "com.android.internal.policy.DecorView", "text:text": padding }), !incomplete) : Buffer.from(`com.android.internal.policy.DecorView@${(hash >>> 0).toString(16)} properties\n\nDONE.\n`);
+          data = full ? encodedHierarchy(encodedView(hash, { "meta:__name__": "com.android.internal.policy.DecorView", "text:text": padding }), !incomplete && !incompleteOnce) : Buffer.from(`com.android.internal.policy.DecorView@${(hash >>> 0).toString(16)} properties\n\nDONE.\n`);
+          if (full) incompleteOnce = false;
           }
         }
         const payload = Buffer.concat([Buffer.from(type), int(data.length), data]);
@@ -761,8 +907,13 @@ test("Debug capture chooses the window whose root identity matches, not the firs
     assert.equal(layerRequests, 2);
     assert.deepEqual(await captureViewLayers(address.port, { rootRefs, skipImages: true, onHierarchy: () => undefined }), []);
     assert.equal(layerRequests, 2, "single-view refresh must not launch the bulk DDMS image capture");
+    let skipAfterHierarchy = false;
+    assert.deepEqual(await captureViewLayers(address.port, { rootRefs, skipImages: () => skipAfterHierarchy, onHierarchy: () => { skipAfterHierarchy = true; } }), []);
+    assert.equal(layerRequests, 2, "a successfully detected SDK should skip the bulk capture");
+    incompleteOnce = true;
+    assert.deepEqual(await captureViewLayers(address.port, { rootRefs, skipImages: true, onHierarchy: () => undefined }), [], "a transient malformed V2 tree should be retried once");
     await assert.rejects(captureViewLayers(address.port, { rootRefs: ["stale"], onHierarchy: () => assert.fail("wrong window properties") }), /窗口与当前控件树不一致/);
-    assert.deepEqual(captured, ["activity", "activity", "activity"]);
+    assert.deepEqual(captured, Array(6).fill("activity"));
     duplicateRoot = false;
     changedRoot = true;
     await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchy: () => assert.fail("stale full hierarchy") }), /身份已变化/);
@@ -774,7 +925,7 @@ test("Debug capture chooses the window whose root identity matches, not the firs
     await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchy: () => assert.fail("unfinished Android export") }), /Debug V2/);
     duplicateRoot = true;
     await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchy: () => assert.fail("ambiguous window properties") }), /多个 Debug 窗口匹配/);
-    assert.deepEqual(captured, Array(6).fill("activity"));
+    assert.deepEqual(captured, Array(10).fill("activity"));
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
 

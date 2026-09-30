@@ -86,6 +86,42 @@ final class ProbeRunner {
         }
     }
 
+    static void runVisual(Activity activity, FrameLayout stage) {
+        File output = new File(activity.getFilesDir(), "isolation-probe");
+        try {
+            if (!output.exists() && !output.mkdirs()) throw new IllegalStateException("Could not create probe directory");
+            boolean groupRejected = false;
+            try {
+                IsolatedCapture.group(stage).recycle();
+            } catch (UnsupportedOperationException expected) { groupRejected = true; }
+            Bitmap own = IsolatedCapture.own(stage);
+            Bitmap red = IsolatedCapture.own(stage.getChildAt(0));
+            Bitmap green = IsolatedCapture.own(stage.getChildAt(1));
+            int middle = stage.getWidth() / 2;
+            JSONObject report = new JSONObject();
+            report.put("roundedGroupRejected", groupRejected);
+            report.put("stageOwnCorner", own.getPixel(0, 0));
+            report.put("stageOwnCenter", own.getPixel(middle / 2, middle));
+            report.put("redOwnCenter", red.getPixel(middle / 2, middle));
+            report.put("greenOwnCenter", green.getPixel(middle / 2, middle));
+            report.put("stageAlpha", stage.getAlpha());
+            report.put("stageWidth", stage.getWidth());
+            report.put("stageHeight", stage.getHeight());
+            report.put("visualPassed", groupRejected && own.getPixel(0, 0) == 0
+                    && own.getPixel(middle / 2, middle) == android.graphics.Color.BLUE
+                    && red.getPixel(middle / 2, middle) == android.graphics.Color.RED
+                    && green.getPixel(middle / 2, middle) == android.graphics.Color.GREEN);
+            save(own, new File(output, "visual-own.png"));
+            save(red, new File(output, "visual-red.png"));
+            save(green, new File(output, "visual-green.png"));
+            try (FileOutputStream stream = new FileOutputStream(new File(output, "visual-result.json"))) {
+                stream.write(report.toString(2).getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Throwable failure) {
+            android.util.Log.e("InspectorProbe", "Visual probe failed", failure);
+        }
+    }
+
     private static int redPixels(Bitmap bitmap) {
         int count = 0;
         for (int y = 0; y < bitmap.getHeight(); y++) {

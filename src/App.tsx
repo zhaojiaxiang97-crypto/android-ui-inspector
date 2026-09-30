@@ -4,7 +4,7 @@ import "./styles/tokens.css";
 import "./App.css";
 import type { AdbProbeResult, DebugSessionState, ExportFormat, StoredSnapshot, UiNode, UiSnapshot } from "../shared/types";
 import { homeStateIsConnected, homeStateIsError, resolveHomeState } from "../shared/device-state";
-import { filterTree, flattenNodes, nodeDisplayLabel } from "../shared/tree-utils";
+import { filterTree, flattenNodes, mergeLayerImages, nodeDisplayLabel, remapViewNodeIds, replaceTreeBranch } from "../shared/tree-utils";
 import { AppHeader } from "./components/AppHeader";
 import { UiTree } from "./components/UiTree";
 import { ScreenshotPreview } from "./components/ScreenshotPreview";
@@ -261,8 +261,16 @@ function App() {
   useEffect(() => window.electronApi.onInspectionProgress((progress) => {
     if (progress.requestId === activeInspectionRef.current) setInspectionStage(progress.stage);
   }), []);
-  useEffect(() => window.electronApi.onInspectionPreview(({ requestId, snapshot: preview }) => {
-    if (requestId !== activeInspectionRef.current || !preview.root) return;
+  useEffect(() => window.electronApi.onInspectionPreview((event) => {
+    if (event.requestId !== activeInspectionRef.current) return;
+    if (event.phase === "layers") {
+      if (!previewShownRef.current) return;
+      setSnapshot(current => current?.root ? { ...current, root: mergeLayerImages(current.root, event.updates) } : current);
+      setSelectedNode(current => current ? mergeLayerImages(current, event.updates) : current);
+      return;
+    }
+    const preview = event.snapshot;
+    if (!preview.root) return;
     const first = !previewShownRef.current;
     previewShownRef.current = true;
     setSnapshot(preview);
@@ -490,9 +498,10 @@ function App() {
     setTreeExpandedIds((previous) => previous.has(node.id) ? previous : new Set([...previous, node.id]));
   }, []);
 
-  const requestQmlGroup = useCallback((node: UiNode) => qmlLiveRequestId
-    ? window.electronApi.captureQmlGroup(qmlLiveRequestId, node.id)
-    : Promise.resolve(null), [qmlLiveRequestId]);
+  const groupRequestId = qmlLiveRequestId ?? (snapshot?.inspectionSource === "debug-hybrid" ? viewLiveRequestId : null);
+  const requestGroup = useCallback((node: UiNode) => groupRequestId
+    ? window.electronApi.captureGroup(groupRequestId, node.id)
+    : Promise.resolve(null), [groupRequestId]);
 
   const refreshViewNode = useCallback(async (node: UiNode, scope: "node" | "branch" = "node") => {
     if (!snapshot?.root || !viewLiveRequestId || viewRefreshActiveRef.current || inspectionLoading) return;
@@ -504,8 +513,31 @@ function App() {
     try {
       const result = await window.electronApi.refreshViewNode(viewLiveRequestId, node.id, scope);
       if (currentSnapshotRef.current !== sourceSnapshot || activeInspectionRef.current) return;
+      if (scope === "branch") {
+        if (!result.branch) throw new Error("没有返回可更新的分支。");
+        const replacement = replaceTreeBranch(sourceRoot, node.id, result.branch);
+        const freshNodes = flattenNodes(replacement);
+        if (result.failures.some(failure => !freshNodes.has(failure.id))) throw new Error("分支补图结果无效。");
+        const remap = remapViewNodeIds(sourceRoot, replacement);
+        setSnapshot({ ...sourceSnapshot, root: replacement, nodeCount: freshNodes.size });
+        setTreeExpandedIds(previous => new Set([...previous].flatMap(id => {
+          const mapped = remap.get(id);
+          return mapped && freshNodes.get(mapped)?.children.length ? [mapped] : [];
+        })));
+        setSelectedNode(current => {
+          if (!current) return null;
+          const path = findNodePath(sourceRoot, current.id) ?? [];
+          for (let index = path.length - 1; index >= 0; index--) {
+            const mapped = remap.get(path[index].id);
+            if (mapped && freshNodes.has(mapped)) return freshNodes.get(mapped)!;
+          }
+          return result.branch!;
+        });
+        setViewRefreshStatus({ nodeId: node.id, message: `分支已更新，共 ${flattenNodes(result.branch).size} 层${result.failures.length ? `，${result.failures.length} 层补图失败` : ""}` });
+        return;
+      }
       const sourceNodes = flattenNodes(sourceRoot);
-      const validId = (id: string) => sourceNodes.has(id) && (id === node.id || scope === "branch" && id.startsWith(`${node.id}/`));
+      const validId = (id: string) => sourceNodes.has(id) && id === node.id;
       if (!result.nodes.length || result.nodes.some(updated => !validId(updated.id)) || result.failures.some(failure => !validId(failure.id)))
         throw new Error("控件已变化，请重新采集整页。");
       const updates = new Map(result.nodes.map(updated => [updated.id, updated]));
@@ -521,9 +553,7 @@ function App() {
       const replacement = replace(sourceRoot);
       setSnapshot({ ...sourceSnapshot, root: replacement });
       setSelectedNode(current => current ? findNodePath(replacement, current.id)?.at(-1) ?? current : current);
-      setViewRefreshStatus({ nodeId: node.id, message: scope === "branch"
-        ? `已刷新 ${result.nodes.length} 层${result.failures.length ? `，${result.failures.length} 层失败并保留旧画面` : ""}`
-        : "已刷新当前控件" });
+      setViewRefreshStatus({ nodeId: node.id, message: "已刷新当前控件" });
     } catch (error) {
       if (currentSnapshotRef.current === sourceSnapshot) setViewRefreshStatus({ nodeId: node.id, message: error instanceof Error ? error.message : "当前控件刷新失败" });
     } finally { viewRefreshActiveRef.current = false; setViewRefreshingNodeId(null); }
@@ -1080,7 +1110,7 @@ function App() {
                     {snapshot.screenshotDataUrl ? (
                       <ScreenshotPreview key={treeSession} sessionKey={treeSession} src={snapshot.screenshotDataUrl} root={snapshot.root}
                         selectedNode={selectedNode} expandedNodeIds={treeExpandedIds} geometry={snapshot.captureGeometry} layersAvailable={snapshot.captureMode !== "fast"} toolbarHost={sceneToolbarHost} onSelect={handleScreenshotSelect} onExpand={handleLayerExpand}
-                        onCaptureGroup={qmlLiveRequestId && snapshot.inspectionSource === "debug-qml" ? requestQmlGroup : undefined} />
+                        onCaptureGroup={groupRequestId ? requestGroup : undefined} />
                     ) : <div className="screenshot-frame"><div className="no-screenshot">截图不可用</div></div>}
                     {detailNode && (
                       <NodePropertiesPanel
@@ -1091,7 +1121,8 @@ function App() {
                         onCopy={() => void copyValue("节点 JSON", selectorData?.json ?? nodeJson(detailNode))}
                         copyStatus={copyStatus}
                         onRefresh={viewLiveRequestId && detailNode.attributes?.["view-ref"] && !inspectionLoading && !debugState?.active ? () => void refreshViewNode(detailNode) : undefined}
-                        onRefreshBranch={snapshot.inspectionSource === "debug-view" && viewLiveRequestId && detailNode.children.length > 0 && detailNode.attributes?.["view-ref"] && !inspectionLoading && !debugState?.active ? () => void refreshViewNode(detailNode, "branch") : undefined}
+                        onRefreshBranch={(snapshot.inspectionSource === "debug-view" || snapshot.inspectionSource === "debug-hybrid") && viewLiveRequestId && detailNode.children.length > 0 && detailNode.attributes?.["view-ref"] && !inspectionLoading && !debugState?.active ? () => void refreshViewNode(detailNode, "branch") : undefined}
+                        onReadStyle={snapshot.inspectionSource === "debug-hybrid" && snapshot.root.attributes?.["sdk-style-version"] === "1" && viewLiveRequestId && detailNode.attributes?.["view-ref"] && !inspectionLoading && !debugState?.active ? () => window.electronApi.readViewStyle(viewLiveRequestId, detailNode.id) : undefined}
                         refreshBusy={viewRefreshingNodeId !== null}
                         refreshStatus={viewRefreshStatus?.nodeId === detailNode.id ? viewRefreshStatus.message : null}
                       >

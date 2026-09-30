@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createTree, makeNode } from "../benchmarks/fixtures";
-import { filterTree, flattenNodes, nodeDisplayLabel, selectionInBranch, treeNodeKind, type TreeFilter } from "../shared/tree-utils";
+import { changedLayerImages, filterTree, flattenNodes, layerImageBaseline, mergeLayerImages, nodeDisplayLabel, remapViewNodeIds, replaceTreeBranch, selectionInBranch, treeNodeKind, type TreeFilter } from "../shared/tree-utils";
 
 const noFilter: TreeFilter = { query: "", interactiveOnly: false, identifiedOnly: false };
 
@@ -42,6 +42,54 @@ test("fixture sizes and flattened preorder are deterministic", () => {
     }
   }
   assert.deepEqual([...flattenNodes(createTree(7)).keys()], ["0", "0/0", "0/0/0", "0/0/1", "0/1", "0/2", "0/3"]);
+});
+
+test("branch replacement keeps siblings and remaps moved View identities, not reused paths", () => {
+  const root = createTree(7);
+  const branch = root.children[0];
+  branch.attributes = { "view-ref": "example.View@parent" };
+  branch.children[0].attributes = { "view-ref": "example.View@first" };
+  branch.children[1].attributes = { "view-ref": "example.View@second" };
+  const fresh = { ...branch, children: [
+    { ...branch.children[1], id: `${branch.id}/0`, index: 0 },
+    { ...makeNode(`${branch.id}/1`), index: 1, attributes: { "view-ref": "example.View@added" } },
+  ] };
+  const updated = replaceTreeBranch(root, branch.id, fresh);
+  const ids = remapViewNodeIds(root, updated);
+  assert.equal(updated.children[1], root.children[1]);
+  assert.equal(ids.get(branch.children[1].id), fresh.children[0].id);
+  assert.equal(ids.has(branch.children[0].id), false);
+  assert.equal(ids.get(root.children[1].id), root.children[1].id);
+  assert.throws(() => replaceTreeBranch(root, branch.id, { ...fresh, attributes: { "view-ref": "example.View@wrong" } }), /对象已变化/);
+});
+
+test("layer previews send only changed images and preserve untouched branches", () => {
+  const source = createTree(9), displayed = structuredClone(source), baseline = layerImageBaseline(source);
+  const child = source.children[0];
+  child.layerImageDataUrl = `data:image/png;base64,${"a".repeat(1024)}`;
+  child.layerImageSize = { width: 10, height: 20 };
+  child.layerImageStatus = "captured";
+  child.attributes = { "image-source": "own" };
+  const first = changedLayerImages(source, baseline)!;
+  assert.deepEqual(first.map(update => update.id), [child.id]);
+  const shown = mergeLayerImages(displayed, first);
+  assert.equal(shown.children[0].layerImageDataUrl, child.layerImageDataUrl);
+  assert.equal(shown.children[0].attributes?.["image-source"], "own");
+  assert.equal(shown.children[1], displayed.children[1]);
+  assert.equal(displayed.children[0].layerImageStatus, undefined);
+  assert.deepEqual(changedLayerImages(source, baseline), []);
+
+  delete child.layerImageDataUrl;
+  delete child.layerImageSize;
+  child.layerImageStatus = "failed";
+  delete child.attributes["image-source"];
+  child.attributes["image-capture-error"] = "timeout";
+  const cleared = mergeLayerImages(shown, changedLayerImages(source, baseline)!);
+  assert.equal(cleared.children[0].layerImageDataUrl, undefined);
+  assert.equal(cleared.children[0].attributes?.["image-source"], undefined);
+  assert.equal(cleared.children[0].attributes?.["image-capture-error"], "timeout");
+  source.children.push(makeNode("0/new"));
+  assert.equal(changedLayerImages(source, baseline), null, "a changed tree needs a full preview");
 });
 
 test("no filter and all-matching filters preserve node references", () => {

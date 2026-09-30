@@ -1,26 +1,37 @@
 import { XMLParser } from "fast-xml-parser";
 import { spawn } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as wait } from "node:timers/promises";
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
-import type { AdbProbeResult, CaptureGeometry, DeviceInfo, DisplayFrame, QmlGroupImage, UiBounds, UiNode, UiSnapshot, ViewRefreshResult } from "../shared/types";
+import type { AdbProbeResult, CaptureGeometry, DeviceInfo, DisplayFrame, QmlGroupImage, UiBounds, UiNode, UiSnapshot, ViewRefreshResult, ViewStyleResult } from "../shared/types";
 import { assessCaptureGeometry, isRotation } from "../shared/screen-coordinates";
 import { parseInputDisplay, pngSize } from "./capture-display";
 import { inspectQmlHierarchy, type QmlDebugNode, type QmlGrab } from "./qml-debug";
-import { captureViewLayers, captureViewBitmaps, matchesViewRoot, type CapturedViewLayer } from "./view-debug";
+import { captureViewLayers, captureViewBitmaps, matchesViewRoot, parseCapturedViewLayers, parseCapturedViewLayerPrefix, type CapturedViewLayer } from "./view-debug";
 import { qmlColorCss, qmlStyleSvg } from "../shared/qml-style";
 import { textureDimensions } from "../shared/layer-textures";
-import { joinSdkTreeAndDebugImages } from "./sdk-hybrid";
+import { joinSdkTreeAndDebugImages, sdkGroupBranchMatches, verifySdkTreeBeforeImages } from "./sdk-hybrid";
 
 const COMMAND_TIMEOUT_MS = 30_000;
+const APP_READY_TIMEOUT_MS = 18_000;
+const PREVIEW_SCREEN_TIMEOUT_MS = 8_000;
+const FINAL_SCREEN_TIMEOUT_MS = 15_000;
+const STARTUP_IMAGE_TIMEOUT_MS = 55_000;
+const IMAGE_TIMEOUT_MS = 90_000;
+const STARTUP_RETRY_TIMEOUT_MS = 45_000;
 const MAX_UI_HIERARCHY_DEPTH = 200;
 const QML_DEBUG_PORT = 3768;
-type InspectionOptions = { signal?: AbortSignal; onProgress?: (stage: string, elapsedMs: number) => void; onPreview?: (phase: "tree" | "layers", snapshot: UiSnapshot) => void; onViewTreeReady?: (packageName: string, root: UiNode) => Promise<void>; expectedPackage?: string; allowAppRestart?: boolean };
+type InspectionOptions = { signal?: AbortSignal; onProgress?: (stage: string, elapsedMs: number) => void; onPreview?: (phase: "tree" | "layers", snapshot: UiSnapshot) => void; onViewTreeReady?: (packageName: string, root: UiNode) => Promise<void>; expectedPackage?: string; pinFirstComponent?: string | null; startupRetry?: boolean; allowAppRestart?: boolean; preferVisibleSdk?: boolean };
 // Task-local cancellation also covers nested ADB commands, without affecting probes.
 const inspectionContext = new AsyncLocalStorage<InspectionOptions>();
+
+export function captureSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
 
 type CommandResult = {
   code: number | null;
@@ -138,8 +149,8 @@ async function runAdb(adbPath: string, args: string[]) {
   return runCommand(adbPath, args);
 }
 
-async function runDeviceAdb(adbPath: string, serial: string, args: string[]) {
-  return runAdb(adbPath, ["-s", serial, ...args]);
+async function runDeviceAdb(adbPath: string, serial: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS) {
+  return runCommand(adbPath, ["-s", serial, ...args], timeoutMs);
 }
 
 function commandError(prefix: string, result: CommandResult) {
@@ -317,6 +328,15 @@ function targetActivitySection(output: string, target: ForegroundTarget) {
   return output.slice(start, next < 0 ? undefined : next);
 }
 
+export function hasActivityHierarchy(section: string, target: ForegroundTarget) {
+  if (section.includes("org.qtproject.qt.android.")) return true;
+  try { debugViewTree(section, target); return true; }
+  catch (error) {
+    if (error instanceof Error && /无法从 Debug App 读取 View Hierarchy|未读取到 Debug View 节点/.test(error.message)) return false;
+    throw error;
+  }
+}
+
 function appBounds(section: string): UiBounds | null {
   const match = section.match(/mAppBounds=Rect\((-?\d+),\s*(-?\d+)\s*-\s*(-?\d+),\s*(-?\d+)\)/);
   if (!match) return null;
@@ -413,8 +433,9 @@ const ordinaryViewClasses = new Set([
   "android.widget.Button", "android.widget.EditText", "android.widget.ImageButton",
   "android.widget.ProgressBar", "android.widget.ScrollView", "android.widget.HorizontalScrollView",
 ]);
-export function needsViewBitmapFallback(node: UiNode) {
-  return node.layerImageStatus !== "captured" || node.attributes?.["skip-draw"] === "true" || !ordinaryViewClasses.has(node.className ?? "");
+export function needsViewBitmapFallback(node: UiNode, verifiedOwnBitmap = false, pureLayout = false) {
+  if (pureLayout) return false;
+  return node.layerImageStatus !== "captured" || node.attributes?.["skip-draw"] === "true" || !verifiedOwnBitmap && !ordinaryViewClasses.has(node.className ?? "");
 }
 
 export function attachViewLayerImages(root: UiNode, layers: readonly CapturedViewLayer[], windowOrigin = { x: 0, y: 0 }) {
@@ -468,7 +489,138 @@ export function attachViewLayerImages(root: UiNode, layers: readonly CapturedVie
     node.layerImageStatus = "captured";
     attached += 1;
   }
+  // Android rounds getLocationInWindow and getLocationOnScreen separately.
+  // Accept a one-pixel drift only when both the View and bitmap are unique.
+  const nearbyKeys = (name: string, x: number, y: number, width: number, height: number) => {
+    const keys: string[] = [];
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) keys.push(key(name, x + dx, y + dy, width, height));
+    return keys;
+  };
+  for (const layer of layers) {
+    if (!layer.visible || !layer.pngDataUrl || layer.width < 1 || layer.height < 1) continue;
+    const name = layer.viewRef ?? layer.name, x = layer.x + windowOrigin.x, y = layer.y + windowOrigin.y;
+    if (candidates.has(key(name, x, y, layer.width, layer.height))) continue;
+    const matches = [...new Set(nearbyKeys(name, x, y, layer.width, layer.height).flatMap((id) => candidates.get(id) ?? []))];
+    if (matches.length !== 1 || matches[0].layerImageStatus !== "unavailable") continue;
+    const node = matches[0], bounds = node.bounds!;
+    if (nearbyKeys(name, bounds.left, bounds.top, layer.width, layer.height).reduce((sum, id) => sum + (counts.get(id) ?? 0), 0) !== 1) continue;
+    node.layerImageDataUrl = layer.pngDataUrl;
+    node.layerImageSize = { width: layer.width, height: layer.height };
+    node.layerImageStatus = "captured";
+    attached += 1;
+  }
   return attached;
+}
+
+export function matchSdkVisibleLayers(root: UiNode, layers: readonly CapturedViewLayer[]) {
+  const nodes = new Map<string, UiNode>();
+  const pending = [...root.children];
+  while (pending.length) {
+    const node = pending.pop()!;
+    const ref = node.attributes?.["view-ref"];
+    if (ref) nodes.set(ref, node);
+    pending.push(...node.children);
+  }
+  const seen = new Set<string>();
+  const matched: CapturedViewLayer[] = [];
+  let moved = 0, unmatched = 0;
+  for (const layer of layers) {
+    const node = nodes.get(layer.name), bounds = node?.bounds;
+    if (seen.has(layer.name)) throw new Error("SDK 可见层对象重复");
+    seen.add(layer.name);
+    if (!node?.visibleToUser || !bounds || layer.width !== bounds.right - bounds.left || layer.height !== bounds.bottom - bounds.top) {
+      unmatched++;
+      continue;
+    }
+    if (Math.abs(layer.x - bounds.left) > 1 || Math.abs(layer.y - bounds.top) > 1) moved++;
+    else matched.push(layer);
+  }
+  // ponytail: a mostly stale batch uses DDMS; tune the majority cutoff from multi-device timings.
+  if (matched.length * 2 < layers.length) throw new Error(`SDK 可见层中 ${moved} 个移动、${unmatched} 个尺寸或状态变化，已回退完整抓图`);
+  return { matched, moved, unmatched, refs: new Set(nodes.keys()) };
+}
+
+async function captureSdkVisibleLayers(adbPath: string, serial: string, packageName: string, root: UiNode, onPartial?: (layers: CapturedViewLayer[]) => void | Promise<void>) {
+  const before = await checkedDebugTarget(adbPath, serial, packageName);
+  const processId = root.attributes?.["debug-process-id"];
+  const rootRef = root.children[0]?.attributes?.["view-ref"];
+  if (!processId || !rootRef || String(await singleAppPid(adbPath, serial, packageName)) !== processId) throw new Error("SDK 进程或根控件已变化");
+  const fileName = "no_backup/inspector-visible-layers.bin";
+  try {
+    const callStarted = performance.now();
+    const nonce = randomUUID().replace(/-/g, "").slice(0, 16);
+    const request = runCommand(adbPath, ["-s", serial, "shell", "content", "call", "--uri", `content://${packageName}.inspector`, "--method", "capture-visible", "--arg", nonce], 65_000)
+      .then((reply) => ({ reply, error: null as unknown }), (error: unknown) => ({ reply: null, error }));
+    let partialCount = 0, previews = 0, polls = 0;
+    while (onPartial && previews < 3 && polls++ < 12) {
+      const result = await Promise.race([request, wait(1_200, undefined, { signal: inspectionContext.getStore()?.signal }).then(() => null)]);
+      if (result) break;
+      try {
+        const chunk = await runDeviceAdb(adbPath, serial, ["exec-out", "run-as", packageName, "head", "-c", "12000001", `${fileName}.tmp`], 5_000);
+        if (chunk.code !== 0) continue;
+        const layers = parseCapturedViewLayerPrefix(chunk.stdout, nonce);
+        if (layers.length < (partialCount ? partialCount + 120 : 24)) continue;
+        const { matched } = matchSdkVisibleLayers(root, layers);
+        const current = await checkedDebugTarget(adbPath, serial, packageName);
+        if (current.component !== before.component || current.windowId !== before.windowId
+            || String(await singleAppPid(adbPath, serial, packageName)) !== processId) throw new Error("SDK 分段采集期间窗口或进程已变化");
+        inspectionContext.getStore()?.signal?.throwIfAborted();
+        await onPartial(matched);
+        partialCount = layers.length;
+        previews++;
+      } catch {
+        inspectionContext.getStore()?.signal?.throwIfAborted();
+        // A partial file is optional. The complete SHA-256-checked path remains authoritative.
+        onPartial = undefined;
+      }
+    }
+    const outcome = await request;
+    if (outcome.error) throw outcome.error;
+    const reply = outcome.reply!;
+    const callMs = Math.round(performance.now() - callStarted);
+    const output = reply.stdout.toString("utf8");
+    const field = (name: string) => new RegExp(`\\b${name}=([^,}\\]]+)`).exec(output)?.[1];
+    const instance = field("processInstance"), sha256 = field("sha256"), count = Number(field("count")), selected = Number(field("selected")), empty = Number(field("empty")), bytes = Number(field("bytes"));
+    const renderMs = Number(field("renderMs")), encodeMs = Number(field("encodeMs")), durationMs = Number(field("durationMs"));
+    const specialValue = field("specialRefs");
+    const specialEntries = specialValue === "-" ? [] : specialValue?.split(";") ?? [];
+    const specialRefs = new Set(specialEntries.map((entry) => entry.slice(2)));
+    const pureRefs = parsePureViewRefs(field("pureRefs"));
+    if (reply.code !== 0 || field("result") !== "ok" || field("rootRef") !== rootRef || (field("nonce") && field("nonce") !== nonce)
+        || !instance || !/^[0-9a-f-]{36}$/i.test(instance) || !sha256 || !/^[a-f0-9]{64}$/.test(sha256)
+        || !Number.isSafeInteger(count) || count < 1 || count > 5000 || !Number.isSafeInteger(selected) || selected < count || selected > 5000
+        || !Number.isSafeInteger(empty) || empty < 0 || selected !== count + empty || !Number.isSafeInteger(bytes) || bytes < 9 || bytes > 64_000_000
+        || ![renderMs, encodeMs, durationMs].every((value) => Number.isSafeInteger(value) && value >= 0 && value <= 65_000)
+        || !specialValue || specialEntries.length > 32 || specialRefs.size !== specialEntries.length
+        || !specialEntries.every((entry) => /^[ST]:[\w.$]+@[0-9a-f]{1,8}$/i.test(entry))) {
+      throw new Error(`SDK 可见层抓取失败：${field("error") ?? "响应无效"}`);
+    }
+    const readStarted = performance.now();
+    const file = await runDeviceAdb(adbPath, serial, ["exec-out", "run-as", packageName, "head", "-c", "64000001", fileName]);
+    const readMs = Math.round(performance.now() - readStarted);
+    if (file.code !== 0 || file.stdout.length !== bytes || createHash("sha256").update(file.stdout).digest("hex") !== sha256) throw new Error("SDK 可见层文件校验失败");
+    const layers = parseCapturedViewLayers(file.stdout);
+    if (layers.length !== count || !layers.every((layer) => layer.visible && layer.pngDataUrl && layer.name.includes("@"))) throw new Error("SDK 可见层记录不完整");
+    const { matched, moved, unmatched, refs } = matchSdkVisibleLayers(root, layers);
+    if ([...specialRefs].some((ref) => !refs.has(ref))) throw new Error("SDK 特殊画面控件与当前控件树不一致");
+    if ([...pureRefs].some((ref) => !refs.has(ref) || specialRefs.has(ref))) throw new Error("SDK 纯布局控件与当前控件树不一致");
+    const after = await checkedDebugTarget(adbPath, serial, packageName);
+    if (before.component !== after.component || before.windowId !== after.windowId || String(await singleAppPid(adbPath, serial, packageName)) !== processId) throw new Error("SDK 采集期间窗口或进程已变化");
+    root.attributes = { ...root.attributes, "sdk-visible-process-instance": instance, "sdk-visible-images": String(matched.length), "sdk-visible-empty": String(empty), "sdk-visible-moved": String(moved), "sdk-visible-unmatched": String(unmatched), "sdk-pure-refs": String(pureRefs.size) };
+    return { layers: matched, specialRefs, pureRefs, timing: { callMs, readMs, renderMs, encodeMs, durationMs } };
+  } finally {
+    await inspectionContext.exit(() => runDeviceAdb(adbPath, serial, ["shell", "run-as", packageName, "rm", "-f", fileName])).catch(() => undefined);
+  }
+}
+
+export function parsePureViewRefs(value: string | undefined): Set<string> {
+  if (value === undefined || value === "-") return new Set(); // Older SDKs did not report this hint.
+  const entries = value.split(";");
+  const refs = new Set(entries);
+  if (value.length > 16_000 || refs.size !== entries.length || !entries.every((entry) => /^[\w.$]+@[0-9a-f]{1,8}$/i.test(entry))) {
+    throw new Error("SDK 纯布局控件身份无效");
+  }
+  return refs;
 }
 
 async function captureDebugViewImages(adbPath: string, serial: string, packageName: string, root: UiNode, stage: (name: string) => void, preview?: (phase: "tree" | "layers") => void | Promise<void>, timings?: Record<string, number>) {
@@ -483,23 +635,59 @@ async function captureDebugViewImages(adbPath: string, serial: string, packageNa
   if (forwarded.code !== 0 || !/^\d+$/.test(port)) return 0;
   try {
     let windowName = "";
-    const layers = await captureViewLayers(Number(port), {
+    const useVisibleSdk = () => inspectionContext.getStore()?.preferVisibleSdk === true;
+    const batchTiming = ({ waitMs, readMs, parseMs, bytes, layers: layerCount, images }: { waitMs: number; readMs: number; parseMs: number; bytes: number; layers: number; images: number }) => {
+      if (timings) {
+        timings["DDMS 等待首包"] = Math.round(waitMs);
+        timings["DDMS 接收包体"] = Math.round(readMs);
+        timings["DDMS 解析图片"] = Math.round(parseMs);
+      }
+      root.attributes = { ...root.attributes, "ddms-batch-bytes": String(bytes), "ddms-batch-layers": String(layerCount), "ddms-batch-images": String(images) };
+    };
+    let layers = await captureViewLayers(Number(port), {
       rootRefs: root.children.map((node) => node.attributes?.["view-ref"]).filter((value): value is string => Boolean(value)),
-      onHierarchy: async (dump, name) => { applyViewProperties(root, dump, true); windowName = name; root.attributes = { ...root.attributes, "debug-window-name": name }; await preview?.("tree"); await inspectionContext.getStore()?.onViewTreeReady?.(packageName, root); stage("采集独立控件画面"); },
-      onBatchTiming: ({ waitMs, readMs, parseMs, bytes, layers: layerCount }) => {
-        if (timings) {
-          timings["DDMS 等待首包"] = Math.round(waitMs);
-          timings["DDMS 接收包体"] = Math.round(readMs);
-          timings["DDMS 解析图片"] = Math.round(parseMs);
-        }
-        root.attributes = { ...root.attributes, "ddms-batch-bytes": String(bytes), "ddms-batch-layers": String(layerCount) };
-      },
+      onHierarchy: async (dump, name) => { applyViewProperties(root, dump, true); windowName = name; root.attributes = { ...root.attributes, "debug-window-name": name }; await preview?.("tree"); stage("核对 SDK 控件树"); await inspectionContext.getStore()?.onViewTreeReady?.(packageName, root); stage(useVisibleSdk() ? "SDK 抓取独立画面" : "DDMS 批量抓图"); },
+      onBatchTiming: batchTiming,
+      skipImages: useVisibleSdk,
       signal: inspectionContext.getStore()?.signal,
     });
+    let sdkVisible = false;
+    let specialRefs = new Set<string>();
+    let pureRefs = new Set<string>();
+    if (useVisibleSdk()) {
+      try {
+        const started = performance.now();
+        const visible = await captureSdkVisibleLayers(adbPath, serial, packageName, root, preview && root.attributes?.["sdk-visible-stream"] === "1" ? async (partial) => {
+          attachViewLayerImages(root, partial);
+          await preview("layers");
+        } : undefined);
+        layers = visible.layers;
+        specialRefs = visible.specialRefs;
+        pureRefs = visible.pureRefs;
+        if (timings) Object.assign(timings, {
+          "SDK 可见层图": Math.round(performance.now() - started),
+          "SDK 设备绘制": visible.timing.renderMs,
+          "SDK PNG 编码": visible.timing.encodeMs,
+          "SDK 设备总耗时": visible.timing.durationMs,
+          "SDK 调用往返": visible.timing.callMs,
+          "SDK 文件读取": visible.timing.readMs,
+        });
+        sdkVisible = true;
+      } catch (error) {
+        inspectionContext.getStore()?.signal?.throwIfAborted();
+        attachViewLayerImages(root, []);
+        root.attributes = { ...root.attributes, "sdk-visible-fallback": error instanceof Error ? error.message : "采集失败" };
+        stage("DDMS 回退抓图");
+        layers = await captureViewLayers(Number(port), {
+          rootRefs: root.children.map((node) => node.attributes?.["view-ref"]).filter((value): value is string => Boolean(value)),
+          onHierarchy: () => undefined, onBatchTiming: batchTiming, signal: inspectionContext.getStore()?.signal,
+        });
+      }
+    }
     // DDMS images use window coordinates; the restored tree uses screen coordinates.
     const windowBounds = root.children[0].bounds;
     const matchStarted = performance.now();
-    let count = attachViewLayerImages(root, layers, { x: windowBounds?.left ?? 0, y: windowBounds?.top ?? 0 });
+    let count = attachViewLayerImages(root, layers, sdkVisible ? { x: 0, y: 0 } : { x: windowBounds?.left ?? 0, y: windowBounds?.top ?? 0 });
     if (timings) timings["DDMS 匹配控件"] = Math.round(performance.now() - matchStarted);
     await preview?.("layers");
     const fallback: UiNode[] = [];
@@ -507,15 +695,28 @@ async function captureDebugViewImages(adbPath: string, serial: string, packageNa
     while (pending.length) {
       const node = pending.pop()!;
       if (!node.visibleToUser) continue;
+      if (node.attributes?.["view-ref"] && pureRefs.has(node.attributes["view-ref"]) && node.layerImageStatus !== "captured") {
+        node.attributes["skip-draw"] = "true";
+        node.layerImageStatus = "unavailable";
+      }
       const bounds = node.bounds;
-      if (node.attributes?.["view-ref"] && needsViewBitmapFallback(node) && bounds && bounds.right > bounds.left && bounds.bottom > bounds.top && (bounds.right - bounds.left) * (bounds.bottom - bounds.top) <= 4_000_000 && bounds.right > 0 && bounds.bottom > 0 && bounds.left < (root.bounds?.right ?? Infinity) && bounds.top < (root.bounds?.bottom ?? Infinity)) fallback.push(node);
+      if (node.attributes?.["view-ref"] && needsViewBitmapFallback(node, sdkVisible && !specialRefs.has(node.attributes["view-ref"]), pureRefs.has(node.attributes["view-ref"])) && bounds && bounds.right > bounds.left && bounds.bottom > bounds.top && bounds.right > 0 && bounds.bottom > 0 && bounds.left < (root.bounds?.right ?? Infinity) && bounds.top < (root.bounds?.bottom ?? Infinity)) {
+        if ((bounds.right - bounds.left) * (bounds.bottom - bounds.top) > 4_000_000) {
+          if (!node.layerImageDataUrl) {
+            node.layerImageStatus = "failed";
+            node.attributes["image-capture-error"] = "控件位图尺寸超过 400 万像素上限";
+          }
+        } else fallback.push(node);
+      }
       pending.push(...node.children);
     }
     if (fallback.length) {
       stage("补齐独立背景与视频画面");
       try {
         fallback.sort((a, b) => Number(b.layerImageStatus === "ambiguous") - Number(a.layerImageStatus === "ambiguous"));
-        const { images, failures, kinds, skipDraw } = await captureViewBitmaps(Number(port), { windowName, rootRef: root.children[0].attributes!["view-ref"] }, fallback.map((node) => ({ ref: node.attributes!["view-ref"], captureOwn: node.layerImageStatus !== "captured" })), inspectionContext.getStore()?.signal);
+        const { images, failures, kinds, skipDraw, timing } = await captureViewBitmaps(Number(port), { windowName, rootRef: root.children[0].attributes!["view-ref"] }, fallback.map((node) => ({ ref: node.attributes!["view-ref"], captureOwn: node.layerImageStatus !== "captured" })), inspectionContext.getStore()?.signal);
+        if (timings) Object.assign(timings, { "JDWP 初始化": timing.setupMs, "JDWP 定位与识别": timing.lookupMs, "JDWP 补图": timing.captureMs, "JDWP 生成位图": timing.snapshotMs, "JDWP 传输像素": timing.pixelsMs, "JDWP 压缩图片": timing.compressMs });
+        root.attributes = { ...root.attributes, "jdwp-fallback-candidates": String(fallback.length), "jdwp-fallback-requested": String(timing.requested), "jdwp-fallback-skipped": String(timing.skipped) };
         if (failures.size) root.attributes = { ...root.attributes, "texture-capture-warning": `${failures.size} 个控件未完成独立画面补采，原因可在属性栏查看；已保留其余采集结果。` };
         for (const node of fallback) {
           const ref = node.attributes!["view-ref"];
@@ -902,6 +1103,22 @@ export function nativeViewBranchMatches(expectedRoot: UiNode, currentRoot: UiNod
   return true;
 }
 
+export function nativeViewBranchContextMatches(expectedRoot: UiNode, currentRoot: UiNode, branchId: string): boolean {
+  if (!nodeById(expectedRoot, branchId) || !nodeById(currentRoot, branchId)) return false;
+  const pending: [UiNode, UiNode][] = [[expectedRoot, currentRoot]];
+  for (let cursor = 0; cursor < pending.length; cursor++) {
+    const [old, latest] = pending[cursor];
+    if (old.id !== latest.id || old.className !== latest.className || old.attributes?.["view-ref"] !== latest.attributes?.["view-ref"]
+        || branchId.startsWith(`${old.id}/`) && old.bounds?.raw !== latest.bounds?.raw
+        || old.id !== branchId && old.visibleToUser !== latest.visibleToUser
+        || old.id !== expectedRoot.id && !old.attributes?.["view-ref"]) return false;
+    if (old.id === branchId) continue;
+    if (old.children.length !== latest.children.length) return false;
+    old.children.forEach((child, index) => pending.push([child, latest.children[index]]));
+  }
+  return true;
+}
+
 export function captureViewNodes(serial: string, snapshot: UiSnapshot, nodeId: string, branch = false, signal?: AbortSignal): Promise<ViewRefreshResult> {
   return inspectionContext.run({ signal, allowAppRestart: false }, async () => {
     const root = snapshot.root, packageName = root?.package;
@@ -913,12 +1130,6 @@ export function captureViewNodes(serial: string, snapshot: UiSnapshot, nodeId: s
     if ((snapshot.inspectionSource !== "debug-view" && snapshot.inspectionSource !== "debug-hybrid") || snapshot.serial !== serial || !root || !packageName || !target?.bounds
       || !target.attributes?.["view-ref"] || !rootRef || !windowName || !component || !Number.isSafeInteger(processId) || processId < 1)
       throw new Error("这份快照不支持控件刷新，请重新采集当前页面。");
-    const candidates = [target];
-    if (branch) for (let cursor = 0; cursor < candidates.length; cursor++) candidates.push(...candidates[cursor].children);
-    const requested = candidates.filter(node => node.visibleToUser && node.attributes?.["view-ref"] && node.bounds
-      && node.bounds.right > node.bounds.left && node.bounds.bottom > node.bounds.top);
-    if (requested.length > 64) throw new Error(`此分支有 ${requested.length} 个可见控件，超过单次 64 个上限；请选择较小分支。`);
-    if (!requested.length) throw new Error("此分支没有可刷新的可见控件。");
     const adbPath = automationAdb(serial);
     const sameProcess = async () => {
       const result = await runDeviceAdb(adbPath, serial, ["shell", "pidof", packageName]);
@@ -941,16 +1152,113 @@ export function captureViewNodes(serial: string, snapshot: UiSnapshot, nodeId: s
           rootRefs: [rootRef], skipImages: true, signal,
           onHierarchy: (dump, window) => { applyViewProperties(current, dump, true); name = window; },
         });
-        if (name !== windowName || !(branch ? nativeViewBranchMatches(root, current, nodeId) : nativeViewNodeMatches(root, current, nodeId)))
-          throw new Error("控件身份或层级已变化，请重新采集整页。");
-        return nodeById(current, nodeId)!;
+        if (name !== windowName || !(branch ? nativeViewBranchContextMatches(root, current, nodeId) : nativeViewNodeMatches(root, current, nodeId)))
+          throw new Error("控件身份、位置或层级已变化，请重新采集整页。");
+        return { root: current, node: nodeById(current, nodeId)! };
       };
-      const beforeCapture = await readCurrent();
+      const first = await readCurrent();
+      const beforeCapture = first.node;
+      const candidates = branch ? [beforeCapture] : [target];
+      if (branch) for (let cursor = 0; cursor < candidates.length; cursor++) {
+        candidates.push(...candidates[cursor].children);
+      }
+      const requested = candidates.filter(node => node.visibleToUser && node.attributes?.["view-ref"] && node.bounds
+        && node.bounds.right > node.bounds.left && node.bounds.bottom > node.bounds.top);
+      if (requested.length > 64) throw new Error(`此分支有 ${requested.length} 个可见控件，超过单次 64 个上限；请选择较小分支。`);
+      if (!requested.length) throw new Error("此分支没有可刷新的可见控件。");
       const { images, failures, kinds, skipDraw } = await captureViewBitmaps(Number(port), { rootRef, windowName }, requested.map(node => ({ ref: node.attributes!["view-ref"], captureOwn: true })), signal);
-      const current = await readCurrent();
+      const second = await readCurrent();
+      const current = second.node;
       const after = await checkedDebugTarget(adbPath, serial, packageName);
       if (after.component !== before.component || after.windowId !== before.windowId || !await sameProcess())
         throw new Error("目标 App、进程或窗口已变化，请重新采集整页。");
+      if (branch && !nativeViewBranchMatches(first.root, second.root, nodeId))
+        throw new Error("分支在刷新期间变化，请重试。");
+      if (branch) {
+        for (const node of requested) if (node.bounds?.raw !== nodeById(second.root, node.id)?.bounds?.raw)
+          throw new Error("分支在补图期间移动，请重试。");
+        let latestRoot = second.root;
+        if (snapshot.inspectionSource === "debug-hybrid") {
+          const sdk = await readSdkCapture(adbPath, serial, packageName);
+          const merged = joinSdkTreeAndDebugImages({ ...snapshot, inspectionSource: "debug-view", root: second.root,
+            nodeCount: countNodes(second.root) }, sdk, packageName, processId);
+          if (merged.root?.attributes?.["sdk-process-instance"] !== root.attributes?.["sdk-process-instance"])
+            throw new Error("SDK 进程实例已变化，请重新采集整页。");
+          latestRoot = merged.root!;
+          const confirmed = await checkedDebugTarget(adbPath, serial, packageName);
+          if (confirmed.component !== before.component || confirmed.windowId !== before.windowId || !await sameProcess())
+            throw new Error("SDK 补验时窗口已变化，请重新采集整页。");
+        }
+        const oldByRef = new Map<string, UiNode>();
+        const oldPending = [target];
+        for (let cursor = 0; cursor < oldPending.length; cursor++) {
+          const old = oldPending[cursor], ref = old.attributes?.["view-ref"];
+          if (!ref || oldByRef.has(ref)) throw new Error("原分支控件身份重复，请重新采集整页。");
+          oldByRef.set(ref, old);
+          oldPending.push(...old.children);
+        }
+        const latestBranch = nodeById(latestRoot, nodeId)!;
+        const requestedRefs = new Set(requested.map(node => node.attributes!["view-ref"]));
+        const allRefs = new Set<string>();
+        const wholeTree = [latestRoot];
+        for (let cursor = 0; cursor < wholeTree.length; cursor++) {
+          const node = wholeTree[cursor], ref = node.attributes?.["view-ref"];
+          if (ref && allRefs.has(ref)) throw new Error("刷新后的控件树包含重复对象身份。");
+          if (ref) allRefs.add(ref);
+          wholeTree.push(...node.children);
+        }
+        const seen = new Set<string>();
+        const nodeFailures: ViewRefreshResult["failures"] = [];
+        const refreshedAt = new Date().toISOString();
+        let refreshed = 0;
+        const pending = [latestBranch];
+        for (let cursor = 0; cursor < pending.length; cursor++) {
+          const node = pending[cursor], ref = node.attributes?.["view-ref"];
+          if (!ref || seen.has(ref)) throw new Error("刷新后的分支控件身份重复。");
+          seen.add(ref);
+          pending.push(...node.children);
+          if (!requestedRefs.has(ref)) { node.layerImageStatus = node.visibleToUser ? "unavailable" : "hidden"; continue; }
+          const old = oldByRef.get(ref), image = images.get(ref), kind = kinds.get(ref);
+          const sizeMatches = image && node.bounds && image.width === node.bounds.right - node.bounds.left && image.height === node.bounds.bottom - node.bounds.top;
+          const attributes = node.attributes = { ...node.attributes };
+          delete attributes["image-capture-error"];
+          delete attributes["image-refresh-error"];
+          if (image && sizeMatches) {
+            node.layerImageStatus = "captured";
+            node.layerImageDataUrl = image.pngDataUrl;
+            node.layerImageSize = { width: image.width, height: image.height };
+            node.layerImageEmpty = image.empty;
+            attributes["image-source"] = kind === "surface" ? "SurfaceView / OpenGL 独立缓冲层" : kind === "texture" ? "TextureView 自身缓冲区" : "按对象身份独立采集，不含子节点";
+            attributes["image-refreshed-at"] = refreshedAt;
+            refreshed++;
+          } else if (!image && skipDraw.has(ref)) {
+            node.layerImageStatus = "unavailable";
+            attributes["skip-draw"] = "true";
+            attributes["image-source"] = "结构容器，系统跳过自身绘制";
+            attributes["image-refreshed-at"] = refreshedAt;
+            refreshed++;
+          } else {
+            const reason = image ? "控件画面尺寸已变化，请重试。" : failures.get(ref) ?? "未取得控件独立画面。";
+            nodeFailures.push({ id: node.id, message: reason });
+            if (old?.layerImageStatus === "captured" && old.layerImageDataUrl && old.bounds?.raw === node.bounds?.raw && old.className === node.className) {
+              node.layerImageStatus = old.layerImageStatus;
+              node.layerImageDataUrl = old.layerImageDataUrl;
+              node.layerImageSize = old.layerImageSize;
+              node.layerImageEmpty = old.layerImageEmpty;
+              attributes["image-source"] = old.attributes?.["image-source"] ?? "原快照独立画面";
+              if (old.attributes?.["image-refreshed-at"]) attributes["image-refreshed-at"] = old.attributes["image-refreshed-at"];
+              attributes["image-refresh-error"] = `${reason} 已保留旧画面。`;
+            } else {
+              node.layerImageStatus = "failed";
+              attributes["image-capture-error"] = reason;
+              delete attributes["image-source"];
+            }
+          }
+        }
+        if (!refreshed) throw new Error(`分支补图全部失败：${nodeFailures[0]?.message ?? "未取得独立画面"}；原快照已保留。`);
+        signal?.throwIfAborted();
+        return { nodes: [], failures: nodeFailures, branch: latestBranch };
+      }
       const beforeNodes = new Map<string, UiNode>(), currentNodes = new Map<string, UiNode>();
       for (const node of [beforeCapture, current]) {
         const map = node === beforeCapture ? beforeNodes : currentNodes;
@@ -991,6 +1299,69 @@ export function captureViewNodes(serial: string, snapshot: UiSnapshot, nodeId: s
   });
 }
 
+export function parseViewStyleReply(output: string, ref: string, rootRef: string, instance: string, bounds: UiBounds): ViewStyleResult {
+  const match = /^Result: Bundle\[\{([^\r\n]{0,2048})\}\]$/.exec(output.trim());
+  if (!match) throw new Error("目标 App 的样式读取失败；请确认 Debug SDK 已更新。");
+  const fields = new Map<string, string>();
+  for (const entry of match[1].split(", ")) {
+    const separator = entry.indexOf("=");
+    if (separator < 1 || fields.has(entry.slice(0, separator))) throw new Error("样式数据格式无效。");
+    fields.set(entry.slice(0, separator), entry.slice(separator + 1));
+  }
+  if (fields.get("result") !== "ok") throw new Error("目标 App 未能读取此控件样式；请确认 Debug SDK 已更新。");
+  if (fields.get("ref") !== ref || fields.get("rootRef") !== rootRef || fields.get("processInstance") !== instance)
+    throw new Error("控件或窗口身份已变化，请重新采集整页。");
+  const coordinate = (key: string) => {
+    const raw = fields.get(key);
+    if (!raw || !/^-?\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw new Error("样式数据中的控件尺寸无效。");
+    return Number(raw);
+  };
+  if (coordinate("x") !== bounds.left || coordinate("y") !== bounds.top
+      || coordinate("width") !== bounds.right - bounds.left || coordinate("height") !== bounds.bottom - bounds.top)
+    throw new Error("控件位置或尺寸已变化，请刷新控件后再读取样式。");
+  const capturedAtMillis = coordinate("capturedAtMillis");
+  if (capturedAtMillis < 1) throw new Error("样式采集时间无效。");
+  const backgroundType = fields.get("backgroundType") ?? null;
+  const backgroundColor = fields.get("backgroundColor") ?? null;
+  const textColor = fields.get("textColor") ?? null;
+  const rawSize = fields.get("textSizePx");
+  const textSizePx = rawSize === undefined ? null : Number(rawSize);
+  if (backgroundType !== null && !/^[\w.$]{1,512}$/.test(backgroundType)
+      || backgroundColor !== null && (!backgroundType || !/^#[0-9A-F]{8}$/.test(backgroundColor))
+      || textColor !== null && !/^#[0-9A-F]{8}$/.test(textColor)
+      || (textColor === null) !== (rawSize === undefined)
+      || textSizePx !== null && (!Number.isFinite(textSizePx) || textSizePx <= 0 || textSizePx > 10_000))
+    throw new Error("样式数据无效。");
+  return { ref, capturedAtMillis, backgroundType, backgroundColor, textColor, textSizePx };
+}
+
+export function captureViewStyle(serial: string, snapshot: UiSnapshot, nodeId: string): Promise<ViewStyleResult> {
+  return inspectionContext.run({ allowAppRestart: false }, async () => {
+    const root = snapshot.root, target = root && nodeById(root, nodeId);
+    const packageName = root?.package, ref = target?.attributes?.["view-ref"];
+    const rootRef = root?.children[0]?.attributes?.["view-ref"];
+    const instance = root?.attributes?.["sdk-process-instance"];
+    const processId = Number(root?.attributes?.["debug-process-id"]);
+    const component = root?.attributes?.["debug-component"];
+    if (snapshot.inspectionSource !== "debug-hybrid" || root?.attributes?.["sdk-style-version"] !== "1"
+        || snapshot.serial !== serial || !packageName || !ref || !rootRef
+        || !instance || !component || !target?.bounds || !Number.isSafeInteger(processId) || processId < 1)
+      throw new Error("当前快照不支持实时样式，请重新采集接入新版 SDK 的 Debug App。");
+    const adbPath = automationAdb(serial);
+    const before = await checkedDebugTarget(adbPath, serial, packageName);
+    if (before.component !== component || await singleAppPid(adbPath, serial, packageName) !== processId)
+      throw new Error("目标 App 或进程已变化，请重新采集整页。");
+    const reply = await runDeviceAdb(adbPath, serial, ["shell", "content", "call", "--uri", `content://${packageName}.inspector`, "--method", "capture-style", "--arg", `'${ref}'`]);
+    if (reply.code !== 0) throw new Error("无法读取目标 App 的实时样式。");
+    const style = parseViewStyleReply(reply.stdout.toString("utf8"), ref, rootRef, instance, target.bounds);
+    const after = await checkedDebugTarget(adbPath, serial, packageName);
+    if (after.component !== before.component || after.windowId !== before.windowId
+        || await singleAppPid(adbPath, serial, packageName) !== processId)
+      throw new Error("样式读取期间 App 或窗口已变化，请重新采集整页。");
+    return style;
+  });
+}
+
 export function captureQmlGroupImage(serial: string, snapshot: UiSnapshot, nodeId: string, signal?: AbortSignal): Promise<QmlGroupImage | null> {
   return inspectionContext.run({ signal, allowAppRestart: false }, async () => {
     const root = snapshot.root, packageName = root?.package;
@@ -1015,6 +1386,50 @@ export function captureQmlGroupImage(serial: string, snapshot: UiSnapshot, nodeI
     if (!current || !qmlGroupNodeMatches(expected, current) || !image || captured.processId !== processId
       || after.windowId !== windowId || processId !== await singleAppPid(adbPath, serial, packageName)) return null;
     return { dataUrl: image.dataUrl, size: { width: image.width, height: image.height }, capturedAt: new Date().toISOString() };
+  });
+}
+
+export function captureViewGroupImage(serial: string, snapshot: UiSnapshot, nodeId: string, signal?: AbortSignal): Promise<QmlGroupImage | null> {
+  return inspectionContext.run({ signal, allowAppRestart: false }, async () => {
+    const root = snapshot.root, packageName = root?.package;
+    const targetId = nodeId === "0" ? "0/0" : nodeId;
+    const node = root && nodeById(root, targetId), bounds = node?.bounds;
+    const sameBounds = (a: UiNode["bounds"] | undefined, b: UiNode["bounds"] | undefined) => Boolean(a && b && a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom);
+    const processId = Number(root?.attributes?.["debug-process-id"]);
+    const instance = root?.attributes?.["sdk-process-instance"];
+    const rootRef = root?.children[0]?.attributes?.["view-ref"];
+    const ref = node?.attributes?.["view-ref"];
+    const component = root?.attributes?.["debug-component"];
+    const pixels = bounds ? (bounds.right - bounds.left) * (bounds.bottom - bounds.top) : 0;
+    if (snapshot.inspectionSource !== "debug-hybrid" || snapshot.serial !== serial || !root || !packageName || !node?.children.length
+        || (nodeId === "0" && !sameBounds(root.bounds, bounds))
+        || !node.visibleToUser || !bounds || pixels < 1 || pixels > 4_000_000 || !ref || !rootRef || !instance || !component
+        || !Number.isSafeInteger(processId) || processId < 1) return null;
+    const adbPath = automationAdb(serial);
+    const before = await checkedDebugTarget(adbPath, serial, packageName);
+    if (before.component !== component || processId !== await singleAppPid(adbPath, serial, packageName)) return null;
+    const firstTree = await readSdkCapture(adbPath, serial, packageName);
+    if (!sdkGroupBranchMatches(root, targetId, firstTree, packageName, processId, instance)) return null;
+    try {
+      const reply = await runDeviceAdb(adbPath, serial, ["shell", "content", "call", "--uri", `content://${packageName}.inspector`, "--method", "capture-group", "--arg", `'${ref}'`]);
+      const output = reply.stdout.toString("utf8");
+      const field = (name: string) => new RegExp(`\\b${name}=([^,}\\]]+)`).exec(output)?.[1];
+      if (reply.code !== 0 || field("result") !== "ok" || field("ref") !== ref || field("rootRef") !== rootRef
+          || field("processInstance") !== instance || !/^[a-f0-9]{64}$/.test(field("sha256") ?? "")) return null;
+      const file = await runDeviceAdb(adbPath, serial, ["exec-out", "run-as", packageName, "head", "-c", "20000001", "no_backup/inspector-group-image.png"]);
+      const size = pngSize(file.stdout);
+      if (file.code !== 0 || !size || file.stdout.length > 20_000_000 || size.width !== bounds.right - bounds.left
+          || size.height !== bounds.bottom - bounds.top || createHash("sha256").update(file.stdout).digest("hex") !== field("sha256")) return null;
+      const secondTree = await readSdkCapture(adbPath, serial, packageName);
+      const after = await checkedDebugTarget(adbPath, serial, packageName);
+      signal?.throwIfAborted();
+      if (!sdkGroupBranchMatches(root, targetId, secondTree, packageName, processId, instance)
+          || before.windowId !== after.windowId || before.component !== after.component
+          || processId !== await singleAppPid(adbPath, serial, packageName)) return null;
+      return { dataUrl: `data:image/png;base64,${file.stdout.toString("base64")}`, size, capturedAt: new Date().toISOString() };
+    } finally {
+      await inspectionContext.exit(() => runDeviceAdb(adbPath, serial, ["shell", "run-as", packageName, "rm", "-f", "no_backup/inspector-group-image.png"])).catch(() => undefined);
+    }
   });
 }
 
@@ -1105,7 +1520,12 @@ export function inspectDevice(serial: string, options: InspectionOptions = {}): 
 }
 
 async function readSdkCapture(adbPath: string, serial: string, packageName: string): Promise<unknown> {
-  const reply = await runDeviceAdb(adbPath, serial, ["shell", "content", "call", "--uri", `content://${packageName}.inspector`, "--method", "capture"]);
+  const args = ["shell", "content", "call", "--uri", `content://${packageName}.inspector`, "--method", "capture"];
+  let reply = await runDeviceAdb(adbPath, serial, args);
+  if (reply.stdout.toString("utf8").includes("error=View tree timed out")) reply = await runDeviceAdb(adbPath, serial, args);
+  if (reply.stdout.toString("utf8").includes("error=View tree timed out")) {
+    throw new Error("SDK 控件树连续超时：目标 App 页面尚未就绪，请稍后重试。");
+  }
   if (reply.code !== 0 || reply.stdout.toString("utf8").trim() !== "Result: Bundle[{result=ok}]") {
     throw new Error("目标 App 的 Debug SDK 控件树读取失败");
   }
@@ -1143,8 +1563,10 @@ export function inspectHybridDevice(serial: string, packageName: string, options
 /** Existing capture remains the fallback; never attach SDK data when identity checks fail. */
 export function inspectPreferredDevice(serial: string, options: InspectionOptions = {}): Promise<UiSnapshot> {
   return inspectionContext.run(options, async () => {
+    const started = performance.now();
+    const retryDeadline = started + STARTUP_RETRY_TIMEOUT_MS;
     const sdkState: { capture: { packageName: string; pid: number; component: string; windowId: string; tree: unknown } | null; error: unknown } = { capture: null, error: null };
-    const snapshot = await inspectDevice(serial, { ...options, onViewTreeReady: async (packageName, root) => {
+    const captureOptions: InspectionOptions = { ...options, pinFirstComponent: null, onViewTreeReady: async (packageName, root) => {
       if (!/^[\w]+(?:\.[\w]+)+$/.test(packageName)) return;
       try {
         const adbPath = automationAdb(serial);
@@ -1156,9 +1578,44 @@ export function inspectPreferredDevice(serial: string, options: InspectionOption
         const tree = await readSdkCapture(adbPath, serial, packageName);
         const after = await checkedDebugTarget(adbPath, serial, packageName);
         if (before.component !== after.component || before.windowId !== after.windowId || pid !== await singleAppPid(adbPath, serial, packageName)) throw new Error("进程或窗口已变化");
-        sdkState.capture = { packageName, pid, component: before.component, windowId: before.windowId, tree };
-      } catch (error) { sdkState.error = error; }
-    } });
+        if (tree && typeof tree === "object" && "visibleStreamVersion" in tree && tree.visibleStreamVersion === 1) {
+          root.attributes = { ...root.attributes, "sdk-visible-stream": "1" };
+        }
+        try {
+          verifySdkTreeBeforeImages(root, countNodes(root), tree, packageName, pid);
+          sdkState.capture = { packageName, pid, component: before.component, windowId: before.windowId, tree };
+        } catch (error) {
+          // A changing sibling invalidates SDK properties, not an own bitmap
+          // whose View identity, size and screen position are checked again below.
+          if (!(error instanceof Error && error.message.startsWith("SDK 与独立画面的"))) throw error;
+          sdkState.error = error;
+        }
+        // ponytail: tiny trees keep the cheaper DDMS path; retune 200 after broader device samples.
+        if (options.preferVisibleSdk === true || options.preferVisibleSdk === undefined && countNodes(root) >= 200) {
+          captureOptions.preferVisibleSdk = true;
+          const activeCapture = inspectionContext.getStore();
+          if (activeCapture) activeCapture.preferVisibleSdk = true;
+        }
+      } catch (error) {
+        sdkState.error = error;
+        if (error instanceof Error && /SDK 与独立画面的|SDK 控件树连续超时/.test(error.message)
+            && performance.now() < retryDeadline) throw new Error(`App 正在初始化：${error.message}`);
+        if (error instanceof Error && error.message.startsWith("SDK 控件树连续超时")) throw error;
+      }
+    } };
+    let snapshot: UiSnapshot;
+    do {
+      sdkState.capture = null;
+      sdkState.error = null;
+      captureOptions.preferVisibleSdk = options.preferVisibleSdk;
+      snapshot = await inspectDevice(serial, captureOptions);
+      if (!snapshot.error || !(snapshot.error.startsWith("App 仍在启动") || snapshot.error.startsWith("前台 App 在 18 秒内未准备好"))
+          || performance.now() + 2_000 >= retryDeadline) break;
+      options.signal?.throwIfAborted();
+      captureOptions.startupRetry = true;
+      options.onProgress?.("等待 App 页面稳定", Math.round(performance.now() - started));
+      await wait(2_000, undefined, { signal: options.signal });
+    } while (true);
     if (snapshot.error || snapshot.inspectionSource !== "debug-view" || !sdkState.capture && !sdkState.error) return snapshot;
     try {
       if (sdkState.error) throw sdkState.error;
@@ -1198,9 +1655,25 @@ async function readDeviceSnapshot(serial: string, options: InspectionOptions): P
     stage("检查前台 Debug App");
     const activities = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]);
     if (activities.code !== 0) return errorSnapshot(serial, commandError("无法读取前台 App", activities));
-    const target = foregroundTarget(activities.stdout.toString("utf8"));
-    if (!target) return errorSnapshot(serial, "未找到正在前台运行的 Android App。");
+    let target = foregroundTarget(activities.stdout.toString("utf8"));
+    const readinessDeadline = started + APP_READY_TIMEOUT_MS;
+    let startupWaited = options.startupRetry === true;
+    if (!target) {
+      startupWaited = true;
+      const foregroundDeadline = Math.min(readinessDeadline, performance.now() + 2_000);
+      stage("等待前台 App 就绪");
+      while (!target && performance.now() < foregroundDeadline) {
+        await wait(Math.min(500, Math.max(1, readinessDeadline - performance.now())), undefined, { signal: options.signal });
+        if (performance.now() >= readinessDeadline) break;
+        const current = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"], Math.max(1, Math.ceil(readinessDeadline - performance.now())));
+        if (current.code !== 0) return errorSnapshot(serial, commandError("无法读取前台 App", current));
+        target = foregroundTarget(current.stdout.toString("utf8"));
+      }
+      if (!target) return errorSnapshot(serial, "未发现前台 App，请等待页面启动后重试。");
+    }
     if (options.expectedPackage && target.packageName !== options.expectedPackage) throw new Error("前台 App 已变化，已拒绝采集未授权的 App。");
+    if (options.pinFirstComponent === null) options.pinFirstComponent = target.component;
+    else if (options.pinFirstComponent && options.pinFirstComponent !== target.component) throw new Error("重新采集时前台 App 已变化，已停止采集。");
 
     const debugCheck = await runDeviceAdb(adbPath, serial, ["shell", "run-as", target.packageName, "id"]);
     if (debugCheck.code !== 0) return errorSnapshot(serial, `仅支持 Debug App：${target.packageName} 不可调试。`);
@@ -1208,7 +1681,50 @@ async function readDeviceSnapshot(serial: string, options: InspectionOptions): P
     stage("读取控件树");
     const top = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", target.packageName]);
     if (top.code !== 0) return errorSnapshot(serial, commandError("无法读取 Debug App 层级", top));
-    const section = targetActivitySection(top.stdout.toString("utf8"), target);
+    const activitySection = (output: Buffer) => {
+      const text = output.toString("utf8");
+      return text.includes(`ACTIVITY ${target.component} `) ? targetActivitySection(text, target) : "";
+    };
+    let section = activitySection(top.stdout);
+    if (!hasActivityHierarchy(section, target)) {
+      startupWaited = true;
+      // ponytail: this Android 14 App needed 12–13 s to expose its tree; keep a bounded, adjustable budget.
+      const deadline = readinessDeadline;
+      let focusReady = false;
+      stage("等待 App 控件树就绪");
+      try {
+        while (performance.now() < deadline) {
+          await wait(Math.min(500, Math.max(1, deadline - performance.now())), undefined, { signal: options.signal });
+          if (performance.now() >= deadline) break;
+          const foreground = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"], Math.max(1, Math.ceil(deadline - performance.now())));
+          if (foreground.code !== 0) throw new Error(commandError("等待控件树时无法确认前台 App", foreground));
+          if (foregroundTarget(foreground.stdout.toString("utf8"))?.component !== target.component) throw new Error("等待控件树时前台 App 已变化，已停止采集。");
+          if (performance.now() >= deadline) break;
+          const refreshed = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", target.packageName], Math.max(1, Math.ceil(deadline - performance.now())));
+          if (refreshed.code !== 0) throw new Error(commandError("等待控件树时无法读取 App 层级", refreshed));
+          section = activitySection(refreshed.stdout);
+          if (hasActivityHierarchy(section, target)) {
+            try {
+              const timeout = AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now())));
+              const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+              focusReady = (await inspectionContext.run({ ...options, signal }, () => checkedDebugTarget(adbPath, serial, target.packageName))).component === target.component;
+            }
+            catch { options.signal?.throwIfAborted(); }
+            if (focusReady) {
+              const focused = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", target.packageName], Math.max(1, Math.ceil(deadline - performance.now())));
+              if (focused.code !== 0) throw new Error(commandError("无法读取焦点窗口层级", focused));
+              section = activitySection(focused.stdout);
+              if (hasActivityHierarchy(section, target)) break;
+            }
+          }
+        }
+      } catch (error) {
+        options.signal?.throwIfAborted();
+        if (!(error instanceof Error && error.message.startsWith("命令执行超时"))) throw error;
+      }
+      if (!focusReady || !hasActivityHierarchy(section, target)) throw new Error("前台 App 在 18 秒内未准备好控件树和焦点窗口，请等待页面就绪后重试。");
+      stage("读取控件树");
+    }
     const isQml = section.includes("org.qtproject.qt.android.");
     let root: UiNode;
     let inspectionSource: UiSnapshot["inspectionSource"];
@@ -1234,22 +1750,25 @@ async function readDeviceSnapshot(serial: string, options: InspectionOptions): P
       inspectionSource = "debug-view";
       rawHierarchy = section;
       stage("读取完整控件属性");
+      const imageSignal = captureSignal(options.signal, startupWaited ? STARTUP_IMAGE_TIMEOUT_MS : IMAGE_TIMEOUT_MS);
       try {
         let previewScreen: Awaited<ReturnType<typeof captureScreen>> | null = null;
         const preview = options.onPreview ? async (phase: "tree" | "layers") => {
           try {
             if (phase === "tree") {
               stage("读取首屏预览");
-              const screen = await captureScreen(adbPath, serial);
-              if (screen.screenshotDataUrl && screen.captureGeometry && assessCaptureGeometry(screen.captureGeometry).status === "checked") previewScreen = screen;
+              try {
+                const signal = captureSignal(inspectionContext.getStore()?.signal, PREVIEW_SCREEN_TIMEOUT_MS);
+                const screen = await inspectionContext.run({ ...options, signal }, () => captureScreen(adbPath, serial));
+                if (screen.screenshotDataUrl && screen.captureGeometry && assessCaptureGeometry(screen.captureGeometry).status === "checked") previewScreen = screen;
+              } catch { options.signal?.throwIfAborted(); }
             }
-            if (!previewScreen?.screenshotDataUrl) return;
             const foreground = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]);
             if (foreground.code !== 0 || foregroundTarget(foreground.stdout.toString("utf8"))?.component !== target.component) return;
             options.signal?.throwIfAborted();
             options.onPreview?.(phase, {
               serial, root, nodeCount: countNodes(root), xmlSize: Buffer.byteLength(rawHierarchy, "utf8"), rawXml: null,
-              screenshotDataUrl: previewScreen.screenshotDataUrl, captureGeometry: previewScreen.captureGeometry,
+              screenshotDataUrl: previewScreen?.screenshotDataUrl ?? null, captureGeometry: previewScreen?.captureGeometry,
               error: null, warning: null, inspectionSource: "debug-view",
               captureDurationMs: Math.round(performance.now() - started),
             });
@@ -1257,11 +1776,18 @@ async function readDeviceSnapshot(serial: string, options: InspectionOptions): P
             options.signal?.throwIfAborted();
           }
         } : undefined;
-        const imageCount = await captureDebugViewImages(adbPath, serial, target.packageName, root, stage, preview, timings);
+        const imageCount = await inspectionContext.run({ ...options, signal: imageSignal }, () => captureDebugViewImages(adbPath, serial, target.packageName, root, stage, preview, timings));
         if (imageCount === 0) warning = "未读取到独立 View 画面，缺失画面的控件仅显示边框。";
         if (root.attributes?.["texture-capture-warning"]) warning = root.attributes["texture-capture-warning"];
       } catch (error) {
         options.signal?.throwIfAborted();
+        if (imageSignal.aborted) throw new Error(startupWaited
+          ? "App 冷启动后 55 秒仍未完成独立画面采集，请等待页面稳定后重试。"
+          : "独立画面采集超过 90 秒，请等待页面稳定后重试。");
+        if (error instanceof Error && (/Debug V2|Debug 窗口与当前控件树不一致|Debug 窗口身份已变化|App 正在初始化/.test(error.message)
+            || startupWaited && /SDK 控件树连续超时|Debug View 连接超时/.test(error.message))) {
+          throw new Error(`App 仍在启动，独立画面尚未就绪，请等待页面稳定后重试。${error.message}`);
+        }
         const pending = [...root.children];
         while (pending.length) {
           const node = pending.pop()!;
@@ -1286,7 +1812,11 @@ async function readDeviceSnapshot(serial: string, options: InspectionOptions): P
     }
 
     stage("读取屏幕并校验前台窗口");
-    const screenshot = await captureScreen(adbPath, serial);
+    let screenshot: Awaited<ReturnType<typeof captureScreen>> | null = null;
+    try {
+      const signal = captureSignal(options.signal, FINAL_SCREEN_TIMEOUT_MS);
+      screenshot = await inspectionContext.run({ ...options, signal }, () => captureScreen(adbPath, serial));
+    } catch { options.signal?.throwIfAborted(); }
     const after = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]);
     if (after.code !== 0 || foregroundTarget(after.stdout.toString("utf8"))?.component !== target.component) {
       return errorSnapshot(serial, "采集期间前台窗口发生变化或无法校验，请保持页面稳定后重新采集。");
@@ -1297,8 +1827,10 @@ async function readDeviceSnapshot(serial: string, options: InspectionOptions): P
         return errorSnapshot(serial, "Qt App 进程或窗口已变化，请重新采集。");
       }
     }
-    if (!screenshot.screenshotDataUrl) {
-      warning = [warning, commandError("控件树已读取，但截图失败或不是有效 PNG", screenshot.result)].filter(Boolean).join(" ");
+    if (!screenshot?.screenshotDataUrl) {
+      warning = [warning, screenshot
+        ? commandError("控件树已读取，但截图失败或不是有效 PNG", screenshot.result)
+        : "控件树已读取，但截图超时或读取失败。"].filter(Boolean).join(" ");
     } else if (screenshot.captureGeometry) {
       const integrity = assessCaptureGeometry(screenshot.captureGeometry);
       if (integrity.status === "mismatch") warning = [warning, integrity.message].filter(Boolean).join(" ");
@@ -1311,13 +1843,13 @@ async function readDeviceSnapshot(serial: string, options: InspectionOptions): P
       nodeCount: countNodes(root),
       xmlSize: Buffer.byteLength(rawHierarchy, "utf8"),
       rawXml: null,
-      screenshotDataUrl: screenshot.screenshotDataUrl,
+      screenshotDataUrl: screenshot?.screenshotDataUrl ?? null,
       error: null,
       warning,
       inspectionSource,
       captureTimings: timings,
       captureDurationMs: Math.round(performance.now() - started),
-      ...(screenshot.captureGeometry ? { captureGeometry: screenshot.captureGeometry } : {}),
+      ...(screenshot?.captureGeometry ? { captureGeometry: screenshot.captureGeometry } : {}),
     };
   } catch (error) {
     options.signal?.throwIfAborted();

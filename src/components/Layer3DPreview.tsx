@@ -179,7 +179,7 @@ function groupImageFor(record: LayerRecord, groups: ReadonlyMap<string, QmlGroup
 }
 
 function collapsedTextureKey(record: LayerRecord, visibilityKey: string, group: QmlGroupImage | null) {
-  if (group) return `qml-group:${record.id}:${group.capturedAt}`;
+  if (group) return `live-group:${record.id}:${group.capturedAt}`;
   let refreshedAt = "";
   const pending = [record.node];
   for (let cursor = 0; cursor < pending.length; cursor++) {
@@ -662,6 +662,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
   const drawRef = useRef<() => void>(() => {});
   const fitRef = useRef<() => void>(() => {});
   const [rendererStatus, setRendererStatus] = useState<RendererStatus>("loading");
+  const [rendererGeneration, setRendererGeneration] = useState(0);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [textureWarning, setTextureWarning] = useState<string | null>(null);
   const [groupImages, setGroupImages] = useState<ReadonlyMap<string, QmlGroupImage>>(() => new Map());
@@ -681,10 +682,12 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
   const records = useMemo(() => layout.records.filter((record) => !hiddenNodeIds.has(record.id)), [layout.records, hiddenNodeIds]);
   const parent = layout.parent && !hiddenNodeIds.has(layout.parent.id) ? layout.parent : null;
   const visibilityKey = useMemo(() => JSON.stringify([...hiddenNodeIds].sort()), [hiddenNodeIds]);
-  const collapsedRecords = [parent, ...records].filter((record): record is LayerRecord => Boolean(record?.isCollapsed && record.node.attributes?.["inspection-source"] === "debug-qml" && !subtreeHasHidden(record.node, hiddenNodeIds)));
+  const collapsedRecords = [parent, ...records].filter((record): record is LayerRecord => Boolean(record?.isCollapsed && !subtreeHasHidden(record.node, hiddenNodeIds)
+    && (record.node.attributes?.["inspection-source"] === "debug-qml" || root.attributes?.["tree-source"] === "debug-sdk")));
   const groupRequestKey = `${visibilityKey}|${collapsedRecords.map(record => record.id).join("|")}`;
   const shownGroupImages = collapsedRecords.map(record => groupImageFor(record, groupImages, hiddenNodeIds)).filter((image): image is QmlGroupImage => Boolean(image));
   const textureRecords = [parent, ...records].filter((record): record is LayerRecord => Boolean(record && hasOwnVisualStyle(record, size, hiddenNodeIds, groupImages) && (record.isCollapsed || record.node.layerImageDataUrl)));
+  const localCompositeCount = textureRecords.filter(record => record.isCollapsed && !groupImageFor(record, groupImages, hiddenNodeIds)).length;
   // Camera/hover changes don't change the required images or restart decoding.
   const textureKey = `${visibilityKey}|${textureRecords.map((record) => `${record.id}:${record.isCollapsed ? collapsedTextureKey(record, visibilityKey, groupImageFor(record, groupImages, hiddenNodeIds)) : "own"}`).join("|")}`;
   const roles = useMemo(() => layerPlaneRoles(records, size, hiddenNodeIds, groupImages), [records, size, hiddenNodeIds, groupImages]);
@@ -907,7 +910,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
 
   // Fit after updating the camera. Selection, hover, hiding and free rotation
   // do not change framing; isolation, a changed tree, spacing or viewport do.
-  useEffect(() => { fitRef.current(); }, [src, expandedNodeIds, camera.layerGap, camera.distance, focusedNode, layout.candidateCount, center.x, center.y, center.z]);
+  useEffect(() => { fitRef.current(); }, [expandedNodeIds, camera.layerGap, camera.distance, focusedNode, layout.candidateCount, size.width, size.height, center.x, center.y, center.z]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -927,7 +930,23 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
       rendererRef.current = null;
       if (alive) setRendererStatus("fallback");
     };
+    const onContextRestored = () => setRendererGeneration(value => value + 1);
     canvas.addEventListener("webglcontextlost", onContextLost);
+    canvas.addEventListener("webglcontextrestored", onContextRestored);
+    return () => {
+      alive = false;
+      observer.disconnect();
+      canvas.removeEventListener("webglcontextlost", onContextLost);
+      canvas.removeEventListener("webglcontextrestored", onContextRestored);
+      if (rendererRef.current === renderer) rendererRef.current = null;
+      disposeRenderer(renderer);
+    };
+  }, [rendererGeneration]);
+
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) return;
+    let alive = true;
     const image = new Image();
     image.onload = () => {
       if (!alive || rendererRef.current !== renderer || !uploadTexture(renderer, image)) {
@@ -939,14 +958,8 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
     };
     image.onerror = () => { if (alive) setRendererStatus("fallback"); };
     image.src = src;
-    return () => {
-      alive = false;
-      observer.disconnect();
-      canvas.removeEventListener("webglcontextlost", onContextLost);
-      if (rendererRef.current === renderer) rendererRef.current = null;
-      disposeRenderer(renderer);
-    };
-  }, [src]);
+    return () => { alive = false; };
+  }, [src, rendererGeneration]);
 
   useEffect(() => {
     const renderer = rendererRef.current;
@@ -1060,9 +1073,10 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
         <span className="layer-measurement-status" role="status">{nodeDisplayLabel(selectedRecord!.node)} 到 {nodeDisplayLabel(hoveredRecord!.node)}：{measurement.guides.map((_, index) => measurementLabel(measurement, index)).join("，")}。按原始外框测量，不含 3D 展开层距。</span>
       </>}
       {rendererStatus === "fallback" && <span className="layer-webgl-fallback">{focusedNode ? "WebGL 不可用，请退出聚焦查看截图。" : "WebGL 不可用，已回退到截图预览。"}</span>}
-      {(layout.truncated || textureWarning || shownGroupImages.length > 0) && <span className="layer-resource-note" role="status">{[
+      {(layout.truncated || textureWarning || shownGroupImages.length > 0 || localCompositeCount > 0) && <span className="layer-resource-note" role="status">{[
         textureWarning,
         layout.truncated ? `当前显示 ${records.length} 层，另有 ${layout.omittedCount} 层未显示` : null,
+        localCompositeCount ? "部分折叠画面由已采集图层在本机合成" : null,
         shownGroupImages.map(image => `折叠画面实时采集于 ${new Date(image.capturedAt).toLocaleTimeString()}，不与原快照保证同帧`).at(-1),
       ].filter(Boolean).join(" · ")}</span>}
       <div className="layer-scene-metadata" hidden aria-hidden="true">

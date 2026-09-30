@@ -7,7 +7,7 @@ import { makeNode } from "./fixtures";
 import { composeSubtreeImage } from "../shared/layer-textures";
 import { qmlStyleFrom, qmlStyleSvg } from "../shared/qml-style";
 import { Layer3DPreview, type LayerSceneHandle } from "../src/components/Layer3DPreview";
-import { nodeDisplayLabel, flattenNodes } from "../shared/tree-utils";
+import { changedLayerImages, layerImageBaseline, mergeLayerImages, nodeDisplayLabel, flattenNodes } from "../shared/tree-utils";
 import "../src/App.css";
 
 function assert(value: unknown, message: string): asserts value {
@@ -368,11 +368,16 @@ async function benchmarkLayerRendering() {
   root.layerImageEmpty = true;
   const camera = { distance: 1100, azimuth: 40, elevation: 12, roll: 0, layerGap: 96, panX: 0, panY: 0 };
   const samples: number[] = [], draws: number[] = [];
+  const screenSrc = bitmap.toDataURL(), expanded = new Set([root.id]), baseline = layerImageBaseline(root);
+  let displayedRoot: UiNode = structuredClone(root);
+  const render = () => flushSync(() => reactRoot.render(<Layer3DPreview ref={scene} src={screenSrc} root={displayedRoot} selectedNode={displayedRoot.children[15]} expandedNodeIds={expanded} size={{ width: 360, height: 780 }} renderScale={.55} origin={{ left: 321, top: 75 }} camera={camera} onSelect={() => {}} />));
   try {
-    flushSync(() => reactRoot.render(<Layer3DPreview ref={scene} src={bitmap.toDataURL()} root={root} selectedNode={root.children[15]} expandedNodeIds={new Set([root.id])} size={{ width: 360, height: 780 }} renderScale={.55} origin={{ left: 321, top: 75 }} camera={camera} onSelect={() => {}} />));
+    render();
     const canvas = host.querySelector<HTMLCanvasElement>("canvas")!;
     await until(() => canvas.dataset.layerRenderer === "webgl" && canvas.dataset.layerTextureCount === "32", "render benchmark textures did not settle");
     const gl = canvas.getContext("webgl")!, draw = gl.drawArrays.bind(gl), upload = gl.texImage2D.bind(gl);
+    const rendererInfo = gl.getExtension("WEBGL_debug_renderer_info");
+    const gpuRenderer = String(rendererInfo ? gl.getParameter(rendererInfo.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
     let calls = 0, uploads = 0;
     gl.drawArrays = (...args) => { calls++; draw(...args); };
     gl.texImage2D = ((...args: Parameters<typeof upload>) => { uploads++; upload(...args); }) as typeof upload;
@@ -388,6 +393,31 @@ async function benchmarkLayerRendering() {
     const bounds = canvas.getBoundingClientRect();
     assert(scene.current!.pick(bounds.left + Number(canvas.dataset.layerProbeX), bounds.top + Number(canvas.dataset.layerProbeY)), "batched scene lost picking");
     assert(gl.getError() === gl.NO_ERROR, "render benchmark has a WebGL error");
+    const batchBitmap = document.createElement("canvas"); batchBitmap.width = batchBitmap.height = 256;
+    const batchContext = batchBitmap.getContext("2d")!;
+    const previewTimes: Array<{ mergeMs: number; commitMs: number; gpuReadyMs: number; uploads: number }> = [];
+    for (let batch = 0; batch < 3; batch++) {
+      for (let i = 0; i < 40; i++) {
+        const index = (batch * 40 + i) % 32 * 16 + Math.floor((batch * 40 + i) / 32);
+        const child = root.children[index];
+        batchContext.fillStyle = `hsl(${(batch * 40 + i) * 17}, 70%, 50%)`;
+        batchContext.fillRect(0, 0, 256, 256);
+        child.layerImageDataUrl = batchBitmap.toDataURL(); child.layerImageSize = { width: 256, height: 256 };
+        child.layerImageStatus = "captured"; child.layerImageEmpty = false;
+      }
+      const started = performance.now(), updates = changedLayerImages(root, baseline)!;
+      displayedRoot = mergeLayerImages(displayedRoot, updates);
+      const merged = performance.now();
+      render();
+      const committed = performance.now(), beforeUploads = uploads;
+      await until(() => Number(canvas.dataset.layerTextureCount) === 32 + (batch + 1) * 40, "preview textures did not settle");
+      await tick(); scene.current!.paintCamera(camera); gl.finish();
+      const uploaded = uploads - beforeUploads;
+      assert(updates.length === 40 && uploaded === 40, `preview reuploaded unchanged textures: ${updates.length} updates, ${uploaded} uploads`);
+      assert(gl.getError() === gl.NO_ERROR, "preview texture upload has a WebGL error");
+      previewTimes.push({ mergeMs: merged - started, commitMs: committed - merged, gpuReadyMs: performance.now() - started, uploads: uploaded });
+    }
+    const previewTextureBytes = Number(canvas.dataset.layerTextureBytes);
     scene.current!.paintCamera(camera);
     const screenshot = canvas.toDataURL("image/png");
     // A rear outline must not bleed through an opaque face; a front outline
@@ -411,7 +441,7 @@ async function benchmarkLayerRendering() {
     assert(maxBlue(180 - 50 * 1100 / 1004) > 10, "front outline lost its visible border");
     assert(scene.current!.pick(bounds.left + 180, bounds.top + 160)?.id === front.id, "outline batching changed front-most picking");
     samples.sort((a, b) => a - b); draws.sort((a, b) => a - b);
-    return { layers: 512, textures: 32, samples: samples.length, medianCpuMs: samples[60], p95CpuMs: samples[114], medianDrawCalls: draws[60], maxDrawCalls: draws.at(-1), scope: "CPU frame submission in real WebGL; excludes GPU completion/display refresh", screenshot };
+    return { layers: 512, textures: 32, samples: samples.length, medianCpuMs: samples[60], p95CpuMs: samples[114], medianDrawCalls: draws[60], maxDrawCalls: draws.at(-1), previewTimes, textureBytes: previewTextureBytes, gpuRenderer, scope: "CPU submission and synthetic 40-image preview batches in WebGL; gl.finish confirms GPU completion, not monitor refresh", screenshot };
   } finally { flushSync(() => reactRoot.unmount()); host.remove(); }
 }
 
@@ -466,6 +496,23 @@ async function verifyLayerComposites() {
   expect(pixel(output, 2, 2), [255, 0, 0, 255], "padding clip must preserve parent's own background");
   expect(pixel(output, 6, 6), [0, 0, 255, 255], "padding interior");
   checks.push("pixel: padding clips descendants, not parent background");
+
+  const roundedParent = imageNode("rounded-parent", "blue"), roundedRed = imageNode("rounded-red", "red");
+  const roundedGreen = imageNode("rounded-green", "#00ff00", 8, 0, 20, 20);
+  roundedParent.attributes = { ...roundedParent.attributes, alpha: "0.5", "effective-alpha": "0.5", "clip-to-outline": "true",
+    "sdk-outlineLeft": "0", "sdk-outlineTop": "0", "sdk-outlineRight": "20", "sdk-outlineBottom": "20", "sdk-outlineRadius": "5" };
+  roundedGreen.attributes = { ...roundedGreen.attributes, alpha: "0.5" };
+  roundedParent.children = [roundedRed, roundedGreen];
+  output = await render(roundedParent);
+  expect(pixel(output, 0, 0), [0, 0, 0, 0], "rounded parent clips child pixels at its corner");
+  expect(pixel(output, 3, 10), [255, 0, 0, 128], "parent alpha applies once to its opaque child");
+  expect(pixel(output, 15, 10), [128, 128, 0, 128], "overlapping semi-transparent sibling stays inside one parent alpha");
+  delete roundedParent.attributes["sdk-outlineRadius"];
+  let unsupportedRejected = false;
+  try { await render(roundedParent); }
+  catch (error) { unsupportedRejected = error instanceof Error && error.message.includes("自定义轮廓裁剪"); }
+  assert(unsupportedRejected, "unknown outlines must not show a misleading group image");
+  checks.push("pixel: rounded outline, parent/child alpha and unsupported outline");
 
   const front = imageNode("front", "red"), back = imageNode("back", "blue");
   front.attributes!.z = "5"; back.attributes!.z = "1"; root.children = [front, back];
@@ -527,7 +574,7 @@ async function verifyLayerComposites() {
   parent.attributes["effective-alpha"] = "0.5";
   parent.layerImageDataUrl = images.get("parent")!.toDataURL();
   child.layerImageDataUrl = images.get("child")!.toDataURL();
-  const draw = (expanded: boolean) => flushSync(() => reactRoot.render(<Layer3DPreview ref={scene} src={parent.layerImageDataUrl!} root={parent} selectedNode={parent} expandedNodeIds={new Set(expanded ? [parent.id] : [])} size={{ width: 20, height: 20 }} renderScale={10} origin={{ left: 50, top: 50 }} camera={camera} onSelect={() => {}} />));
+  const draw = (expanded: boolean, screen = parent.layerImageDataUrl!) => flushSync(() => reactRoot.render(<Layer3DPreview ref={scene} src={screen} root={parent} selectedNode={parent} expandedNodeIds={new Set(expanded ? [parent.id] : [])} size={{ width: 20, height: 20 }} renderScale={10} origin={{ left: 50, top: 50 }} camera={camera} onSelect={() => {}} />));
   try {
     draw(true);
     const canvas = () => host.querySelector<HTMLCanvasElement>(".layer-webgl-canvas")!;
@@ -535,6 +582,18 @@ async function verifyLayerComposites() {
       await until(() => canvas()?.dataset.layerTextureCount === "2", "independent WebGL textures did not load");
     } catch (error) {
       throw new Error(`${error}; canvas=${JSON.stringify(canvas()?.dataset)}, warning=${host.querySelector(".layer-resource-note")?.textContent ?? "none"}`);
+    }
+    const stableCanvas = canvas(), stableGl = stableCanvas.getContext("webgl")!;
+    const beforeVersion = Number(stableCanvas.dataset.layerRenderVersion);
+    const deleteTexture = stableGl.deleteTexture.bind(stableGl);
+    let deleted = 0;
+    stableGl.deleteTexture = texture => { deleted++; deleteTexture(texture); };
+    try {
+      draw(true, child.layerImageDataUrl!);
+      await until(() => Number(canvas().dataset.layerRenderVersion) > beforeVersion, "new screenshot did not repaint WebGL");
+      assert(canvas() === stableCanvas && deleted === 0 && canvas().dataset.layerTextureCount === "2", "replacing the screen rebuilt independent layer textures");
+    } finally {
+      stableGl.deleteTexture = deleteTexture;
     }
     draw(false);
     await until(() => canvas()?.dataset.layerTextureCount === "1", "folding did not replace native textures with one composite");

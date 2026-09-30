@@ -108,7 +108,8 @@ export type UiNode = {
   children: UiNode[];
 };
 
-export type ViewRefreshResult = { nodes: UiNode[]; failures: { id: string; message: string }[] };
+export type ViewRefreshResult = { nodes: UiNode[]; failures: { id: string; message: string }[]; branch?: UiNode };
+export type ViewStyleResult = { ref: string; capturedAtMillis: number; backgroundType: string | null; backgroundColor: string | null; textColor: string | null; textSizePx: number | null };
 
 export type UiSnapshot = {
   serial: string;
@@ -132,7 +133,15 @@ export type UiSnapshot = {
 };
 
 export type InspectionProgress = { requestId: string; stage: string; elapsedMs: number };
-export type InspectionPreview = { requestId: string; phase: "tree" | "layers"; snapshot: UiSnapshot };
+export type LayerImageUpdate = Pick<UiNode, "id" | "layerImageDataUrl" | "layerImageSize" | "layerImageEmpty" | "layerImageStatus"> & {
+  imageSource?: string;
+  imageCaptureError?: string;
+  skipDraw?: string;
+};
+export type InspectionPreview = { requestId: string } & (
+  | { phase: "tree"; snapshot: UiSnapshot }
+  | { phase: "layers"; updates: LayerImageUpdate[] }
+);
 
 export type ExportFormat = "json" | "xml" | "png";
 

@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.SurfaceHolder;
@@ -17,8 +18,10 @@ public final class MainActivity extends Activity {
     private FrameLayout testParent;
     private TextView testText;
     private View testOpaqueChild;
+    private FrameLayout visualStage;
     private boolean captured;
     private boolean changed;
+    private int branchStep;
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -76,6 +79,19 @@ public final class MainActivity extends Activity {
                 FrameLayout.LayoutParams addedBox = new FrameLayout.LayoutParams(dp(120), dp(30), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
                 testParent.addView(added, addedBox);
             });
+        } else if ("branch".equals(mode)) {
+            testText.setOnClickListener(view -> {
+                if (branchStep++ == 0) {
+                    TextView added = new TextView(this);
+                    added.setText("NEW VIEW");
+                    testParent.addView(added, new FrameLayout.LayoutParams(dp(120), dp(30), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL));
+                } else if (branchStep == 2) {
+                    testParent.removeView(testOpaqueChild);
+                } else if (branchStep == 3) {
+                    testParent.removeView(testText);
+                    testParent.addView(testText);
+                }
+            });
         } else if ("resize".equals(mode)) {
             testText.setOnClickListener(view -> {
                 if (changed) return;
@@ -103,15 +119,42 @@ public final class MainActivity extends Activity {
                 @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {}
                 @Override public void surfaceDestroyed(SurfaceHolder holder) {}
             });
+        } else if ("partial-failure".equals(mode)) {
+            View oversized = new View(this);
+            ProbeRunner.label(oversized, "超出单图预算的测试层");
+            oversized.setBackgroundColor(Color.TRANSPARENT);
+            testParent.addView(oversized, 0, new FrameLayout.LayoutParams(dp(750), dp(750)));
+        } else if ("visual".equals(mode)) {
+            visualStage = new FrameLayout(this);
+            GradientDrawable rounded = new GradientDrawable();
+            rounded.setColor(Color.BLUE);
+            rounded.setCornerRadius(dp(20));
+            visualStage.setBackground(rounded);
+            visualStage.setClipToOutline(true);
+            visualStage.setAlpha(0.5f);
+            FrameLayout.LayoutParams stageBox = new FrameLayout.LayoutParams(dp(100), dp(100));
+            stageBox.leftMargin = dp(30);
+            stageBox.topMargin = dp(50);
+            page.addView(visualStage, stageBox);
+            View red = new View(this);
+            red.setBackgroundColor(Color.RED);
+            visualStage.addView(red, new FrameLayout.LayoutParams(-1, -1));
+            View green = new View(this);
+            green.setBackgroundColor(Color.GREEN);
+            green.setAlpha(0.5f);
+            FrameLayout.LayoutParams greenBox = new FrameLayout.LayoutParams(dp(60), -1, Gravity.RIGHT);
+            visualStage.addView(green, greenBox);
         }
         setContentView(page);
     }
 
     @Override public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus && !captured && getIntent().getStringExtra("mode") == null) {
+        String mode = getIntent().getStringExtra("mode");
+        if (hasFocus && !captured && (mode == null || "visual".equals(mode))) {
             captured = true;
-            testParent.post(() -> ProbeRunner.run(this, testParent, testText, testOpaqueChild));
+            if ("visual".equals(mode)) visualStage.post(() -> ProbeRunner.runVisual(this, visualStage));
+            else testParent.post(() -> ProbeRunner.run(this, testParent, testText, testOpaqueChild));
         }
     }
 

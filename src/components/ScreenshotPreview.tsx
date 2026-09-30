@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperti
 import { createPortal } from "react-dom";
 import type { CaptureGeometry, PixelSize, QmlGroupImage, UiNode } from "../../shared/types";
 import { assessCaptureGeometry, boundsPercent, clientToScreen, findNodeAtPoint, validSize } from "../../shared/screen-coordinates";
-import { flattenNodes, nodeDisplayLabel } from "../../shared/tree-utils";
+import { flattenNodes, nodeDisplayLabel, remapViewNodeIds } from "../../shared/tree-utils";
 import { orbitFromDrag, orbitFromKeys, type OrbitCamera } from "../../shared/orbit-camera";
 import { Layer3DPreview, type LayerSceneHandle } from "./Layer3DPreview";
 
@@ -70,6 +70,7 @@ function LoadedScreenshot({ sessionKey, src, root, selectedNode, expandedNodeIds
   const menuRequestRef = useRef(0);
   const [hiddenNodeIds, setHiddenNodeIds] = useState<ReadonlySet<string>>(() => new Set());
   const [focusedNode, setFocusedNode] = useState<UiNode | null>(null);
+  const previousRootRef = useRef(root);
   const [menuError, setMenuError] = useState<string | null>(null);
   const [size, setSize] = useState<PixelSize | null>(null);
   const [frameSize, setFrameSize] = useState<FrameSize>({ width: 0, height: 0 });
@@ -101,10 +102,12 @@ function LoadedScreenshot({ sessionKey, src, root, selectedNode, expandedNodeIds
 
   useEffect(() => {
     const nodes = flattenNodes(root);
-    setFocusedNode((current) => current ? nodes.get(current.id) ?? null : null);
+    const remap = remapViewNodeIds(previousRootRef.current, root);
+    previousRootRef.current = root;
+    setFocusedNode((current) => current ? nodes.get(remap.get(current.id) ?? "") ?? null : null);
     setHiddenNodeIds((current) => {
-      const kept = [...current].filter((id) => nodes.has(id));
-      return kept.length === current.size ? current : new Set(kept);
+      const kept = new Set([...current].map(id => remap.get(id)).filter((id): id is string => Boolean(id)));
+      return kept.size === current.size && [...current].every(id => kept.has(id)) ? current : kept;
     });
   }, [root]);
 

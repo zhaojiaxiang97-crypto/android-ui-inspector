@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { joinSdkTreeAndDebugImages } from "../electron/sdk-hybrid";
+import { joinSdkTreeAndDebugImages, sdkGroupBranchMatches, verifySdkTreeBeforeImages } from "../electron/sdk-hybrid";
 import { makeNode } from "../benchmarks/fixtures";
 import type { UiNode, UiSnapshot } from "../shared/types";
 
@@ -22,7 +22,7 @@ test("SDK tree joins only the same process, view identities and geometry", () =>
     longClickable: true, contextClickable: false, hasOnClickListeners: true, pressed: false, activated: false,
     layoutParamsClass: "android.widget.FrameLayout$LayoutParams", layoutWidth: -1, layoutHeight: 20, layoutGravity: 85,
     marginTop: 0, marginRight: -10, marginBottom: 4, marginLeft: 2, children: [] };
-  const sdk = { version: 1, packageName: "sample.app", pid: 42,
+  const sdk = { version: 1, styleVersion: 1, packageName: "sample.app", pid: 42,
     processInstance: "11111111-1111-1111-1111-111111111111", capturedAtMillis: 1, nodeCount: 2,
     classHierarchy: {
       "android.widget.FrameLayout": ["android.widget.FrameLayout", "android.view.ViewGroup", "android.view.View"],
@@ -34,7 +34,13 @@ test("SDK tree joins only the same process, view identities and geometry", () =>
       layoutGravity: -1, layoutWeight: 0.5, children: [child] } };
 
   const joined = joinSdkTreeAndDebugImages(snapshot, sdk, "sample.app", 42);
+  assert.doesNotThrow(() => verifySdkTreeBeforeImages(snapshot.root!, snapshot.nodeCount, sdk, "sample.app", 42));
+  assert.throws(() => verifySdkTreeBeforeImages(snapshot.root!, snapshot.nodeCount,
+    { ...sdk, root: { ...sdk.root, children: [] } }, "sample.app", 42), /父子关系/,
+  "a changing page must not merge stale SDK properties");
   assert.equal(joined.inspectionSource, "debug-hybrid");
+  assert.equal(joined.root?.attributes?.["sdk-style-version"], "1");
+  assert.equal(joinSdkTreeAndDebugImages(snapshot, { ...sdk, styleVersion: undefined }, "sample.app", 42).root?.attributes?.["sdk-style-version"], undefined);
   assert.equal(joined.root?.children[0].children[0].text, "RED CHILD");
   assert.equal(joined.root?.children[0].children[0].attributes?.["debug-name"], "业务调试名称");
   assert.equal(joined.root?.children[0].children[0].attributes?.["sdk-layout-width"], "-1");
@@ -49,6 +55,25 @@ test("SDK tree joins only the same process, view identities and geometry", () =>
   assert.equal(joinSdkTreeAndDebugImages(snapshot, { ...sdk, classHierarchy: undefined }, "sample.app", 42).root?.children[0].attributes?.["sdk-class-hierarchy"], undefined, "old SDK snapshots remain readable");
   assert.equal(joined.root?.children[0].layerImageDataUrl, parent.layerImageDataUrl);
   assert.equal(joined.root?.children[0].children[0].layerImageDataUrl, text.layerImageDataUrl);
+  const clipped = joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, children: [{ ...child,
+    clipToOutline: true, outlineLeft: 0, outlineTop: 0, outlineRight: 30, outlineBottom: 20, outlineRadius: 5 }] } }, "sample.app", 42);
+  assert.equal(clipped.root?.children[0].children[0].attributes?.["sdk-outlineRadius"], "5");
+  assert.equal(clipped.root?.children[0].children[0].attributes?.["clip-to-outline"], "true");
+  assert.throws(() => joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, children: [{ ...child,
+    clipToOutline: true, outlineLeft: 0 }] } }, "sample.app", 42), /轮廓裁剪数据不完整/);
+  const matches = (tree: unknown, id = "0/0") => sdkGroupBranchMatches(joined.root!, id, tree, "sample.app", 42, sdk.processInstance);
+  assert.equal(matches(sdk), true, "unchanged group can be captured live");
+  assert.equal(matches({ ...sdk, root: { ...sdk.root, alpha: 0.5 } }), false, "changed parent opacity cannot reuse the old group geometry/style");
+  assert.equal(sdkGroupBranchMatches(clipped.root!, "0/0", { ...sdk, root: { ...sdk.root, children: [{ ...child,
+    clipToOutline: true, outlineLeft: 0, outlineTop: 0, outlineRight: 30, outlineBottom: 20, outlineRadius: 8 }] } }, "sample.app", 42, sdk.processInstance), false,
+  "changed rounded outline cannot reuse the old branch");
+  assert.equal(matches({ ...sdk, root: { ...sdk.root, children: [{ ...child, screenX: 13 }] } }), true, "small motion inside a live group is safe");
+  assert.equal(matches({ ...sdk, root: { ...sdk.root, children: [{ ...child, screenX: 19 }] } }), false, "larger child motion still rejects the old branch");
+  assert.equal(matches({ ...sdk, root: { ...sdk.root, children: [{ ...child, screenX: undefined }] } }), false, "missing SDK coordinates are not accepted as small motion");
+  assert.equal(matches({ ...sdk, root: { ...sdk.root, screenX: 1 } }), false, "the group frame must not move");
+  assert.equal(matches({ ...sdk, root: { ...sdk.root, children: [{ ...child, ref: "android.widget.TextView@c" }] } }), false, "replaced child must reject old group");
+  assert.equal(matches({ ...sdk, processInstance: "another-process" }), false, "restarted process must reject old group");
+  assert.equal(matches(sdk, "0/0/0"), false, "leaf is not a collapsible group");
   const shifted = joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, children: [{ ...child, screenX: 15 }] } }, "sample.app", 42);
   assert.equal(shifted.root?.children[0].children[0].bounds?.left, 10, "small motion must not move the older image");
   assert.throws(() => joinSdkTreeAndDebugImages(snapshot, sdk, "sample.app", 43), /进程/);

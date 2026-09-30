@@ -2582,8 +2582,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .inspector-image-state[data-state="captured"][data-empty="false"] strong { color: #86c697; }
 .inspector-image-state[data-state="failed"] strong, .inspector-image-state[data-state="ambiguous"] strong, .inspector-image-state[data-state="style"] strong { color: #e1b163; }
 .inspector-image-note { margin: 5px 0 0; color: var(--ref-muted); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
-.inspector-image-refresh { margin-top: 8px; padding: 5px 9px; border: 1px solid var(--ref-line); border-radius: 5px; background: transparent; color: var(--ref-text); cursor: pointer; }
-.inspector-image-refresh:disabled { opacity: .5; cursor: default; }
+.inspector-image-refresh, .inspector-style-read { margin-top: 8px; padding: 5px 9px; border: 1px solid var(--ref-line); border-radius: 5px; background: transparent; color: var(--ref-text); cursor: pointer; }
+.inspector-image-refresh:disabled, .inspector-style-read:disabled { opacity: .5; cursor: default; }
 .inspector-search-empty { margin: 16px 0; color: var(--ref-muted); text-align: center; font-size: 12px; }
 .floating-inspector :is(button, summary):focus-visible { outline: 2px solid var(--ref-blue); outline-offset: -2px; border-radius: 4px; }
 .floating-inspector .node-id { overflow-wrap: anywhere; }

@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { PixelSize, UiNode } from "../../shared/types";
+import type { PixelSize, UiNode, ViewStyleResult } from "../../shared/types";
 import { nodeMetrics } from "../../shared/node-metrics";
 import { nodeDisplayLabel, nodeShortClass } from "../../shared/tree-utils";
 
@@ -13,6 +13,7 @@ type Props = {
   copyStatus: string | null;
   onRefresh?: () => void;
   onRefreshBranch?: () => void;
+  onReadStyle?: () => Promise<ViewStyleResult>;
   refreshBusy?: boolean;
   refreshStatus?: string | null;
   children: ReactNode;
@@ -54,14 +55,41 @@ function placeInspector(panel: HTMLElement, x: number, y: number) {
   panel.style.setProperty("--inspector-top", `${Math.max(minTop, Math.min(y, viewportHeight - Math.min(panel.offsetHeight, 160) - 16))}px`);
 }
 
-export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, onCopy, copyStatus, onRefresh, onRefreshBranch, refreshBusy, refreshStatus, children }: Props) {
+export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, onCopy, copyStatus, onRefresh, onRefreshBranch, onReadStyle, refreshBusy, refreshStatus, children }: Props) {
   const [visible, setVisible] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
   const [search, setSearch] = useState("");
+  const [style, setStyle] = useState<{ root: UiNode; value: ViewStyleResult } | null>(null);
+  const [styleError, setStyleError] = useState<string | null>(null);
+  const [styleBusy, setStyleBusy] = useState(false);
+  const styleRequest = useRef(0);
   const panelRef = useRef<HTMLElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(null);
   const panelId = useId();
+  useEffect(() => {
+    styleRequest.current++;
+    setStyle(null);
+    setStyleError(null);
+    setStyleBusy(false);
+    return () => { styleRequest.current++; };
+  }, [node.id, root]);
+
+  async function readStyle() {
+    if (!onReadStyle || styleBusy) return;
+    const request = ++styleRequest.current;
+    setStyleBusy(true);
+    setStyle(null);
+    setStyleError(null);
+    try {
+      const result = await onReadStyle();
+      if (styleRequest.current === request) setStyle({ root, value: result });
+    } catch (error) {
+      if (styleRequest.current === request) setStyleError(error instanceof Error ? error.message : "读取样式失败。");
+    } finally {
+      if (styleRequest.current === request) setStyleBusy(false);
+    }
+  }
   useEffect(() => {
     const panel = panelRef.current;
     const workspace = panel?.parentElement;
@@ -92,6 +120,7 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
   }
 
   const metrics = useMemo(() => nodeMetrics(root, node, screenshotSize), [node, root, screenshotSize]);
+  const shownStyle = style?.root === root && style.value.ref === node.attributes?.["view-ref"] ? style.value : null;
   const displayName = nodeDisplayLabel(node);
   const nameSource = node.attributes?.["debug-name"]?.trim() ? "Debug App 显式名称"
     : node.text?.trim() ? "控件文本" : node.contentDesc?.trim() ? "内容描述"
@@ -146,7 +175,7 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
     relation: matches("关系 relation 父容器 parent 子节点 children 层级 depth index 序号", parentName, parent?.className, parent?.id, metrics.childCount, metrics.depth, node.index),
     layout: matches("布局 layout 位置 尺寸 geometry bounds 屏幕 px X Y W H width height 右 下 中心 面积 Z 父级内偏移 截图 padding 内边距 margin 外边距 border 边框 LayoutParams gravity weight 重力 权重", node.bounds?.raw, JSON.stringify(rect), JSON.stringify(padding), marginLabel, node.attributes?.["sdk-layout-params-class"], node.attributes?.["sdk-layout-gravity"], node.attributes?.["sdk-layout-weight"], borderWidth, node.attributes?.z),
     interaction: hasSdkInteraction && matches("交互 点击 长按 上下文 点击监听器 按下 激活 SDK View", ...sdkInteractions.map(([, key]) => node.attributes?.[key])),
-    image: matches("画面 image 设备可见 visible 可点击 clickable 背景色 background-color 边框色 border-color 圆角 corner-radii", imageStatus, imageLabel, node.visibleToUser ? "是" : "否", node.clickable ? "是" : "否", ...["image-source", "image-capture-error", "background-color", "border-color", "corner-radii"].map(key => node.attributes?.[key])),
+    image: matches("画面 image 样式 style 文本色 字号 设备可见 visible 可点击 clickable 背景色 background-color 边框色 border-color 圆角 corner-radii", imageStatus, imageLabel, node.visibleToUser ? "是" : "否", node.clickable ? "是" : "否", shownStyle?.backgroundType, shownStyle?.backgroundColor, shownStyle?.textColor, ...["image-source", "image-capture-error", "background-color", "border-color", "corner-radii"].map(key => node.attributes?.[key])),
     raw: matches("原始属性 调试 定位 XPath UiSelector ADB JSON XML PNG 导出 flags", node.id, flags, JSON.stringify(node.attributes)),
   };
 
@@ -331,8 +360,19 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
                 {node.attributes?.["image-capture-error"] && <p className="inspector-image-note">原因：{node.attributes["image-capture-error"]}</p>}
                 {node.attributes?.["image-refresh-error"] && <p className="inspector-image-note">上次刷新失败，保留旧画面：{node.attributes["image-refresh-error"]}</p>}
                 {node.attributes?.["image-source"] && <p className="inspector-image-note">来源：{node.attributes["image-source"]}</p>}
+                {onReadStyle && <button className="inspector-style-read" type="button" disabled={styleBusy} onClick={() => void readStyle()}>{styleBusy ? "正在读取样式…" : "读取实时样式"}</button>}
                 {onRefresh && <button className="inspector-image-refresh" type="button" disabled={refreshBusy} onClick={onRefresh}>{refreshBusy ? "正在刷新…" : "刷新当前控件"}</button>}
                 {onRefreshBranch && <button className="inspector-image-refresh" type="button" disabled={refreshBusy} onClick={onRefreshBranch}>{refreshBusy ? "正在刷新…" : "刷新此分支"}</button>}
+                {styleError && <p className="inspector-image-note" role="status">{styleError}</p>}
+                {shownStyle && <>
+                  <p className="inspector-image-note">Debug SDK 实时读取 · {new Date(shownStyle.capturedAtMillis).toLocaleString()} · 不修改快照</p>
+                  <dl className="inspector-property-list">
+                    <div><dt>背景类型</dt><dd>{shownStyle.backgroundType ?? "无背景"}</dd></div>
+                    <div><dt>背景源色</dt><dd>{shownStyle.backgroundColor ?? (shownStyle.backgroundType ? "非单一纯色或未暴露" : "—")}</dd></div>
+                    {shownStyle.textColor && <div><dt>当前文字色</dt><dd>{shownStyle.textColor}</dd></div>}
+                    {shownStyle.textSizePx !== null && <div><dt>文字大小</dt><dd>{Math.round(shownStyle.textSizePx * 100) / 100}px</dd></div>}
+                  </dl>
+                </>}
                 {refreshStatus && <p className="inspector-image-note" role="status">{refreshStatus}</p>}
                 <dl className="inspector-inline-values">
                   <div><dt>设备可见</dt><dd>{node.visibleToUser ? "是" : "否"}</dd></div>

@@ -11,8 +11,9 @@ contextBridge.exposeInMainWorld("electronApi", {
   },
   probeAdb: () => ipcRenderer.invoke("probe-adb"),
   inspectDevice: (serial: string, requestId: string) => ipcRenderer.invoke("inspect-device", serial, requestId),
-  captureQmlGroup: (requestId: string, nodeId: string) => ipcRenderer.invoke("capture-qml-group", requestId, nodeId),
+  captureGroup: (requestId: string, nodeId: string) => ipcRenderer.invoke("capture-group", requestId, nodeId),
   refreshViewNode: (requestId: string, nodeId: string, scope: "node" | "branch" = "node") => ipcRenderer.invoke("refresh-view-node", requestId, nodeId, scope),
+  readViewStyle: (requestId: string, nodeId: string) => ipcRenderer.invoke("read-view-style", requestId, nodeId),
   cancelInspection: (requestId: string) => ipcRenderer.invoke("cancel-inspection", requestId),
   showLayerMenu: (canHide: boolean, canRestore: boolean, canExitFocus: boolean) => ipcRenderer.invoke("layer-context-menu", canHide, canRestore, canExitFocus),
   onInspectionProgress: (callback: (progress: InspectionProgress) => void) => {

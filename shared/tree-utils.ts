@@ -1,4 +1,4 @@
-import type { UiNode } from "./types";
+import type { LayerImageUpdate, UiNode } from "./types";
 
 export type TreeFilter = {
   query: string;
@@ -60,6 +60,102 @@ export function flattenNodes(root: UiNode) {
     }
   }
   return nodes;
+}
+
+export function replaceTreeBranch(root: UiNode, branchId: string, branch: UiNode): UiNode {
+  const parts = branchId.split("/");
+  if (parts[0] !== root.id || branch.id !== branchId || !parts.slice(1).every(part => /^\d+$/.test(part))) throw new Error("刷新分支标识无效");
+  const path = [root];
+  for (const part of parts.slice(1)) {
+    const child = path.at(-1)!.children[Number(part)];
+    if (!child) throw new Error("刷新分支已不存在");
+    path.push(child);
+  }
+  if (path.at(-1)!.attributes?.["view-ref"] !== branch.attributes?.["view-ref"]) throw new Error("刷新分支对象已变化");
+  let replacement = branch;
+  for (let index = path.length - 2; index >= 0; index--) {
+    const parent = path[index], childIndex = Number(parts[index + 1]);
+    const children = [...parent.children];
+    children[childIndex] = replacement;
+    replacement = { ...parent, children };
+  }
+  return replacement;
+}
+
+export function remapViewNodeIds(before: UiNode, after: UiNode): Map<string, string> {
+  const latest = flattenNodes(after);
+  const byRef = new Map<string, UiNode>();
+  for (const node of latest.values()) if (node.attributes?.["view-ref"]) byRef.set(node.attributes["view-ref"], node);
+  const mapping = new Map<string, string>();
+  for (const old of flattenNodes(before).values()) {
+    const ref = old.attributes?.["view-ref"];
+    const current = ref ? byRef.get(ref) : latest.get(old.id);
+    if (current?.className === old.className && (!ref || current.attributes?.["view-ref"] === ref)) mapping.set(old.id, current.id);
+  }
+  return mapping;
+}
+
+function layerImageState(node: UiNode): LayerImageUpdate {
+  return {
+    id: node.id, layerImageDataUrl: node.layerImageDataUrl, layerImageSize: node.layerImageSize,
+    layerImageEmpty: node.layerImageEmpty, layerImageStatus: node.layerImageStatus,
+    imageSource: node.attributes?.["image-source"], imageCaptureError: node.attributes?.["image-capture-error"],
+    skipDraw: node.attributes?.["skip-draw"],
+  };
+}
+
+export function layerImageBaseline(root: UiNode) {
+  return new Map([...flattenNodes(root)].map(([id, node]) => [id, layerImageState(node)]));
+}
+
+export function changedLayerImages(root: UiNode, previous: Map<string, LayerImageUpdate>): LayerImageUpdate[] | null {
+  const nodes = flattenNodes(root);
+  if (nodes.size !== previous.size || [...nodes.keys()].some(id => !previous.has(id))) return null;
+  const updates: LayerImageUpdate[] = [];
+  for (const node of nodes.values()) {
+    const next = layerImageState(node), before = previous.get(node.id)!;
+    if (next.layerImageDataUrl === before.layerImageDataUrl && next.layerImageStatus === before.layerImageStatus
+      && next.layerImageEmpty === before.layerImageEmpty && next.layerImageSize?.width === before.layerImageSize?.width
+      && next.layerImageSize?.height === before.layerImageSize?.height && next.imageSource === before.imageSource
+      && next.imageCaptureError === before.imageCaptureError && next.skipDraw === before.skipDraw) continue;
+    previous.set(node.id, next);
+    updates.push(next);
+  }
+  return updates;
+}
+
+export function mergeLayerImages(root: UiNode, updates: readonly LayerImageUpdate[]): UiNode {
+  if (!updates.length) return root;
+  const changed = new Map(updates.map(update => [update.id, update]));
+  type Frame = { node: UiNode; nextChild: number; children: UiNode[] | null };
+  const stack: Frame[] = [{ node: root, nextChild: 0, children: null }];
+  while (stack.length) {
+    const frame = stack[stack.length - 1];
+    if (frame.nextChild < frame.node.children.length) {
+      stack.push({ node: frame.node.children[frame.nextChild++], nextChild: 0, children: null });
+      continue;
+    }
+    const { node, children } = frame, update = changed.get(node.id);
+    let result = children ? { ...node, children } : node;
+    if (update) {
+      const attributes = { ...node.attributes };
+      for (const [key, value] of [["image-source", update.imageSource], ["image-capture-error", update.imageCaptureError], ["skip-draw", update.skipDraw]] as const) {
+        if (value === undefined) delete attributes[key]; else attributes[key] = value;
+      }
+      result = {
+        ...result, layerImageDataUrl: update.layerImageDataUrl, layerImageSize: update.layerImageSize,
+        layerImageEmpty: update.layerImageEmpty, layerImageStatus: update.layerImageStatus, attributes,
+      };
+    }
+    stack.pop();
+    if (!stack.length) return result;
+    const parent = stack[stack.length - 1];
+    if (result !== node) {
+      parent.children ??= [...parent.node.children];
+      parent.children[parent.nextChild - 1] = result;
+    }
+  }
+  return root;
 }
 
 export function filterTree(root: UiNode, filter: TreeFilter): UiNode | null {

@@ -118,6 +118,15 @@ export async function composeSubtreeImage(
     try {
       const b = node.bounds;
       if ((clipSelf || node.attributes?.["qml-clip"] === "true") && b) clip(context, b.left, b.top, b.right - b.left, b.bottom - b.top);
+      if (node.attributes?.["clip-to-outline"] === "true" && b) {
+        const [left, top, right, bottom, radius] = ["Left", "Top", "Right", "Bottom", "Radius"]
+          .map(key => Number(node.attributes?.[`sdk-outline${key}`]));
+        if (![left, top, right, bottom, radius].every(Number.isFinite) || right <= left || bottom <= top || radius < 0)
+          throw new Error("该控件使用暂不支持的自定义轮廓裁剪，已隐藏不准确的合成画面。");
+        context.beginPath();
+        context.roundRect(b.left + left, b.top + top, right - left, bottom - top, radius);
+        context.clip();
+      }
       // QML opacity normally applies to each item, unlike an offscreen layer.
       if (isQml && node.attributes?.["qml-layer-enabled"] !== "true") {
         context.globalAlpha = opacity;

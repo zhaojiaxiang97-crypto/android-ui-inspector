@@ -40,6 +40,7 @@ export function joinSdkTreeAndDebugImages(snapshot: UiSnapshot, sdkValue: unknow
     throw new Error("SDK 树的包名、进程或协议不匹配");
   }
   const expectedCount = integer(sdkValue.nodeCount, "节点数量", 1, 5000);
+  if (sdkValue.styleVersion !== undefined && sdkValue.styleVersion !== 1) throw new Error("SDK 样式协议无效");
   if (sdkValue.classHierarchy !== undefined && !record(sdkValue.classHierarchy)) throw new Error("SDK 类继承表无效");
   const classHierarchy = sdkValue.classHierarchy;
   const seen = new Set<string>();
@@ -87,6 +88,14 @@ export function joinSdkTreeAndDebugImages(snapshot: UiSnapshot, sdkValue: unknow
     for (const key of ["longClickable", "contextClickable", "hasOnClickListeners", "pressed", "activated"] as const) {
       if (source[key] !== undefined) properties[`sdk-${key}`] = String(boolean(source[key], key));
     }
+    if (source.clipToOutline !== undefined && boolean(source.clipToOutline, "轮廓裁剪")) {
+      properties["clip-to-outline"] = "true";
+      const outline = ["outlineLeft", "outlineTop", "outlineRight", "outlineBottom", "outlineRadius"] as const;
+      if (outline.some(key => source[key] !== undefined)) {
+        if (!outline.every(key => source[key] !== undefined)) throw new Error("SDK 轮廓裁剪数据不完整");
+        for (const key of outline) properties[`sdk-${key}`] = String(number(source[key], key));
+      }
+    }
     if (source.debugName !== undefined) {
       const name = string(source.debugName, "调试名称")!.trim();
       if (!name || name.length > 128) throw new Error("SDK 调试名称无效");
@@ -128,6 +137,55 @@ export function joinSdkTreeAndDebugImages(snapshot: UiSnapshot, sdkValue: unknow
   if (seen.size !== expectedCount || seen.size + 1 !== snapshot.nodeCount) throw new Error("SDK 与独立画面的节点数量不一致");
   return {
     ...snapshot, inspectionSource: "debug-hybrid",
-    root: { ...snapshot.root, attributes: { ...snapshot.root.attributes, "tree-source": "debug-sdk", "sdk-process-instance": sdkValue.processInstance }, children: [decor] },
+    root: { ...snapshot.root, attributes: { ...snapshot.root.attributes, "tree-source": "debug-sdk", "sdk-process-instance": sdkValue.processInstance,
+      ...(sdkValue.styleVersion === 1 ? { "sdk-style-version": "1" } : {}) }, children: [decor] },
   };
+}
+
+/** Check the current DDMS tree before choosing the SDK image path. */
+export function verifySdkTreeBeforeImages(root: UiNode, nodeCount: number, sdkValue: unknown, packageName: string, pid: number): void {
+  joinSdkTreeAndDebugImages({
+    serial: "", root, nodeCount, xmlSize: 0, rawXml: null, screenshotDataUrl: null,
+    error: null, warning: null, inspectionSource: "debug-view",
+  }, sdkValue, packageName, pid);
+}
+
+/** A live group image is safe only while the selected SDK branch still describes the saved branch. */
+export function sdkGroupBranchMatches(root: UiNode, nodeId: string, value: unknown, packageName: string, pid: number, instance: string): boolean {
+  if (!record(value) || value.version !== 1 || value.packageName !== packageName || value.pid !== pid
+      || value.processInstance !== instance || !record(value.root) || !root.children[0]
+      || !/^0\/0(?:\/\d+)*$/.test(nodeId)) return false;
+  let old = root.children[0], current: unknown = value.root;
+  for (const part of nodeId.split("/").slice(2)) {
+    const bounds = old.bounds;
+    if (!record(current) || current.ref !== old.attributes?.["view-ref"] || current.className !== old.className
+        || !bounds || current.screenX !== bounds.left || current.screenY !== bounds.top
+        || current.width !== bounds.right - bounds.left || current.height !== bounds.bottom - bounds.top
+        || !Array.isArray(current.children) || current.children.length !== old.children.length) return false;
+    const index = Number(part);
+    old = old.children[index]; current = current.children[index];
+    if (!old) return false;
+  }
+  if (!old.visibleToUser || !old.children.length) return false;
+  const pending: [UiNode, unknown][] = [[old, current]];
+  for (let cursor = 0; cursor < pending.length; cursor++) {
+    const [node, sdk] = pending[cursor], bounds = node.bounds;
+    // A live group replaces its children; only the group's own frame must stay exact.
+    const drift = node === old ? 0 : MAX_POSITION_DRIFT_PX;
+    if (!record(sdk) || !bounds || sdk.ref !== node.attributes?.["view-ref"] || sdk.className !== node.className
+        || typeof sdk.screenX !== "number" || !Number.isSafeInteger(sdk.screenX)
+        || typeof sdk.screenY !== "number" || !Number.isSafeInteger(sdk.screenY)
+        || Math.abs(sdk.screenX - bounds.left) > drift || Math.abs(sdk.screenY - bounds.top) > drift
+        || sdk.width !== bounds.right - bounds.left || sdk.height !== bounds.bottom - bounds.top
+        || (node.attributes?.["sdk-alpha"] !== undefined && sdk.alpha !== Number(node.attributes["sdk-alpha"]))
+        || (node.attributes?.["clip-to-outline"] === "true" && sdk.clipToOutline !== true)
+        || !Array.isArray(sdk.children) || sdk.children.length !== node.children.length) return false;
+    for (const key of ["outlineLeft", "outlineTop", "outlineRight", "outlineBottom", "outlineRadius"] as const) {
+      const saved = node.attributes?.[`sdk-${key}`];
+      if (saved !== undefined && sdk[key] !== Number(saved)) return false;
+    }
+    const children = sdk.children as unknown[];
+    node.children.forEach((child, index) => pending.push([child, children[index]]));
+  }
+  return true;
 }

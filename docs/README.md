@@ -5,7 +5,7 @@
 ## 当前有效
 
 - [项目当前状态](PROJECT_STATUS.md)：已实现能力、验证结果、限制和下一步。以此为准。
-- [对齐 Lookin 的 Debug SDK 方案](LOOKIN_ALIGNMENT_PLAN.md)：原生 View 样例已验证父子画面分离和按需自身图；下一步核对桌面完整读取链路，再考虑属性深度和 Debug 专用写回。
+- [Lookin 对齐计划](LOOKIN_ALIGNMENT_PLAN.md)：精简路线图；先补父子画面验收，再做分段补图、分支结构刷新和选中控件属性，附基线与边界。
 - [CLI 使用说明](CLI.md)：命令行诊断、快照读取和自动调试。
 - [MCP 与自动 UI 调试](MCP.md)：AI 调用、授权、安全边界和留证。
 

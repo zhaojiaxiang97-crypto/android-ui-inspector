@@ -186,13 +186,53 @@ export function parseCapturedViewLayers(data: Buffer): CapturedViewLayer[] {
   return layers;
 }
 
+/** Only publish complete PNG records while the SDK is still writing the file. */
+export function parseCapturedViewLayerPrefix(data: Buffer, nonce?: string): CapturedViewLayer[] {
+  if (data.length < 8 || !data.subarray(0, 8).equals(nonce ? Buffer.from(nonce, "hex") : Buffer.alloc(8))) return [];
+  let offset = 8;
+  while (offset < data.length && data[offset] === 1) {
+    if (offset + 3 > data.length) break;
+    const nameLength = data.readUInt16BE(offset + 1);
+    if (nameLength < 1 || nameLength > 256) throw new Error("SDK 图层身份长度无效");
+    const imageLengthAt = offset + 3 + nameLength + 9;
+    if (imageLengthAt + 4 > data.length) break;
+    if (data[offset + 3 + nameLength] !== 1) throw new Error("SDK 图层可见状态无效");
+    const imageLength = data.readUInt32BE(imageLengthAt);
+    if (imageLength < 45 || imageLength > 10_000_000) throw new Error("SDK 图层图片长度无效");
+    const imageAt = imageLengthAt + 4;
+    if (imageAt + imageLength > data.length) break;
+    const png = data.subarray(imageAt, imageAt + imageLength);
+    if (!validCompletePng(png)) throw new Error("SDK 图层 PNG 校验失败");
+    offset = imageAt + imageLength;
+  }
+  if (offset < data.length && data[offset] !== 1 && data[offset] !== 2) throw new Error("SDK 图层记录无效");
+  return parseCapturedViewLayers(Buffer.concat([data.subarray(0, offset), Buffer.from([2])]));
+}
+
+function validCompletePng(data: Buffer) {
+  if (!pngSize(data)) return false;
+  let offset = 8, first = true, hasData = false;
+  while (offset + 12 <= data.length) {
+    const length = data.readUInt32BE(offset);
+    if (length > 10_000_000 || offset + length + 12 > data.length) return false;
+    const type = data.toString("ascii", offset + 4, offset + 8);
+    if (first && (type !== "IHDR" || length !== 13)) return false;
+    if (type === "IDAT") hasData = true;
+    if (crc32(data.subarray(offset + 4, offset + 8 + length)) !== data.readUInt32BE(offset + 8 + length)) return false;
+    offset += length + 12;
+    if (type === "IEND") return hasData && length === 0 && offset === data.length;
+    first = false;
+  }
+  return false;
+}
+
 export function matchesViewRoot(expected: string, actual: string) {
   // Activity.dump() abbreviates DecorView; DDMS includes its package/enclosing class.
   return expected === actual || (/^DecorView@[0-9a-f]+$/i.test(expected)
     && (actual.endsWith(`.${expected}`) || actual.endsWith(`$${expected}`)));
 }
 
-export async function captureViewLayers(port: number, options: { rootRefs: readonly string[]; onHierarchy: (hierarchy: string, windowName: string) => void | Promise<void>; onBatchTiming?: (timing: { waitMs: number; readMs: number; parseMs: number; bytes: number; layers: number }) => void; skipImages?: boolean; signal?: AbortSignal }) {
+export async function captureViewLayers(port: number, options: { rootRefs: readonly string[]; onHierarchy: (hierarchy: string, windowName: string) => void | Promise<void>; onBatchTiming?: (timing: { waitMs: number; readMs: number; parseMs: number; bytes: number; layers: number; images: number }) => void; skipImages?: boolean | (() => boolean); signal?: AbortSignal }) {
   const { socket, reader } = await connect(port, options.signal);
   try {
     const names = parseWindowNames(await requestChunk(socket, reader, 1, "VULW"));
@@ -217,16 +257,23 @@ export async function captureViewLayers(port: number, options: { rootRefs: reado
     // Legacy reflection becomes prohibitively slow after the first JDWP attach.
     // V2 calls View.encode directly; do not retry a malformed V2 dump with legacy.
     const dump = Buffer.concat([selected.request, Buffer.from([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1])]);
-    const hierarchy = decodeViewHierarchy(await requestChunk(socket, reader, sequence++, "VURT", dump));
+    let hierarchy: string;
+    try {
+      hierarchy = decodeViewHierarchy(await requestChunk(socket, reader, sequence++, "VURT", dump));
+    } catch (error) {
+      if (!(error instanceof Error && /Debug V2/.test(error.message))) throw error;
+      // A page can redraw while Android encodes the tree; retry only this small request.
+      hierarchy = decodeViewHierarchy(await requestChunk(socket, reader, sequence++, "VURT", dump));
+    }
     if (!options.rootRefs.some((expected) => matchesViewRoot(expected, hierarchy.trimStart().split(/\s/)[0]))) throw new Error("Debug 窗口身份已变化，请重新采集。");
     await options.onHierarchy(hierarchy, selected.name);
-    if (options.skipImages) return [];
+    if (typeof options.skipImages === "function" ? options.skipImages() : options.skipImages) return [];
     selected.request.writeUInt32BE(2, 0);
     let waitMs = 0, readMs = 0, bytes = 0;
     const batch = await requestChunk(socket, reader, sequence, "VURT", selected.request, (wait, read, size) => { waitMs = wait; readMs = read; bytes = size; });
     const parseStarted = performance.now();
     const layers = parseCapturedViewLayers(batch);
-    options.onBatchTiming?.({ waitMs, readMs, parseMs: performance.now() - parseStarted, bytes, layers: layers.length });
+    options.onBatchTiming?.({ waitMs, readMs, parseMs: performance.now() - parseStarted, bytes, layers: layers.length, images: layers.filter((layer) => Boolean(layer.pngDataUrl)).length });
     return layers;
   } finally {
     socket.destroy();
@@ -236,6 +283,7 @@ export async function captureViewLayers(port: number, options: { rootRefs: reado
 // Reuse Android's own snapshot implementation with skipChildren=true. A normal
 // DDMS CAPTURE_VIEW includes descendants and is not an independent layer.
 export async function captureViewBitmaps(port: number, target: { rootRef: string; windowName: string }, views: readonly { ref: string; captureOwn: boolean }[], signal?: AbortSignal) {
+  const started = performance.now();
   const deadline = AbortSignal.timeout(15_000);
   const { socket, reader } = await connect(port, signal ? AbortSignal.any([signal, deadline]) : deadline);
   let sequence = 10;
@@ -247,6 +295,7 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
   const failures = new Map<string, string>();
   const kinds = new Map<string, Kind>();
   const skipDraw = new Set<string>();
+  const timing = { setupMs: 0, lookupMs: 0, captureMs: 0, snapshotMs: 0, pixelsMs: 0, compressMs: 0, requested: 0, skipped: 0 };
   let phase = "连接调试窗口";
   const int = (value: number) => { const b = Buffer.alloc(4); b.writeInt32BE(value); return b; };
   const string = (value: string) => { const b = Buffer.from(value); return Buffer.concat([int(b.length), b]); };
@@ -274,8 +323,20 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
     const classFor = async (signature: string) => {
       if (classes.has(signature)) return classes.get(signature)!;
       const data = await command(1, 2, string(signature));
-      if (data.length !== 9 + classSize || data.readInt32BE(0) !== 1) throw new Error(`Debug class unavailable: ${signature}`);
-      const id = data.subarray(5, 5 + classSize);
+      const count = data.length >= 4 ? data.readInt32BE(0) : -1;
+      if (count < 1 || count > 32 || data.length !== 4 + count * (1 + classSize + 4)) throw new Error(`Debug class unavailable: ${signature}`);
+      let id = data.subarray(5, 5 + classSize);
+      if (count > 1) {
+        const bootstrap: Buffer[] = [];
+        for (let index = 0; index < count; index++) {
+          const candidate = data.subarray(5 + index * (1 + classSize + 4), 5 + index * (1 + classSize + 4) + classSize);
+          const loader = await command(2, 2, candidate);
+          if (loader.length !== objectSize) throw new Error(`Debug class loader unavailable: ${signature}`);
+          if (loader.every(byte => byte === 0)) bootstrap.push(candidate);
+        }
+        if (bootstrap.length !== 1) throw new Error(`Debug class ambiguous: ${signature}`);
+        id = bootstrap[0];
+      }
       classes.set(signature, id);
       return id;
     };
@@ -432,6 +493,8 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
     await pin(rootObject);
     const rootName = await pin(await command(1, 11, string(target.rootRef)));
     if (!rootObject.equals(await invokeStatic(debugClass, findMethod, [objectArg(rootObject), objectArg(rootName)]))) throw new Error("Debug 窗口身份已变化，请重新采集");
+    timing.setupMs = Math.round(performance.now() - started);
+    const lookupStarted = performance.now();
     const requested: { ref: string; kind: Kind; object: Buffer }[] = [];
     for (const view of views) {
       let name: Buffer | undefined, object: Buffer | undefined;
@@ -465,6 +528,10 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
         }
       }
     }
+    timing.lookupMs = Math.round(performance.now() - lookupStarted);
+    timing.requested = requested.length;
+    timing.skipped = skipDraw.size;
+    const captureStarted = performance.now();
     requested.sort((a, b) => Number(b.kind !== "own") - Number(a.kind !== "own"));
     let provider: Buffer | undefined, snapshotMethod: Buffer | undefined, copyMethod: Buffer | undefined, config: Buffer | undefined;
     let textureClass: Buffer | undefined, bitmapMethod: Buffer | undefined;
@@ -549,6 +616,7 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
     for (const view of requested.slice(maxViews)) failures.set(view.ref, `本次补采达到 ${maxViews} 个控件上限`);
     for (const view of requested.slice(0, maxViews)) {
       signal?.throwIfAborted();
+      const itemStarted = performance.now();
       phase = "读取独立位图";
       const temporary: Buffer[] = [], bitmaps: Buffer[] = [], buffers: Buffer[] = [];
       const hold = async (value: Buffer) => { temporary.push(await pin(value)); return value; };
@@ -581,13 +649,16 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
           if (bitmap.every((byte) => byte === 0)) throw new Error("无法读取控件位图像素");
           bitmaps.push(await hold(bitmap));
         }
+        timing.snapshotMs += performance.now() - itemStarted;
         const width = (await invoke(bitmap, bitmapClass, widthMethod)).readInt32BE();
         const height = (await invoke(bitmap, bitmapClass, heightMethod)).readInt32BE();
         if (width < 1 || height < 1 || width * height > 4_000_000) throw new Error("控件位图尺寸超过限制");
         const array = (await command(4, 1, arrayClass, int(width * height))).subarray(1);
         await hold(array);
         await invoke(bitmap, bitmapClass, pixelsMethod, [Buffer.concat([Buffer.from("["), array]), ...[0, width, 0, 0, width, height].map(integerArg)]);
+        const pixelsStarted = performance.now();
         const arrayData = await command(13, 2, array, int(0), int(width * height));
+        timing.pixelsMs += performance.now() - pixelsStarted;
         if (arrayData.length !== 5 + width * height * 4 || arrayData[0] !== 73 || arrayData.readInt32BE(1) !== width * height) throw new Error("控件位图像素不完整");
         const pixels = arrayData.subarray(5);
         const scanlines = Buffer.alloc(height * (width * 4 + 1));
@@ -605,7 +676,9 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
           return Buffer.concat([int(payload.length), body, checksum]);
         };
         const header = Buffer.concat([int(width), int(height), Buffer.from([8, 6, 0, 0, 0])]);
+        const compressStarted = performance.now();
         const compressed = await compress(scanlines);
+        timing.compressMs += performance.now() - compressStarted;
         signal?.throwIfAborted();
         const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header), chunk("IDAT", compressed), chunk("IEND", Buffer.alloc(0))]);
         results.set(view.ref, { width, height, pngDataUrl: `data:image/png;base64,${png.toString("base64")}`, kind, empty });
@@ -625,13 +698,17 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
         }
       }
     }
-    return { images: results, failures, kinds, skipDraw };
+    timing.snapshotMs = Math.round(timing.snapshotMs);
+    timing.pixelsMs = Math.round(timing.pixelsMs);
+    timing.compressMs = Math.round(timing.compressMs);
+    timing.captureMs = Math.round(performance.now() - captureStarted);
+    return { images: results, failures, kinds, skipDraw, timing };
   } catch (error) {
     signal?.throwIfAborted();
     if (!deadline.aborted && !results.size) throw error;
     const reason = deadline.aborted ? `独立画面补采达到 15 秒上限（${phase}）` : error instanceof Error ? error.message : "独立画面补采中断";
     for (const view of views) if (!results.has(view.ref) && !failures.has(view.ref) && !skipDraw.has(view.ref) && (view.captureOwn || kinds.get(view.ref) !== "own")) failures.set(view.ref, reason);
-    return { images: results, failures, kinds, skipDraw };
+    return { images: results, failures, kinds, skipDraw, timing };
   } finally {
     for (const object of pinned) if (!socket.destroyed) await command(9, 8, object).catch(() => undefined);
     // Dispose clears event requests and releases every debugger suspension.

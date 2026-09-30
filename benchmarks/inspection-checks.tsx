@@ -2,6 +2,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import App from "../src/App";
 import type { AppMenuAction, AppMenuState, InspectionPreview, InspectionProgress, UiSnapshot } from "../shared/types";
+import { changedLayerImages, layerImageBaseline } from "../shared/tree-utils";
 import { makeNode } from "./fixtures";
 
 export async function verifyInspectionBehavior() {
@@ -17,6 +18,7 @@ export async function verifyInspectionBehavior() {
   const requests: Array<{ id: string; serial: string; resolve: (value: UiSnapshot) => void; reject: (error: Error) => void }> = [];
   const cancelled: string[] = [];
   const copied: string[] = [];
+  const previewImages = new Map<number, ReturnType<typeof layerImageBaseline>>();
   const groupCalls: string[] = [];
   const viewRefreshCalls: string[] = [];
   let failNextViewRefresh = false;
@@ -24,9 +26,9 @@ export async function verifyInspectionBehavior() {
   let releaseGroup: ((value: { dataUrl: string; size: { width: number; height: number }; capturedAt: string }) => void) | null = null;
   const check = (value: unknown, message: string) => { if (!value) throw new Error(`Inspection: ${message}`); };
   const tick = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  const until = async (predicate: () => boolean) => {
+  const until = async (predicate: () => boolean, label = "") => {
     const deadline = performance.now() + 4000;
-    while (!predicate()) { if (performance.now() > deadline) throw new Error(`Inspection UI timeout: ${host.textContent}`); await tick(); }
+    while (!predicate()) { if (performance.now() > deadline) throw new Error(`Inspection UI timeout ${label}: ${host.textContent}`); await tick(); }
   };
   const click = (selector: string) => {
     const button = host.querySelector<HTMLButtonElement>(selector);
@@ -40,7 +42,7 @@ export async function verifyInspectionBehavior() {
     onAppMenuAction: (callback) => { menuAction = callback; return () => { menuAction = null; }; },
     probeAdb: async () => ({ adbPath: "fixture", adbVersion: "fixture", error: null, devices: ["a", "b"].map((serial) => ({ serial, state: "device", model: serial, androidVersion: "15", product: null, transportId: null })) }),
     inspectDevice: (serial, id) => new Promise((resolve, reject) => requests.push({ serial, id, resolve, reject })),
-    captureQmlGroup: async (_requestId, nodeId) => {
+    captureGroup: async (_requestId, nodeId) => {
       groupCalls.push(nodeId);
       const image = { dataUrl: new URL("../tests/fixtures/visual-screen.svg", window.location.href).href, size: { width: 360, height: 640 }, capturedAt: new Date().toISOString() };
       return holdGroup ? new Promise<typeof image>((resolve) => { releaseGroup = resolve; }) : image;
@@ -51,9 +53,14 @@ export async function verifyInspectionBehavior() {
       const parent = { ...makeNode(nodeId), text: scope === "branch" ? "刷新后的父控件" : "刷新后的控件", attributes: { "view-ref": "android.widget.TextView@1", "image-refreshed-at": "2026-01-01T00:00:00.000Z" }, layerImageStatus: "captured" as const, layerImageEmpty: false };
       if (scope === "node") return { nodes: [parent], failures: [] };
       const child = { ...makeNode(`${nodeId}/0`), text: "分支中的新文字", attributes: { "view-ref": "android.widget.TextView@2", "image-refreshed-at": "2026-01-01T00:00:01.000Z" }, layerImageStatus: "captured" as const, layerImageEmpty: false };
-      return viewRefreshCalls.length === 2 ? { nodes: [parent, child], failures: [] }
-        : { nodes: [parent], failures: [{ id: child.id, message: "控件补图超时" }] };
+      if (viewRefreshCalls.length === 4) return { nodes: [], failures: [], branch: { ...parent, children: [
+        { ...makeNode(`${nodeId}/0`), text: "混合分支新增层", attributes: { "view-ref": "android.widget.TextView@3" } },
+        { ...child, id: `${nodeId}/1`, index: 1 },
+      ] } };
+      return viewRefreshCalls.length === 2 ? { nodes: [], failures: [], branch: { ...parent, children: [child] } }
+        : { nodes: [], failures: [{ id: child.id, message: "控件补图超时" }], branch: { ...parent, children: [{ ...child, attributes: { ...child.attributes, "image-refresh-error": "控件补图超时；已保留旧画面。" } }] } };
     },
+    readViewStyle: async () => ({ ref: "android.widget.TextView@1", capturedAtMillis: Date.UTC(2026, 0, 1), backgroundType: "android.graphics.drawable.ColorDrawable", backgroundColor: "#FF0C3468", textColor: null, textSizePx: null }),
     cancelInspection: async (id) => { cancelled.push(id); },
     showLayerMenu: async () => null,
     onInspectionProgress: (callback) => { progress = callback; return () => { progress = null; }; },
@@ -65,7 +72,15 @@ export async function verifyInspectionBehavior() {
     exportSnapshot: async () => ({ canceled: true, filePath: null, error: null }),
   };
   const sendProgress = (index: number, stage: string) => flushSync(() => progress?.({ requestId: requests[index].id, stage, elapsedMs: 0 }));
-  const sendPreview = (index: number, phase: InspectionPreview["phase"], value: UiSnapshot) => flushSync(() => preview?.({ requestId: requests[index].id, phase, snapshot: structuredClone(value) }));
+  const sendPreview = (index: number, phase: InspectionPreview["phase"], value: UiSnapshot) => flushSync(() => {
+    if (phase === "tree") {
+      const snapshot = structuredClone(value);
+      previewImages.set(index, layerImageBaseline(snapshot.root!));
+      preview?.({ requestId: requests[index].id, phase, snapshot });
+    } else {
+      preview?.({ requestId: requests[index].id, phase, updates: changedLayerImages(value.root!, previewImages.get(index)!)! });
+    }
+  });
   const stageText = () => host.querySelector('h4[role="status"]')?.textContent;
   try {
     flushSync(() => root.render(<App />));
@@ -122,8 +137,15 @@ export async function verifyInspectionBehavior() {
     await until(() => host.querySelector<HTMLButtonElement>(".view-mode-toggle button:last-child")?.disabled === false);
     click(".view-mode-toggle button:last-child");
     click('.tree-row[data-tree-id="latest/partial"]');
+    partial.layerImageStatus = "captured";
+    partial.layerImageEmpty = false;
+    partial.layerImageDataUrl = new URL("../tests/fixtures/visual-screen.svg", window.location.href).href;
+    partial.layerImageSize = { width: 63, height: 45 };
+    partial.attributes["image-source"] = "独立采集";
     sendPreview(2, "layers", measured);
     check(host.querySelector('.tree-row[data-tree-id="latest/partial"]')?.getAttribute("aria-selected") === "true", "image update lost tree selection");
+    check(host.querySelector('.inspector-image-state')?.getAttribute("data-state") === "captured", "image-only preview did not update the selected node");
+    check([...host.querySelectorAll('.inspector-image-note')].some(note => note.textContent?.includes("来源：独立采集")), "image-only preview lost source metadata");
     measured.screenshotDataUrl += "?final=1";
     requests[2].resolve(measured);
     await until(() => !host.querySelector(".inspector-heading-meta .tree-clear"));
@@ -388,17 +410,17 @@ export async function verifyInspectionBehavior() {
     check(Boolean(host.querySelector('.inspector-image-note[role="status"]')?.textContent?.includes("已刷新")), "native refresh has no completion feedback");
     const sceneBeforeBranch = host.querySelector(".layer-scene");
     click(".inspector-image-refresh:last-of-type");
-    await until(() => host.querySelector('.tree-row[data-tree-id="0/0/0"]')?.textContent?.includes("分支中的新文字") === true);
+    await until(() => host.querySelector('.tree-row[data-tree-id="0/0/0"]')?.textContent?.includes("分支中的新文字") === true, "first branch");
     check(viewRefreshCalls[1] === `${requests[7].id}:0/0:branch`, "branch refresh did not target selected parent");
     check(host.querySelector('.tree-row[data-tree-id="0/0"]')?.getAttribute("aria-selected") === "true" && host.querySelector(".layer-scene") === sceneBeforeBranch, "branch refresh reset selection or camera scene");
     check(!host.querySelector(".snapshot-warning"), "branch refresh resurrected a dismissed warning");
     click(".inspector-image-refresh:last-of-type");
-    await until(() => Boolean(host.querySelector('.inspector-image-note[role="status"]')?.textContent?.includes("1 层失败")));
+    await until(() => Boolean(host.querySelector('.inspector-image-note[role="status"]')?.textContent?.includes("1 层补图失败")), "second branch");
     click('.tree-row[data-tree-id="0/0/0"]');
     check(host.querySelector(".inspector-image-note")?.textContent?.includes("旧画面") || host.textContent?.includes("保留旧画面"), "partial branch failure did not explain retained old image");
     check(host.querySelector(".inspector-node-heading h4")?.textContent === "分支中的新文字", "partial branch failure replaced the old child");
     sendMenu({ type: "capture" });
-    const hybrid = { ...native, inspectionSource: "debug-hybrid" as const, root: { ...native.root!, children: [{
+    const hybrid = { ...native, inspectionSource: "debug-hybrid" as const, root: { ...native.root!, attributes: { ...native.root!.attributes, "tree-source": "debug-sdk", "sdk-style-version": "1" }, children: [{
       ...native.root!.children[0], attributes: { ...native.root!.children[0].attributes,
         "tree-source": "debug-sdk", "debug-name": "业务面板",
         "sdk-class-hierarchy": "android.view.ViewGroup → android.view.View",
@@ -408,7 +430,7 @@ export async function verifyInspectionBehavior() {
         "sdk-marginTop": "0", "sdk-marginRight": "-10", "sdk-marginBottom": "4", "sdk-marginLeft": "2" },
     }] } };
     requests[8].resolve(hybrid);
-    await until(() => Boolean(host.querySelector('.tree-row[data-tree-id="0/0"]')));
+    await until(() => Boolean(host.querySelector('.tree-row[data-tree-id="0/0"]')), "hybrid capture");
     click('.tree-row[data-tree-id="0/0"]');
     check(host.querySelector(".inspector-node-heading h4")?.textContent === "业务面板" && host.querySelector('.tree-row[data-tree-id="0/0"]')?.textContent?.includes("业务面板"), "Debug name did not reach inspector and tree");
     check(host.querySelector(".inspector-type > summary small")?.textContent === "SDK + View Debug" && host.querySelector(".inspector-type .inspector-property-list")?.textContent?.includes("Debug App 显式名称"), "hybrid name source was not explained");
@@ -418,21 +440,45 @@ export async function verifyInspectionBehavior() {
     check(host.querySelector(".inspector-layout")?.textContent?.includes("match_parent / wrap_content") && host.querySelector(".box-model-extra > div:first-child dd")?.textContent === "0px / -10px / 4px / 2px", "real SDK LayoutParams/margins were not shown");
     click(".inspector-layout-rules > summary");
     check(host.querySelector(".inspector-layout-rules")?.textContent?.includes("右 · 下 (0x55)"), "real FrameLayout gravity was not decoded");
-    check(host.querySelectorAll(".inspector-image-refresh").length === 1, "hybrid snapshot should offer only single-node refresh");
+    check(host.querySelectorAll(".inspector-image-refresh").length === 2, "hybrid snapshot should offer branch refresh");
+    click(".inspector-style-read");
+    await until(() => Boolean(host.querySelector(".inspector-image")?.textContent?.includes("#FF0C3468")), "selected View style");
+    click(".inspector-image-refresh:last-of-type");
+    await until(() => host.querySelector('.tree-row[data-tree-id="0/0/0"]')?.textContent?.includes("混合分支新增层") === true, "hybrid branch");
+    check(viewRefreshCalls[3] === `${requests[8].id}:0/0:branch` && host.querySelector('.tree-row[data-tree-id="0/0/1"]')?.textContent?.includes("分支中的新文字"), "hybrid branch did not add and reorder controls");
     click(".inspector-image-refresh");
-    await until(() => viewRefreshCalls.length === 4);
-    check(viewRefreshCalls[3] === `${requests[8].id}:0/0:node`, "hybrid refresh did not target the selected live View");
+    await until(() => viewRefreshCalls.length === 5);
+    check(viewRefreshCalls[4] === `${requests[8].id}:0/0:node`, "hybrid refresh did not target the selected live View");
     await until(() => host.querySelector(".inspector-node-heading h4")?.textContent === "刷新后的控件");
     failNextViewRefresh = true;
     click(".inspector-image-refresh");
     await until(() => Boolean(host.querySelector('.inspector-image-note[role="status"]')?.textContent?.includes("连接提前关闭")));
     check(host.querySelector(".inspector-node-heading h4")?.textContent === "刷新后的控件" && host.querySelector(".inspector-image-state strong")?.textContent === "已采集", "disconnected refresh replaced the last valid node or image");
+    holdGroup = false;
+    click(".view-mode-toggle button:last-child");
+    await until(() => Boolean(host.querySelector(".layer-scene")), "hybrid 3D scene missing");
+    const groupsBeforeFold = groupCalls.length;
+    sendMenu({ type: "collapse-all" });
+    await until(() => host.querySelector(".layer-scene")?.getAttribute("data-layer-root-composite") === "true", "hybrid root did not fold");
+    await until(() => groupCalls.length > groupsBeforeFold && groupCalls.includes("0"), "hybrid group request missing");
+    await until(() => Boolean(host.querySelector(".layer-resource-note")?.textContent?.includes("折叠画面实时采集于")), "hybrid group image missing");
+    const groupsBeforeRefresh = groupCalls.length;
+    holdGroup = true;
+    click(".inspector-image-refresh");
+    await until(() => viewRefreshCalls.length === 7, "folded node refresh missing");
+    await until(() => groupCalls.length > groupsBeforeRefresh, "folded group was not recaptured after child refresh");
+    check(!host.querySelector(".layer-resource-note")?.textContent?.includes("折叠画面实时采集于"), "stale group remained visible while its child was refreshed");
+    holdGroup = false;
+    releaseGroup!({ dataUrl: new URL("../tests/fixtures/visual-screen.svg", window.location.href).href, size: { width: 360, height: 640 }, capturedAt: new Date().toISOString() });
+    await until(() => Boolean(host.querySelector(".layer-resource-note")?.textContent?.includes("折叠画面实时采集于")), "refreshed group did not return");
+    sendMenu({ type: "expand-all" });
+    await until(() => !host.querySelector(".layer-resource-note")?.textContent?.includes("折叠画面实时采集于"));
     sendMenu({ type: "capture" });
     flushSync(() => root.unmount()); mounted = false;
     check(cancelled.includes(requests[9].id) && progress === null && menuAction === null, "unmount did not release capture and listeners");
     requests[9].resolve(snapshot("b", 66));
     await tick();
-    return { checks: ["stage and cancel", "early tree/image preview preserves selection and 3D mode; incomplete snapshots cannot be saved", "capture warning: dismiss, focus, reclaimed space, long text, retained diagnostic, new capture reset and successful capture clears", "device switch ignores stale progress/failure", "sidebar: no heading, pointer/keyboard width, min/max, reset and cancelled drag", "native menu: capture guard, state sync, search, expand/collapse, home and cleanup", "Qt groups: fold uses live group, expand drops child pixels, and late image cannot enter a new capture", "native View: rapid clicks send one refresh; single and branch refresh preserve selection, scene, children and partial failures", "hybrid View: only single-node refresh is offered and disconnect preserves the old image", "floating inspector: drag, keyboard, resize bounds, collapse, close, restore and copy", "inspector groups: native disclosure, name/value search, empty/clear/Escape, retained collapse state, read-only geometry and honest View/QML/unknown source", "node identity: text/description/resource/type priority, full class, parent/root, long names at 300/248px", "box model: four-side placement at 300/248px, zero/partial/invalid padding, missing bounds and confirmed/ambiguous border", "return home ignores late result", "unmount cancels and unsubscribes"] };
+    return { checks: ["stage and cancel", "early tree/image preview preserves selection and 3D mode; incomplete snapshots cannot be saved", "capture warning: dismiss, focus, reclaimed space, long text, retained diagnostic, new capture reset and successful capture clears", "device switch ignores stale progress/failure", "sidebar: no heading, pointer/keyboard width, min/max, reset and cancelled drag", "native menu: capture guard, state sync, search, expand/collapse, home and cleanup", "Qt groups: fold uses live group, expand drops child pixels, and late image cannot enter a new capture", "native View: rapid clicks send one refresh; single and branch refresh preserve selection, scene, children and partial failures", "hybrid View: folded group recaptures after child refresh without showing stale pixels", "floating inspector: drag, keyboard, resize bounds, collapse, close, restore and copy", "inspector groups: native disclosure, name/value search, empty/clear/Escape, retained collapse state, read-only geometry and honest View/QML/unknown source", "node identity: text/description/resource/type priority, full class, parent/root, long names at 300/248px", "box model: four-side placement at 300/248px, zero/partial/invalid padding, missing bounds and confirmed/ambiguous border", "return home ignores late result", "unmount cancels and unsubscribes"] };
   } finally {
     if (mounted) flushSync(() => root.unmount());
     window.electronApi = previousApi;
