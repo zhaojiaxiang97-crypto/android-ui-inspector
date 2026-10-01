@@ -322,12 +322,16 @@ async function exportSnapshot(input: unknown): Promise<ExportSnapshotResult> {
 }
 
 ipcMain.handle("probe-adb", () => visualFixtureMode ? fixtureProbe() : probeAdb());
-ipcMain.handle("inspect-device", async (event, serial: unknown, requestId: unknown) => {
+ipcMain.handle("inspect-device", async (event, serial: unknown, requestId: unknown, priorityViewRef: unknown) => {
   if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) throw new Error("无效的采集来源。");
   if (typeof serial !== "string" || !serial.trim()) {
     throw new Error("设备序列号不能为空。");
   }
   if (typeof requestId !== "string" || !requestId || requestId.length > 128) throw new Error("采集请求标识无效。");
+  if (priorityViewRef !== undefined && priorityViewRef !== null
+      && (typeof priorityViewRef !== "string" || priorityViewRef.length > 256 || !/^[\w.$]+@[0-9a-f]{1,8}$/i.test(priorityViewRef))) {
+    throw new Error("优先采集控件标识无效。");
+  }
   stopMcpSharing();
   const sender = event.sender;
   const ownerId = sender.id;
@@ -351,6 +355,7 @@ ipcMain.handle("inspect-device", async (event, serial: unknown, requestId: unkno
     controller.signal.throwIfAborted();
     const snapshot = visualFixtureMode ? fixtureSnapshot(serial) : await inspectPreferredDevice(serial, {
       signal: controller.signal,
+      priorityViewRef: typeof priorityViewRef === "string" ? priorityViewRef : undefined,
       onProgress: (stage, elapsedMs) => {
         if (!sender.isDestroyed()) sender.send("inspection-progress", { requestId, stage, elapsedMs });
       },

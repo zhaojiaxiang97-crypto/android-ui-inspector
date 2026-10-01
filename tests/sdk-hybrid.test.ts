@@ -47,6 +47,18 @@ test("SDK tree joins only the same process, view identities and geometry", () =>
   assert.equal(joined.root?.children[0].children[0].attributes?.["sdk-marginRight"], "-10");
   assert.equal(joined.root?.children[0].children[0].attributes?.["sdk-paddingLeft"], "-8");
   assert.equal(joined.root?.children[0].children[0].attributes?.["sdk-layout-gravity"], "85");
+  const constraintLayout = joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, children: [{ ...child,
+    layoutParamsClass: "androidx.constraintlayout.widget.ConstraintLayout$LayoutParams", layoutGravity: undefined,
+    layoutRules: { type: "ConstraintLayout", rules: { leftToLeft: "parent", topToBottom: "sample.app:id/title", horizontalBias: "0.4", dimensionRatio: "W,16:9" } } }] } }, "sample.app", 42);
+  assert.deepEqual(JSON.parse(constraintLayout.root?.children[0].children[0].attributes?.["sdk-layout-rules"] ?? "{}"), {
+    type: "ConstraintLayout", rules: { leftToLeft: "parent", topToBottom: "sample.app:id/title", horizontalBias: "0.4", dimensionRatio: "W,16:9" },
+  });
+  const relative = joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, children: [{ ...child,
+    layoutParamsClass: "android.widget.RelativeLayout$LayoutParams", layoutGravity: undefined,
+    layoutRules: { type: "RelativeLayout", rules: { below: "sample.app:id/title", centerHorizontal: true } } }] } }, "sample.app", 42);
+  assert.deepEqual(JSON.parse(relative.root?.children[0].children[0].attributes?.["sdk-layout-rules"] ?? "{}"), {
+    type: "RelativeLayout", rules: { below: "sample.app:id/title", centerHorizontal: true },
+  });
   assert.equal(joined.root?.children[0].attributes?.["sdk-layout-weight"], "0.5");
   assert.equal(joined.root?.children[0].children[0].attributes?.["sdk-longClickable"], "true");
   assert.equal(joined.root?.children[0].children[0].attributes?.["sdk-contextClickable"], "false");
@@ -88,4 +100,14 @@ test("SDK tree joins only the same process, view identities and geometry", () =>
   assert.throws(() => joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, children: [{ ...child, longClickable: "yes" }] } }, "sample.app", 42), /longClickable/);
   assert.throws(() => joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, children: [{ ...child, layoutGravity: "right" }] } }, "sample.app", 42), /布局重力/);
   assert.throws(() => joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, layoutWeight: Number.NaN } }, "sample.app", 42), /布局权重/);
+  assert.throws(() => joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, children: [{ ...child,
+    layoutRules: { type: "ConstraintLayout", rules: { click: "parent" } } }] } }, "sample.app", 42), /不支持/);
+  assert.throws(() => joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, children: [{ ...child,
+    layoutParamsClass: undefined, layoutRules: { type: "RelativeLayout", rules: { centerHorizontal: true } } }] } }, "sample.app", 42), /缺少 LayoutParams/);
+  assert.throws(() => joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, children: [{ ...child,
+    layoutRules: { type: "RelativeLayout", rules: { below: "unknown target" } } }] } }, "sample.app", 42), /布局目标/);
+  assert.throws(() => joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, children: [{ ...child,
+    layoutRules: { type: "ConstraintLayout", rules: { horizontalBias: "1.5" } } }] } }, "sample.app", 42), /布局数值/);
+  assert.throws(() => joinSdkTreeAndDebugImages(snapshot, { ...sdk, root: { ...sdk.root, children: [{ ...child,
+    layoutRules: { type: "ConstraintLayout", rules: { dimensionRatio: "not-a-ratio" } } }] } }, "sample.app", 42), /宽高比/);
 });

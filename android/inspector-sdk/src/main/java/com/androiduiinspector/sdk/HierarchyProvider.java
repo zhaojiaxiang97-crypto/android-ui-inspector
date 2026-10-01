@@ -27,6 +27,7 @@ import android.view.SurfaceView;
 import android.view.TextureView;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.RelativeLayout;
 import android.widget.TextView;
 
 import org.json.JSONArray;
@@ -44,6 +45,7 @@ import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.HashMap;
 import java.util.UUID;
@@ -51,6 +53,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.CRC32;
 import org.lsposed.hiddenapibypass.HiddenApiBypass;
 
 /** Debug-only, DUMP-protected shell request to export a live View tree without opening a port. */
@@ -58,6 +61,27 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
     private static final int MAX_NODES = 5000;
     private static final int MAX_DEPTH = 150;
     private static final String FILE_NAME = "inspector-hierarchy.json";
+    private static final int[] RELATIVE_RULES = {
+            RelativeLayout.LEFT_OF, RelativeLayout.RIGHT_OF, RelativeLayout.ABOVE, RelativeLayout.BELOW,
+            RelativeLayout.ALIGN_BASELINE, RelativeLayout.ALIGN_LEFT, RelativeLayout.ALIGN_TOP,
+            RelativeLayout.ALIGN_RIGHT, RelativeLayout.ALIGN_BOTTOM, RelativeLayout.ALIGN_PARENT_LEFT,
+            RelativeLayout.ALIGN_PARENT_TOP, RelativeLayout.ALIGN_PARENT_RIGHT, RelativeLayout.ALIGN_PARENT_BOTTOM,
+            RelativeLayout.CENTER_IN_PARENT, RelativeLayout.CENTER_HORIZONTAL, RelativeLayout.CENTER_VERTICAL,
+            RelativeLayout.START_OF, RelativeLayout.END_OF, RelativeLayout.ALIGN_START, RelativeLayout.ALIGN_END,
+            RelativeLayout.ALIGN_PARENT_START, RelativeLayout.ALIGN_PARENT_END
+    };
+    private static final String[] RELATIVE_RULE_NAMES = {
+            "leftOf", "rightOf", "above", "below", "alignBaseline", "alignLeft", "alignTop",
+            "alignRight", "alignBottom", "alignParentLeft", "alignParentTop", "alignParentRight",
+            "alignParentBottom", "centerInParent", "centerHorizontal", "centerVertical", "startOf",
+            "endOf", "alignStart", "alignEnd", "alignParentStart", "alignParentEnd"
+    };
+    private static final String[] CONSTRAINT_ANCHORS = {
+            "leftToLeft", "leftToRight", "rightToLeft", "rightToRight", "startToStart", "startToEnd",
+            "endToStart", "endToEnd", "topToTop", "topToBottom", "bottomToTop", "bottomToBottom",
+            "baselineToBaseline", "baselineToTop", "baselineToBottom", "circleConstraint"
+    };
+    private static final HashMap<Class<?>, HashMap<String, Field>> CONSTRAINT_FIELDS = new HashMap<>();
     private final String processInstance = UUID.randomUUID().toString();
     private volatile WeakReference<Activity> resumed = new WeakReference<>(null);
 
@@ -82,7 +106,7 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
         if ("capture-own".equals(method)) return captureOwn(app, arg);
         if ("capture-own-batch".equals(method)) return captureOwnBatch(app, arg);
         if ("capture-group".equals(method)) return captureView(app, arg, "inspector-group-image.png", 20_000_000, 4_000_000, true);
-        if ("capture-visible".equals(method)) return captureVisible(app, arg);
+        if ("capture-visible".equals(method)) return captureVisible(app, arg, extras);
         if ("capture-style".equals(method)) return captureStyle(arg);
         AtomicReference<String> data = new AtomicReference<>();
         AtomicReference<Throwable> failure = new AtomicReference<>();
@@ -192,11 +216,15 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
         final View view;
         final String ref;
         final int x, y;
-        VisibleLayer(View view, int x, int y) {
+        final boolean inViewport;
+        final long visibleArea;
+        VisibleLayer(View view, int x, int y, boolean inViewport, long visibleArea) {
             this.view = view;
             this.ref = ref(view);
             this.x = x;
             this.y = y;
+            this.inViewport = inViewport;
+            this.visibleArea = visibleArea;
         }
     }
 
@@ -209,10 +237,15 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
         return false;
     }
 
-    private Bundle captureVisible(Application app, String nonce) {
+    private Bundle captureVisible(Application app, String nonce, Bundle extras) {
         Bundle answer = new Bundle();
         if (nonce != null && !nonce.matches("[0-9a-f]{16}")) {
             answer.putString("error", "Invalid capture nonce");
+            return answer;
+        }
+        String priorityRef = extras == null ? null : extras.getString("priorityViewRef");
+        if (priorityRef != null && !priorityRef.matches("[\\w.$]+@[0-9a-fA-F]{1,8}")) {
+            answer.putString("error", "Invalid priority View identity");
             return answer;
         }
         File file = new File(app.getNoBackupFilesDir(), "inspector-visible-layers.bin");
@@ -254,7 +287,12 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
                     int width = view.getWidth(), height = view.getHeight();
                     if (width > 0 && height > 0) {
                         if ((flags.getInt(view) & 0x80) == 0) {
-                            if ((long) width * height <= 4_000_000) result.add(new VisibleLayer(view, position[0], position[1]));
+                            if ((long) width * height <= 4_000_000) {
+                                Rect visibleRect = new Rect();
+                                boolean inViewport = view.getGlobalVisibleRect(visibleRect);
+                                long visibleArea = inViewport ? (long) visibleRect.width() * visibleRect.height() : 0;
+                                result.add(new VisibleLayer(view, position[0], position[1], inViewport, visibleArea));
+                            }
                         } else if (overlay != null && !(view instanceof SurfaceView) && !(view instanceof TextureView)
                                 && !customDraw.computeIfAbsent(view.getClass(), HierarchyProvider::customDispatchDraw)) {
                             try {
@@ -274,6 +312,13 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
                         for (int i = 0; i < group.getChildCount(); i++) queue.addLast(group.getChildAt(i));
                     }
                 }
+                Collections.sort(result, (left, right) -> {
+                    boolean leftSelected = priorityRef != null && priorityRef.equals(left.ref);
+                    boolean rightSelected = priorityRef != null && priorityRef.equals(right.ref);
+                    if (leftSelected != rightSelected) return leftSelected ? -1 : 1;
+                    if (left.inViewport != right.inViewport) return left.inViewport ? -1 : 1;
+                    return left.inViewport ? Long.compare(left.visibleArea, right.visibleArea) : 0;
+                });
                 selectedRoot.set(root);
                 selected.set(result);
                 pureRefs.set(pure.length() == 0 ? "-" : pure.toString());
@@ -291,6 +336,7 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
             int count = 0, empty = 0;
             StringBuilder specialRefs = new StringBuilder();
             long renderMs = 0, encodeMs = 0;
+            boolean webpLossless = Build.VERSION.SDK_INT >= 30;
             try (DataOutputStream output = new DataOutputStream(new DigestOutputStream(new FileOutputStream(pending), digest))) {
                 output.writeLong(nonce == null ? 0 : Long.parseUnsignedLong(nonce, 16)); // Request identity in the DDMS header.
                 Class<?> debug = Class.forName("android.view.ViewDebug");
@@ -311,8 +357,9 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
                     try {
                         ByteArrayOutputStream png = new ByteArrayOutputStream();
                         imageStarted = SystemClock.uptimeMillis();
-                        if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, png) || png.size() > 10_000_000)
-                            throw new IllegalStateException("View PNG exceeds capture budget");
+                        Bitmap.CompressFormat format = webpLossless ? Bitmap.CompressFormat.WEBP_LOSSLESS : Bitmap.CompressFormat.PNG;
+                        if (!bitmap.compress(format, webpLossless ? 0 : 100, png) || png.size() > 10_000_000)
+                            throw new IllegalStateException("View image exceeds capture budget");
                         encodeMs += SystemClock.uptimeMillis() - imageStarted;
                         output.writeByte(1);
                         output.writeUTF(layer.ref);
@@ -320,7 +367,13 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
                         output.writeInt(layer.x);
                         output.writeInt(layer.y);
                         output.writeInt(png.size());
-                        png.writeTo(output);
+                        if (webpLossless) {
+                            byte[] encoded = png.toByteArray();
+                            output.write(encoded);
+                            CRC32 checksum = new CRC32();
+                            checksum.update(encoded);
+                            output.writeInt((int) checksum.getValue());
+                        } else png.writeTo(output);
                         count++;
                     } finally {
                         bitmap.recycle();
@@ -522,7 +575,7 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
         JSONObject report = new JSONObject();
         report.put("version", 1);
         report.put("packageName", app.getPackageName());
-        report.put("visibleStreamVersion", 1);
+        report.put("visibleStreamVersion", Build.VERSION.SDK_INT >= 30 ? 2 : 1);
         report.put("styleVersion", 1);
         report.put("pid", Process.myPid());
         report.put("processInstance", processInstance);
@@ -631,6 +684,8 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
                 item.put("marginRight", margins.rightMargin);
                 item.put("marginBottom", margins.bottomMargin);
             }
+            JSONObject layoutRules = layoutRules(view, params);
+            if (layoutRules != null) item.put("layoutRules", layoutRules);
         }
         if (view.getId() != View.NO_ID) {
             try { item.put("resourceId", view.getResources().getResourceName(view.getId())); }
@@ -645,6 +700,93 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
     private static String bounded(CharSequence value) {
         String text = value.toString();
         return text.length() <= 512 ? text : text.substring(0, 512);
+    }
+
+    private static JSONObject layoutRules(View view, ViewGroup.LayoutParams params) throws JSONException {
+        JSONObject rules = new JSONObject();
+        String type;
+        if (params instanceof RelativeLayout.LayoutParams) {
+            type = "RelativeLayout";
+            RelativeLayout.LayoutParams relative = (RelativeLayout.LayoutParams) params;
+            int[] values = relative.getRules();
+            for (int i = 0; i < RELATIVE_RULES.length && i < values.length; i++) {
+                int value = values[i];
+                if (value == 0) continue;
+                int rule = RELATIVE_RULES[i];
+                boolean parentRule = rule == RelativeLayout.ALIGN_PARENT_LEFT || rule == RelativeLayout.ALIGN_PARENT_TOP
+                        || rule == RelativeLayout.ALIGN_PARENT_RIGHT || rule == RelativeLayout.ALIGN_PARENT_BOTTOM
+                        || rule == RelativeLayout.ALIGN_PARENT_START || rule == RelativeLayout.ALIGN_PARENT_END
+                        || rule == RelativeLayout.CENTER_IN_PARENT || rule == RelativeLayout.CENTER_HORIZONTAL
+                        || rule == RelativeLayout.CENTER_VERTICAL;
+                if (parentRule) rules.put(RELATIVE_RULE_NAMES[i], value == RelativeLayout.TRUE);
+                else rules.put(RELATIVE_RULE_NAMES[i], layoutTarget(view, value));
+            }
+        } else {
+            Class<?> constraintParams = constraintLayoutParamsClass(params.getClass());
+            if (constraintParams == null) return null;
+            type = "ConstraintLayout";
+            for (String name : CONSTRAINT_ANCHORS) {
+                Object raw = constraintFieldValue(params, constraintParams, name);
+                if (!(raw instanceof Integer) || (Integer) raw == -1) continue;
+                rules.put(name, layoutTarget(view, (Integer) raw));
+            }
+            boolean horizontal = rules.has("leftToLeft") || rules.has("leftToRight") || rules.has("rightToLeft")
+                    || rules.has("rightToRight") || rules.has("startToStart") || rules.has("startToEnd")
+                    || rules.has("endToStart") || rules.has("endToEnd");
+            boolean vertical = rules.has("topToTop") || rules.has("topToBottom") || rules.has("bottomToTop")
+                    || rules.has("bottomToBottom") || rules.has("baselineToBaseline") || rules.has("baselineToTop")
+                    || rules.has("baselineToBottom");
+            if (horizontal) putConstraintNumber(params, constraintParams, rules, "horizontalBias");
+            if (vertical) putConstraintNumber(params, constraintParams, rules, "verticalBias");
+            if (rules.has("circleConstraint")) {
+                putConstraintNumber(params, constraintParams, rules, "circleRadius");
+                putConstraintNumber(params, constraintParams, rules, "circleAngle");
+            }
+            Object ratio = constraintFieldValue(params, constraintParams, "dimensionRatio");
+            if (ratio instanceof String && !((String) ratio).isEmpty()) rules.put("dimensionRatio", ratio);
+        }
+        if (rules.length() == 0) return null;
+        JSONObject result = new JSONObject();
+        result.put("type", type);
+        result.put("rules", rules);
+        return result;
+    }
+
+    private static Class<?> constraintLayoutParamsClass(Class<?> type) {
+        for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+            if ("androidx.constraintlayout.widget.ConstraintLayout$LayoutParams".equals(current.getName())) return current;
+        }
+        return null;
+    }
+
+    private static Object constraintFieldValue(ViewGroup.LayoutParams params, Class<?> type, String name) {
+        HashMap<String, Field> fields = CONSTRAINT_FIELDS.get(type);
+        if (fields == null) {
+            fields = new HashMap<>();
+            CONSTRAINT_FIELDS.put(type, fields);
+        }
+        if (!fields.containsKey(name)) {
+            try { fields.put(name, type.getField(name)); }
+            catch (NoSuchFieldException ignored) { fields.put(name, null); }
+        }
+        Field field = fields.get(name);
+        if (field == null) return null;
+        try { return field.get(params); }
+        catch (IllegalAccessException ignored) { return null; }
+    }
+
+    private static void putConstraintNumber(ViewGroup.LayoutParams params, Class<?> type, JSONObject rules, String name) throws JSONException {
+        Object value = constraintFieldValue(params, type, name);
+        if (value instanceof Number) {
+            float number = ((Number) value).floatValue();
+            if (!Float.isNaN(number) && !Float.isInfinite(number)) rules.put(name, String.valueOf(value));
+        }
+    }
+
+    private static String layoutTarget(View view, int id) {
+        if (id == 0) return "parent";
+        try { return view.getResources().getResourceName(id); }
+        catch (RuntimeException ignored) { return "id/0x" + Integer.toHexString(id); }
     }
 
     private static String ref(View view) {

@@ -44,6 +44,44 @@ function gravityLabel(raw: string | undefined) {
   return `${[horizontal[x], vertical[y]].filter(Boolean).join(" · ") || "无"} (${code})`;
 }
 
+const layoutRuleLabels: Record<string, string> = {
+  leftOf: "位于目标左侧", rightOf: "位于目标右侧", above: "位于目标上方", below: "位于目标下方",
+  alignBaseline: "基线对齐", alignLeft: "左边对齐", alignTop: "顶部对齐", alignRight: "右边对齐", alignBottom: "底部对齐",
+  alignParentLeft: "对齐父容器左侧", alignParentTop: "对齐父容器顶部", alignParentRight: "对齐父容器右侧", alignParentBottom: "对齐父容器底部",
+  centerInParent: "父容器内居中", centerHorizontal: "水平居中", centerVertical: "垂直居中",
+  startOf: "位于目标起始侧", endOf: "位于目标结束侧", alignStart: "起始侧对齐", alignEnd: "结束侧对齐",
+  alignParentStart: "对齐父容器起始侧", alignParentEnd: "对齐父容器结束侧",
+  leftToLeft: "左边 → 目标左边", leftToRight: "左边 → 目标右边", rightToLeft: "右边 → 目标左边", rightToRight: "右边 → 目标右边",
+  startToStart: "起始侧 → 目标起始侧", startToEnd: "起始侧 → 目标结束侧", endToStart: "结束侧 → 目标起始侧", endToEnd: "结束侧 → 目标结束侧",
+  topToTop: "顶部 → 目标顶部", topToBottom: "顶部 → 目标底部", bottomToTop: "底部 → 目标顶部", bottomToBottom: "底部 → 目标底部",
+  baselineToBaseline: "基线 → 目标基线", baselineToTop: "基线 → 目标顶部", baselineToBottom: "基线 → 目标底部",
+  circleConstraint: "环绕目标", horizontalBias: "水平偏置", verticalBias: "垂直偏置", circleRadius: "环绕半径",
+  circleAngle: "环绕角度", dimensionRatio: "宽高比",
+};
+
+function parseLayoutRules(raw: string | undefined): { type: string; rules: [string, string | boolean][] } | null {
+  if (!raw) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+    const data = value as { type?: unknown; rules?: unknown };
+    if ((data.type !== "RelativeLayout" && data.type !== "ConstraintLayout")
+        || data.rules === null || typeof data.rules !== "object" || Array.isArray(data.rules)) return null;
+    return { type: data.type, rules: Object.entries(data.rules).filter((entry): entry is [string, string | boolean] =>
+      typeof entry[1] === "string" || typeof entry[1] === "boolean") };
+  } catch { return null; }
+}
+
+function layoutRuleValue(name: string, value: string | boolean) {
+  if (typeof value === "boolean") return value ? "是" : "否";
+  if (value === "parent") return "父容器";
+  if (["horizontalBias", "verticalBias"].includes(name) && Number.isFinite(Number(value)))
+    return `${Math.round(Number(value) * 1000) / 10}%`;
+  if (name === "circleRadius") return `${value}px`;
+  if (name === "circleAngle") return `${value}°`;
+  return value.includes(":") ? value.slice(value.lastIndexOf(":") + 1) : value;
+}
+
 // Let a tall inspector shrink its scroll area while moving; keep its header reachable.
 function placeInspector(panel: HTMLElement, x: number, y: number) {
   const workspace = panel.parentElement;
@@ -138,7 +176,8 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
     ? Number(node.attributes["border-width"]) : null;
   const margins = ["Top", "Right", "Bottom", "Left"].map(side => node.attributes?.[`sdk-margin${side}`]);
   const marginLabel = margins.every(value => value !== undefined) ? margins.map(value => `${value}px`).join(" / ") : "—";
-  const hasSdkLayoutRule = node.attributes?.["sdk-layout-gravity"] !== undefined || node.attributes?.["sdk-layout-weight"] !== undefined;
+  const layoutRules = parseLayoutRules(node.attributes?.["sdk-layout-rules"]);
+  const hasSdkLayoutRule = node.attributes?.["sdk-layout-gravity"] !== undefined || node.attributes?.["sdk-layout-weight"] !== undefined || Boolean(layoutRules?.rules.length);
   const sdkInteractions = [
     ["可长按", "sdk-longClickable"], ["可上下文点击", "sdk-contextClickable"],
     ["点击监听器", "sdk-hasOnClickListeners"], ["按下中", "sdk-pressed"], ["已激活", "sdk-activated"],
@@ -173,7 +212,7 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
   const matching = {
     type: matches("类型 class 名称 来源 继承 父类 资源 ID resource-id 文本 text content-desc 描述 package 包名", source, displayName, nameSource, classHierarchy?.join(" "), node.className, node.resourceId, node.package, node.text, node.contentDesc),
     relation: matches("关系 relation 父容器 parent 子节点 children 层级 depth index 序号", parentName, parent?.className, parent?.id, metrics.childCount, metrics.depth, node.index),
-    layout: matches("布局 layout 位置 尺寸 geometry bounds 屏幕 px X Y W H width height 右 下 中心 面积 Z 父级内偏移 截图 padding 内边距 margin 外边距 border 边框 LayoutParams gravity weight 重力 权重", node.bounds?.raw, JSON.stringify(rect), JSON.stringify(padding), marginLabel, node.attributes?.["sdk-layout-params-class"], node.attributes?.["sdk-layout-gravity"], node.attributes?.["sdk-layout-weight"], borderWidth, node.attributes?.z),
+    layout: matches("布局 layout 位置 尺寸 geometry bounds 屏幕 px X Y W H width height 右 下 中心 面积 Z 父级内偏移 截图 padding 内边距 margin 外边距 border 边框 LayoutParams gravity weight 重力 权重 constraint 约束 对齐 父容器 偏置 宽高比", node.bounds?.raw, JSON.stringify(rect), JSON.stringify(padding), marginLabel, node.attributes?.["sdk-layout-params-class"], node.attributes?.["sdk-layout-gravity"], node.attributes?.["sdk-layout-weight"], node.attributes?.["sdk-layout-rules"], borderWidth, node.attributes?.z),
     interaction: hasSdkInteraction && matches("交互 点击 长按 上下文 点击监听器 按下 激活 SDK View", ...sdkInteractions.map(([, key]) => node.attributes?.[key])),
     image: matches("画面 image 样式 style 文本色 字号 设备可见 visible 可点击 clickable 背景色 background-color 边框色 border-color 圆角 corner-radii", imageStatus, imageLabel, node.visibleToUser ? "是" : "否", node.clickable ? "是" : "否", shownStyle?.backgroundType, shownStyle?.backgroundColor, shownStyle?.textColor, ...["image-source", "image-capture-error", "background-color", "border-color", "corner-radii"].map(key => node.attributes?.[key])),
     raw: matches("原始属性 调试 定位 XPath UiSelector ADB JSON XML PNG 导出 flags", node.id, flags, JSON.stringify(node.attributes)),
@@ -295,10 +334,11 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
                   <div><dt>父级内偏移</dt><dd>{parentOffset ? `${px(parentOffset.x)} / ${px(parentOffset.y)}` : "—"}</dd></div>
                 </dl>
                 {hasSdkLayoutRule && <details className="inspector-subsection inspector-layout-rules">
-                  <summary>原生布局规则（SDK）</summary>
+                  <summary>原生布局规则 · {layoutRules?.type ?? "Android"}</summary>
                   <dl className="inspector-property-list">
                     {node.attributes?.["sdk-layout-gravity"] !== undefined && <div><dt>重力方向</dt><dd title={`Android gravity=${node.attributes["sdk-layout-gravity"]}`}>{gravityLabel(node.attributes["sdk-layout-gravity"])}</dd></div>}
                     {node.attributes?.["sdk-layout-weight"] !== undefined && <div><dt>布局权重</dt><dd>{valueOrDash(node.attributes["sdk-layout-weight"])}</dd></div>}
+                    {layoutRules?.rules.map(([name, value]) => <div key={name}><dt>{layoutRuleLabels[name] ?? name}</dt><dd title={String(value)}>{layoutRuleValue(name, value)}</dd></div>)}
                   </dl>
                 </details>}
                 <details className="inspector-subsection">

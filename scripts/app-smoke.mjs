@@ -9,6 +9,7 @@ const require = createRequire(import.meta.url);
 const project = fileURLToPath(new URL("../", import.meta.url));
 const packaged = process.argv.includes("--packaged");
 const requireDevice = process.argv.includes("--require-device");
+const requireLiveStyle = process.argv.includes("--require-live-style");
 const expectLandscape = process.argv.includes("--expect-landscape");
 const reducedMotion = process.argv.includes("--reduced-motion");
 const fixture = process.argv.includes("--fixture");
@@ -21,12 +22,13 @@ const viewportMatch = viewportArgument?.match(/^(\d+)x(\d+)$/i);
 const requestedViewport = viewportMatch ? { width: Number(viewportMatch[1]), height: Number(viewportMatch[2]) } : null;
 const scaleArgument = process.argv.find((value) => value.startsWith("--scale-factor="))?.slice("--scale-factor=".length);
 const requestedScaleFactor = scaleArgument ? Number(scaleArgument) : null;
-const supportedOptions = ["--packaged", "--require-device", "--expect-landscape", "--reduced-motion", "--fixture", "--drag-outside", "--home-only"];
-if (process.argv.slice(2).some((value) => !supportedOptions.includes(value) && !value.startsWith("--viewport=") && !value.startsWith("--scale-factor=") && !value.startsWith("--fixture-state="))) throw new Error("Supported options: --packaged --require-device --expect-landscape --reduced-motion --fixture --drag-outside --home-only --viewport=WxH --scale-factor=N --fixture-state=connected|loading|unauthorized|empty|adb-missing");
+const supportedOptions = ["--packaged", "--require-device", "--require-live-style", "--expect-landscape", "--reduced-motion", "--fixture", "--drag-outside", "--home-only"];
+if (process.argv.slice(2).some((value) => !supportedOptions.includes(value) && !value.startsWith("--viewport=") && !value.startsWith("--scale-factor=") && !value.startsWith("--fixture-state="))) throw new Error("Supported options: --packaged --require-device --require-live-style --expect-landscape --reduced-motion --fixture --drag-outside --home-only --viewport=WxH --scale-factor=N --fixture-state=connected|loading|unauthorized|empty|adb-missing");
 if (!["connected", "loading", "unauthorized", "empty", "adb-missing"].includes(fixtureState)) throw new Error(`Invalid fixture state: ${fixtureState}`);
 if (viewportArgument && (!viewportMatch || requestedViewport.width < 640 || requestedViewport.height < 480)) throw new Error(`Invalid viewport: ${viewportArgument}`);
 if (requestedScaleFactor !== null && (!Number.isFinite(requestedScaleFactor) || requestedScaleFactor < 0.5 || requestedScaleFactor > 3)) throw new Error(`Invalid scale factor: ${scaleArgument}`);
 if (fixture && packaged) throw new Error("The visual fixture is available in development mode only");
+if (requireLiveStyle && (!requireDevice || fixture)) throw new Error("--require-live-style requires a real authorized device");
 if (homeOnly && !fixture) throw new Error("--home-only requires --fixture so the home screen has deterministic device data");
 require("./prepare-windows-runtime.cjs").prepareWindowsRuntime(packaged ? "Unpacked" : "Development");
 const output = join(project, ".benchmarks", "app-smoke", new Date().toISOString().replace(/[:.]/g, "-"));
@@ -44,7 +46,7 @@ const args = [
 const environment = { ...process.env };
 delete environment.ELECTRON_RUN_AS_NODE;
 delete environment.ELECTRON_RENDERER_URL;
-const child = spawn(executable, args, { cwd: project, env: environment, windowsHide: true });
+const child = spawn(executable, args, { cwd: project, env: environment, windowsHide: true, detached: process.platform !== "win32" });
 console.log(`Smoke test output: ${output}`);
 let stderr = "";
 let stdout = "";
@@ -263,11 +265,69 @@ try {
       return true;
     })()`);
     await until(() => evaluate("Boolean(document.querySelector('.capture-button:not([disabled])'))"), "device selection");
-    await evaluate("document.querySelector('.capture-button:not([disabled])').click()");
+    await evaluate(`(() => {
+      const events = [];
+      const startedAt = performance.now();
+      window.__appSmokeCaptureEvents = events;
+      window.__appSmokeCaptureStartedAt = startedAt;
+      window.electronApi.onInspectionProgress((progress) => events.push({ kind: "progress", atMs: Math.round(performance.now() - startedAt), stage: progress.stage, elapsedMs: progress.elapsedMs }));
+      window.electronApi.onInspectionPreview((preview) => {
+        if (preview.phase === "tree") {
+          events.push({ kind: "tree", atMs: Math.round(performance.now() - startedAt), nodeCount: preview.snapshot.nodeCount, source: preview.snapshot.inspectionSource });
+          return;
+        }
+        const imageCount = preview.updates.filter((update) => Boolean(update.layerImageDataUrl)).length;
+        const layerEvent = { kind: "layers", atMs: Math.round(performance.now() - startedAt), updateCount: preview.updates.length, imageCount };
+        events.push(layerEvent);
+        if (imageCount && !window.__appSmokeFirstGpuProbeStarted) {
+          window.__appSmokeFirstGpuProbeStarted = true;
+          const showAndFlushFirstBatch = () => {
+            const modeButton = document.querySelector('.view-mode-toggle button:nth-child(2)');
+            if (modeButton?.disabled) {
+              if (performance.now() - startedAt < 15_000) setTimeout(showAndFlushFirstBatch, 25);
+              return;
+            }
+            if (!modeButton?.classList.contains('active')) modeButton?.click();
+            const waitForTextures = () => requestAnimationFrame(() => {
+              const canvas = document.querySelector('.layer-webgl-canvas');
+              const gl = canvas?.getContext('webgl');
+              const textureCount = Number(canvas?.dataset.layerTextureCount || 0);
+              const renderVersion = Number(canvas?.dataset.layerRenderVersion || 0);
+              if (canvas && gl && textureCount >= imageCount && renderVersion > 0) {
+                gl.finish();
+                layerEvent.webglFlushAtMs = Math.round(performance.now() - startedAt);
+                layerEvent.webglRenderVersion = renderVersion;
+                layerEvent.webglTextureCount = textureCount;
+              } else if (performance.now() - layerEvent.atMs < 15_000) setTimeout(waitForTextures, 25);
+            });
+            waitForTextures();
+          };
+          showAndFlushFirstBatch();
+        }
+      });
+      document.querySelector('.capture-button:not([disabled])').click();
+      return true;
+    })()`);
     await until(() => evaluate("Boolean(document.querySelector('.tree-row') || document.querySelector('.error-placeholder'))"), "UIAutomator inspection", 60_000);
     await until(() => evaluate("Boolean(document.querySelector('.capture-button:not([disabled])') || document.querySelector('.error-placeholder'))"), "complete inspection after early tree preview", 90_000);
     const error = await evaluate("document.querySelector('.error-placeholder p')?.textContent");
     assert.ok(!error, error);
+    const captureEvents = await evaluate("window.__appSmokeCaptureEvents || []");
+    const firstTreePreview = captureEvents.find((event) => event.kind === "tree");
+    const firstLayerImage = captureEvents.find((event) => event.kind === "layers" && event.imageCount > 0);
+    report.captureTiming = {
+      treePreviewMs: firstTreePreview?.atMs ?? null,
+      firstLayerImageMs: firstLayerImage?.atMs ?? null,
+      firstLayerWebglFlushMs: firstLayerImage?.webglFlushAtMs ?? null,
+      firstLayerImageToWebglFlushMs: firstLayerImage?.webglFlushAtMs == null ? null : firstLayerImage.webglFlushAtMs - firstLayerImage.atMs,
+      firstLayerWebglRenderVersion: firstLayerImage?.webglRenderVersion ?? null,
+      firstLayerWebglTextureCount: firstLayerImage?.webglTextureCount ?? null,
+      completionMs: await evaluate("Math.round(performance.now() - window.__appSmokeCaptureStartedAt)"),
+      previewBatches: captureEvents.filter((event) => event.kind === "layers").length,
+      previewImages: captureEvents.filter((event) => event.kind === "layers").reduce((total, event) => total + event.imageCount, 0),
+      stages: captureEvents.filter((event) => event.kind === "progress").map(({ stage, elapsedMs }) => ({ stage, elapsedMs })),
+    };
+    console.log(`Capture timing: ${JSON.stringify(report.captureTiming)}`);
     const initialId = await evaluate("document.querySelector('.node-id')?.textContent");
     const rowCount = await evaluate("document.querySelectorAll('.tree-row').length");
     report.inspectionSummary = await evaluate("document.querySelector('.snapshot-summary').textContent");
@@ -297,6 +357,32 @@ try {
     assert.equal(treeVisualState.duplicateLabelCount, 0, "Tree repeats class names as secondary labels");
     assert.notEqual(treeVisualState.selectedAccent, "rgba(0, 0, 0, 0)", "Tree selection has no leading marker");
     recordCheck("real-device hierarchy and tree selection");
+    if (requireLiveStyle) {
+      const previousSelection = await evaluate("document.querySelector('.tree-row.selected')?.dataset.treeId || null");
+      await evaluate("document.querySelector('.tree-search').focus()");
+      await connection.send("Input.insertText", { text: "首页" });
+      await until(() => evaluate("Boolean(Array.from(document.querySelectorAll('.tree-row')).find(row => row.querySelector('.tree-primary')?.textContent.trim() === '首页' && row.querySelector('.tree-class')?.textContent.trim() === 'CheckedTextView'))"), "business home tab filter");
+      const homeTabId = await evaluate("Array.from(document.querySelectorAll('.tree-row')).find(row => row.querySelector('.tree-primary')?.textContent.trim() === '首页' && row.querySelector('.tree-class')?.textContent.trim() === 'CheckedTextView')?.dataset.treeId || null");
+      await evaluate(`document.querySelector('.tree-row[data-tree-id=${JSON.stringify(homeTabId)}]')?.click()`);
+      await until(() => evaluate("Boolean(document.querySelector('.inspector-style-read')?.getClientRects().length)"), "live-style action for the selected home tab");
+      await evaluate("document.querySelector('.inspector-style-read').click()");
+      await until(() => evaluate("Array.from(document.querySelectorAll('.inspector-image-note')).some(note => note.textContent.includes('Debug SDK 实时读取'))"), "live style shown in property panel");
+      report.liveStyle = await evaluate(`(() => {
+        const panel = document.querySelector('.inspector-image');
+        const values = Object.fromEntries(Array.from(panel.querySelectorAll('.inspector-property-list div')).map(row => [row.querySelector('dt')?.textContent.trim(), row.querySelector('dd')?.textContent.trim()]));
+        return { nodeId: document.querySelector('.tree-row.selected')?.dataset.treeId, className: document.querySelector('.tree-row.selected .tree-class')?.textContent.trim(), values };
+      })()`);
+      assert.ok(report.liveStyle.values['背景类型'] && report.liveStyle.values['当前文字色'] && /px$/.test(report.liveStyle.values['文字大小'] ?? ''), "Live style fields were not rendered in the property panel");
+      recordCheck("business Debug SDK live style renders in the property panel");
+      await evaluate("document.querySelector('.tree-clear')?.click()");
+      await until(() => evaluate("document.querySelector('.tree-search').value === ''"), "clear home-tab filter after live-style check");
+      if (previousSelection) {
+        await evaluate("document.querySelector('.ui-tree-scroll').scrollTop = 0");
+        await until(() => evaluate(`Boolean(document.querySelector('.tree-row[data-tree-id=${JSON.stringify(previousSelection)}]'))`), "restore previous tree selection row");
+        await evaluate(`document.querySelector('.tree-row[data-tree-id=${JSON.stringify(previousSelection)}]')?.click()`);
+        await until(() => evaluate(`document.querySelector('.tree-row.selected')?.dataset.treeId === ${JSON.stringify(previousSelection)}`), "restore previous tree selection");
+      }
+    }
     if (rowCount > 1) {
       await until(() => evaluate("Boolean(document.querySelector('.layer-scene'))"), "3D hierarchy expansion");
       await until(() => evaluate("document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderer === 'webgl'"), "WebGL scene renderer");
@@ -381,6 +467,11 @@ try {
       assert.equal(layerState.hasBoxModel, true);
       assert.match(layerState.orbitReadout, /Yaw/);
       assert.ok(layerState.pivotZ < 0, "3D camera still orbits around the front layer instead of the layer stack center");
+      await until(() => evaluate(`(() => {
+        const panel = document.querySelector('.floating-inspector')?.getBoundingClientRect();
+        const frame = document.querySelector('.screenshot-frame')?.getBoundingClientRect();
+        return Boolean(panel && frame && panel.left >= frame.left && panel.bottom <= frame.bottom);
+      })()`), "floating inspector layout to settle inside the canvas", 5000);
       const workspaceLayout = await evaluate(`(() => {
         const box = (selector) => {
           const element = document.querySelector(selector);
@@ -490,6 +581,8 @@ try {
           await until(() => evaluate(`document.querySelector('.inspector-type').open === ${open}`), "keyboard property group toggle");
         }
       }
+      const propertyCardCountBeforeFilter = await evaluate("document.querySelectorAll('.inspector-card:not([hidden])').length");
+      assert.ok(propertyCardCountBeforeFilter > 0, "Selected node has no visible property cards");
       await evaluate("document.querySelector('.inspector-search input').focus()");
       await connection.send("Input.insertText", { text: "bounds" });
       await until(() => evaluate("!document.querySelector('.inspector-layout').hidden && ['.inspector-type', '.inspector-relation', '.inspector-image'].every(selector => document.querySelector(selector).hidden)"), "property group filter");
@@ -497,7 +590,7 @@ try {
       writeFileSync(join(output, "inspector-filter.png"), Buffer.from(filteredInspector.data, "base64"));
       await connection.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
       await connection.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
-      await until(() => evaluate("!document.querySelector('.inspector-search input').value && !document.querySelector('.floating-inspector').hidden && document.querySelectorAll('.inspector-card:not([hidden])').length === 5"), "property filter Escape");
+      await until(() => evaluate(`!document.querySelector('.inspector-search input').value && !document.querySelector('.floating-inspector').hidden && document.querySelectorAll('.inspector-card:not([hidden])').length === ${propertyCardCountBeforeFilter}`), "property filter Escape");
       recordCheck("inspector groups support keyboard folding, live property search and Escape without closing the panel");
       const boxModel = await evaluate(`(() => {
         document.querySelector('.inspector-layout').open = true;
@@ -949,6 +1042,41 @@ try {
     report.storedGeometry = storedGeometry;
     await evaluate("document.querySelector('.snapshot-drawer').open = false");
     recordCheck("snapshot save/load and history preview retain capture geometry");
+
+    if (report.inspectionSummary.includes("SDK 树")) {
+      await evaluate("document.querySelector('.tree-search').focus()");
+      await connection.send("Input.insertText", { text: "TextView" });
+      await until(() => evaluate("document.querySelector('.tree-search').value === 'TextView'"), "priority TextView filter input");
+      await evaluate("(() => { const tree = document.querySelector('.ui-tree-scroll'); tree.scrollTop = tree.scrollHeight; })()");
+      await until(() => evaluate(`Boolean(Array.from(document.querySelectorAll('.tree-row[data-tree-kind="text"]')).find(row => row.title.toLowerCase().includes('textview') && !row.classList.contains('is-muted')))`), "visible TextView filter for priority capture");
+      const selectedId = await evaluate(`(() => {
+        const row = Array.from(document.querySelectorAll('.tree-row[data-tree-kind="text"]'))
+          .reverse().find(candidate => candidate.title.toLowerCase().includes('textview') && !candidate.classList.contains('is-muted'));
+        if (!row) return null;
+        row.click();
+        return row.dataset.treeId;
+      })()`);
+      assert.ok(selectedId, "Could not select a visible native TextView for priority capture");
+      await until(() => evaluate(`document.querySelector('.tree-row.selected')?.dataset.treeId === ${JSON.stringify(selectedId)}`), "priority capture selection");
+      await evaluate("document.querySelector('.tree-clear-inline').click()");
+      await until(() => evaluate("document.querySelector('.tree-search').value === ''"), "clear priority capture filter");
+      await evaluate(`(() => {
+        const events = [];
+        window.__appSmokePriorityEvents = events;
+        window.electronApi.onInspectionPreview((preview) => {
+          if (preview.phase !== "layers") return;
+          events.push(preview.updates.filter(update => Boolean(update.layerImageDataUrl)).map(update => update.id));
+        });
+        document.querySelector('.capture-button:not([disabled])').click();
+      })()`);
+      await until(() => evaluate("Boolean(document.querySelector('.capture-button[disabled]'))"), "priority capture start", 5000);
+      await until(() => evaluate("Boolean(document.querySelector('.capture-button:not([disabled])') || document.querySelector('.error-placeholder'))"), "priority capture completion", 90_000);
+      const priorityEvents = await evaluate("window.__appSmokePriorityEvents || []");
+      assert.ok(priorityEvents[0]?.includes(selectedId), "Selected View was not included in the first independent-image update");
+      report.priorityCapture = { selectedId, firstUpdateCount: priorityEvents[0].length, updateCount: priorityEvents.length };
+      recordCheck("selected View is included in the first independent-image update");
+    }
+
     await evaluate("document.querySelector('.inspector-panel').scrollIntoView({block:'start', behavior:'instant'})");
   } else {
     assert.equal(expectLandscape, false, "Landscape check requires an authorized device");
@@ -973,7 +1101,11 @@ try {
 } finally {
   report.rendererErrors = connection?.errors ?? [];
   connection?.close();
-  if (!exited) {
+  if (process.platform !== "win32" && child.pid) {
+    try { process.kill(-child.pid, "SIGTERM"); } catch { if (!exited) child.kill(); }
+    if (!exited) await Promise.race([new Promise((resolve) => child.once("exit", resolve)), delay(2000)]);
+    try { process.kill(-child.pid, 0); process.kill(-child.pid, "SIGKILL"); } catch { }
+  } else if (!exited) {
     child.kill();
     await Promise.race([new Promise((resolve) => child.once("exit", resolve)), delay(2000)]);
   }

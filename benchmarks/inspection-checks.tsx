@@ -3,7 +3,40 @@ import { createRoot } from "react-dom/client";
 import App from "../src/App";
 import type { AppMenuAction, AppMenuState, InspectionPreview, InspectionProgress, UiSnapshot } from "../shared/types";
 import { changedLayerImages, layerImageBaseline } from "../shared/tree-utils";
+import { clipLayerImageToOutlines, composeSubtreeImage } from "../shared/layer-textures";
 import { makeNode } from "./fixtures";
+
+async function verifyLayerClippingPixels() {
+  const rect = (left: number, top: number, right: number, bottom: number) => ({ left, top, right, bottom, raw: `[${left},${top}][${right},${bottom}]` });
+  const outline = (id: string, bounds: ReturnType<typeof rect>, radius: number) => ({
+    ...makeNode(id), bounds, attributes: { "clip-to-outline": "true", "sdk-outlineLeft": "0", "sdk-outlineTop": "0", "sdk-outlineRight": String(bounds.right - bounds.left), "sdk-outlineBottom": String(bounds.bottom - bounds.top), "sdk-outlineRadius": String(radius) },
+  });
+  const source = document.createElement("canvas");
+  source.width = source.height = 40;
+  const sourceContext = source.getContext("2d")!;
+  sourceContext.fillStyle = "#ff0000";
+  sourceContext.fillRect(0, 0, 40, 40);
+  const outer = outline("outer", rect(0, 0, 40, 40), 14);
+  const inner = outline("inner", rect(5, 5, 35, 35), 6);
+  const child = makeNode("child");
+  child.bounds = rect(0, 0, 40, 40);
+  child.layerImageDataUrl = "fixture";
+  child.layerImageSize = { width: 40, height: 40 };
+  const clipped = clipLayerImageToOutlines(child, [inner, outer], source) as HTMLCanvasElement;
+  const pixels = (image: HTMLCanvasElement, x: number, y: number) => image.getContext("2d")!.getImageData(x, y, 1, 1).data;
+  if (pixels(clipped, 20, 20)[3] !== 255) throw new Error("Rounded ancestor clipping removed visible child pixels");
+  if (pixels(clipped, 2, 20)[3] !== 0 || pixels(clipped, 5, 5)[3] !== 0) throw new Error("Nested rounded ancestor clipping leaked child pixels");
+  if (clipLayerImageToOutlines(child, [], source) !== source) throw new Error("Unclipped layer image was needlessly copied");
+
+  outer.children = [child];
+  outer.layerImageDataUrl = "fixture";
+  outer.layerImageSize = { width: 40, height: 40 };
+  const collapsed = await composeSubtreeImage(outer, { left: 0, top: 0, width: 40, height: 40 }, async () => source, 10_000);
+  const center = pixels(collapsed, 20, 20);
+  const corner = pixels(collapsed, 1, 1);
+  if (center[0] !== 255 || center[3] !== 255 || corner[3] !== 0) throw new Error(`Collapsed parent composition disagrees with rounded clipping: center=${Array.from(center)} corner=${Array.from(corner)}`);
+  source.width = source.height = clipped.width = clipped.height = collapsed.width = collapsed.height = 0;
+}
 
 export async function verifyInspectionBehavior() {
   const previousApi = window.electronApi;
@@ -83,6 +116,7 @@ export async function verifyInspectionBehavior() {
   });
   const stageText = () => host.querySelector('h4[role="status"]')?.textContent;
   try {
+    await verifyLayerClippingPixels();
     flushSync(() => root.render(<App />));
     await until(() => !host.querySelector<HTMLButtonElement>(".capture-button")!.disabled);
     click(".capture-button");
@@ -478,7 +512,7 @@ export async function verifyInspectionBehavior() {
     check(cancelled.includes(requests[9].id) && progress === null && menuAction === null, "unmount did not release capture and listeners");
     requests[9].resolve(snapshot("b", 66));
     await tick();
-    return { checks: ["stage and cancel", "early tree/image preview preserves selection and 3D mode; incomplete snapshots cannot be saved", "capture warning: dismiss, focus, reclaimed space, long text, retained diagnostic, new capture reset and successful capture clears", "device switch ignores stale progress/failure", "sidebar: no heading, pointer/keyboard width, min/max, reset and cancelled drag", "native menu: capture guard, state sync, search, expand/collapse, home and cleanup", "Qt groups: fold uses live group, expand drops child pixels, and late image cannot enter a new capture", "native View: rapid clicks send one refresh; single and branch refresh preserve selection, scene, children and partial failures", "hybrid View: folded group recaptures after child refresh without showing stale pixels", "floating inspector: drag, keyboard, resize bounds, collapse, close, restore and copy", "inspector groups: native disclosure, name/value search, empty/clear/Escape, retained collapse state, read-only geometry and honest View/QML/unknown source", "node identity: text/description/resource/type priority, full class, parent/root, long names at 300/248px", "box model: four-side placement at 300/248px, zero/partial/invalid padding, missing bounds and confirmed/ambiguous border", "return home ignores late result", "unmount cancels and unsubscribes"] };
+    return { checks: ["rounded child textures inherit known ancestor outlines; folded composite matches pixel mask", "stage and cancel", "early tree/image preview preserves selection and 3D mode; incomplete snapshots cannot be saved", "capture warning: dismiss, focus, reclaimed space, long text, retained diagnostic, new capture reset and successful capture clears", "device switch ignores stale progress/failure", "sidebar: no heading, pointer/keyboard width, min/max, reset and cancelled drag", "native menu: capture guard, state sync, search, expand/collapse, home and cleanup", "Qt groups: fold uses live group, expand drops child pixels, and late image cannot enter a new capture", "native View: rapid clicks send one refresh; single and branch refresh preserve selection, scene, children and partial failures", "hybrid View: folded group recaptures after child refresh without showing stale pixels", "floating inspector: drag, keyboard, resize bounds, collapse, close, restore and copy", "inspector groups: native disclosure, name/value search, empty/clear/Escape, retained collapse state, read-only geometry and honest View/QML/unknown source", "node identity: text/description/resource/type priority, full class, parent/root, long names at 300/248px", "box model: four-side placement at 300/248px, zero/partial/invalid padding, missing bounds and confirmed/ambiguous border", "return home ignores late result", "unmount cancels and unsubscribes"] };
   } finally {
     if (mounted) flushSync(() => root.unmount());
     window.electronApi = previousApi;

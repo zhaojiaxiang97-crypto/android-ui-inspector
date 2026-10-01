@@ -24,6 +24,8 @@ test("selected style requires the same View, process and geometry", () => {
   const read = (value: string) => parseViewStyleReply(value, "example.TextView@a", "example.Decor@b", "11111111-1111-1111-1111-111111111111", bounds);
   assert.equal(read(reply).backgroundColor, "#FF123456");
   assert.equal(read(reply).textSizePx, 22.5);
+  assert.equal(read(reply.replace("x=10", "x=18")).backgroundColor, "#FF123456", "SDK and screenshot origins may drift by up to 8px");
+  assert.throws(() => read(reply.replace("y=20", "y=29")), /位置或尺寸/);
   assert.throws(() => read(reply.replace("width=100", "width=101")), /尺寸/);
   assert.throws(() => read(reply.replace("example.TextView@a", "example.TextView@c")), /身份/);
   assert.throws(() => read(reply.replace("textColor=#FFFF0000", "textColor=red")), /样式数据/);
@@ -157,7 +159,7 @@ test("Activity hierarchy retains shorthand DecorView and fills its measured geom
   assert.equal(decor.className, "com.android.internal.policy.DecorView");
   assert.equal(decor.attributes?.["view-ref"], ref);
   assert.deepEqual(decor.bounds, { left: 0, top: 0, right: 1080, bottom: 2355, raw: "[0,0][1080,2355]" });
-  assert.equal(attachViewLayerImages(root, [{ name: "DecorView", x: 0, y: 0, width: 1080, height: 2355, visible: true, pngDataUrl: "data:image/png;base64,AA==" }]), 1);
+  assert.equal(attachViewLayerImages(root, [{ name: "DecorView", x: 0, y: 0, width: 1080, height: 2355, visible: true, imageDataUrl: "data:image/png;base64,AA==" }]), 1);
   assert.equal(decor.layerImageStatus, "captured");
 
   const ordinary = debugViewTree(activityHierarchy.replace("DecorView@9c5dabe[MainActivity]", "com.android.internal.policy.DecorView{9c5dabe V.E...... ........ 0,0-1080,2355}"), activityTarget);
@@ -197,7 +199,7 @@ test("SDK visible images keep only stable View identities and bound stale images
   node.attributes = { "view-ref": "example.CustomView@1" };
   node.bounds = { left: 2, top: 3, right: 12, bottom: 13, raw: "[2,3][12,13]" };
   root.children = [node];
-  const layer = { name: "example.CustomView@1", x: 2, y: 3, width: 10, height: 10, visible: true, pngDataUrl: "data:image/png;base64,AA==" };
+  const layer = { name: "example.CustomView@1", x: 2, y: 3, width: 10, height: 10, visible: true, imageDataUrl: "data:image/png;base64,AA==" };
   assert.deepEqual(matchSdkVisibleLayers(root, [layer]).matched, [layer]);
   assert.throws(() => matchSdkVisibleLayers(root, [{ ...layer, x: 4 }]), /回退完整抓图/);
   assert.throws(() => matchSdkVisibleLayers(root, [{ ...layer, width: 9 }]), /回退完整抓图/);
@@ -243,7 +245,7 @@ test("DDMS restores omitted custom parents and images, preserving identity and n
   assert.equal(image.enabled, false);
   assert.equal(image.bounds?.raw, "[10,124][110,164]");
   assert.equal(decor.children[1].visibleToUser, false);
-  assert.equal(attachViewLayerImages(root, [{ name: "id/avatar", visible: true, x: 10, y: 20, width: 100, height: 40, pngDataUrl: "own-image" }], { x: 0, y: 104 }), 1);
+  assert.equal(attachViewLayerImages(root, [{ name: "id/avatar", visible: true, x: 10, y: 20, width: 100, height: 40, imageDataUrl: "own-image" }], { x: 0, y: 104 }), 1);
   assert.equal(image.layerImageDataUrl, "own-image");
   const children = root.children;
   for (const invalid of [dump.replace("example.CustomImage@789", "example.CustomImage@456"), dump.replace("id/avatar", "id/a"), dump.replace(" example.CustomImage@789", "unparsed"), dump.replace("example.CustomImage@789", "other.Window@1").replace(" other.Window@1", "other.Window@1")]) {
@@ -405,7 +407,7 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
     assert.deepEqual([...captured.images.keys()], [refs[3], refs[0], refs[2]], "prioritize video buffers before the bounded own-view fallback");
     assert.match(captured.failures.get(refs[1])!, /exception/);
     for (const [ref, image] of captured.images) {
-      const png = Buffer.from(image.pngDataUrl.split(",")[1], "base64");
+      const png = Buffer.from(image.imageDataUrl.split(",")[1], "base64");
       const pixels = inflateSync(png.subarray(41, 41 + png.readUInt32BE(33)));
       assert.deepEqual([...pixels], [0, refs.indexOf(ref) + 1, 0, 0, 1], "pixels and faint alpha stay with their object, even for same-name views");
     }
@@ -612,7 +614,7 @@ for (const legacy of [false, true]) test(`Surface capture isolates the actual bu
     assert.match(captured.failures.get(refs[3])!, /保护/);
     assert.match(captured.failures.get(refs[4])!, /保护/);
     for (const [ref, image] of captured.images) {
-      const png = Buffer.from(image.pngDataUrl.split(",")[1], "base64");
+      const png = Buffer.from(image.imageDataUrl.split(",")[1], "base64");
       assert.deepEqual([...inflateSync(png.subarray(41, 41 + png.readUInt32BE(33)))], [0, refs.indexOf(ref) + 1, 23, 42, 255]);
     }
     assert.deepEqual(copied, [501, 502, 505], "invalid/secure surfaces never reach the copy API; frame availability is checked by the copy backend");
@@ -698,8 +700,8 @@ test("Debug View layer parser keeps transparent PNGs and tolerates null captures
     { name: "TextView", width: 32, height: 16 },
     { name: "View", width: 0, height: 0 },
   ]);
-  assert.match(layers[0].pngDataUrl ?? "", /^data:image\/png;base64,/);
-  assert.equal(layers[1].pngDataUrl, null);
+  assert.match(layers[0].imageDataUrl ?? "", /^data:image\/png;base64,/);
+  assert.equal(layers[1].imageDataUrl, null);
 });
 
 test("SDK partial parser publishes only complete, CRC-checked PNG records", () => {
@@ -736,7 +738,36 @@ test("SDK partial parser publishes only complete, CRC-checked PNG records", () =
   assert.equal(parseCapturedViewLayerPrefix(identified, "fedcba9876543210").length, 0);
   const damaged = Buffer.from(prefix);
   damaged[damaged.length - 1] ^= 1;
-  assert.throws(() => parseCapturedViewLayerPrefix(damaged), /PNG 校验失败/);
+  assert.throws(() => parseCapturedViewLayerPrefix(damaged), /图片校验失败/);
+});
+
+test("SDK parser publishes complete lossless WebP records only after their checksum arrives", () => {
+  const webp = Buffer.alloc(26);
+  webp.write("RIFF", 0);
+  webp.writeUInt32LE(webp.length - 8, 4);
+  webp.write("WEBP", 8);
+  webp.write("VP8L", 12);
+  webp.writeUInt32LE(5, 16);
+  webp[20] = 0x2f;
+  const name = Buffer.from("View@a");
+  const record = Buffer.alloc(1 + 2 + name.length + 1 + 8 + 4 + webp.length + 4);
+  let at = 0;
+  record[at++] = 1;
+  record.writeUInt16BE(name.length, at); at += 2;
+  name.copy(record, at); at += name.length;
+  record[at++] = 1;
+  record.writeInt32BE(12, at); record.writeInt32BE(34, at + 4); at += 8;
+  record.writeUInt32BE(webp.length, at); at += 4;
+  webp.copy(record, at); at += webp.length;
+  record.writeUInt32BE(crc32(webp), at);
+  const prefix = Buffer.concat([Buffer.alloc(8), record]);
+  assert.equal(parseCapturedViewLayerPrefix(prefix.subarray(0, prefix.length - 1)).length, 0);
+  const layer = parseCapturedViewLayerPrefix(prefix)[0];
+  assert.deepEqual({ name: layer.name, width: layer.width, height: layer.height }, { name: "View@a", width: 1, height: 1 });
+  assert.match(layer.imageDataUrl ?? "", /^data:image\/webp;base64,/);
+  const damaged = Buffer.from(prefix);
+  damaged[damaged.length - 1] ^= 1;
+  assert.throws(() => parseCapturedViewLayerPrefix(damaged), /WebP 校验失败/);
 });
 
 test("Debug View bitmaps prefer exact matches and tolerate only unique one-pixel drift", () => {
@@ -749,16 +780,16 @@ test("Debug View bitmaps prefer exact matches and tolerate only unique one-pixel
   const exact = node("0/0", 10);
   const nearby = node("0/1", 11);
   const root = { ...node("0", 0), className: "Activity", children: [nearby, exact] };
-  const pngDataUrl = "data:image/png;base64,AA==";
+  const imageDataUrl = "data:image/png;base64,AA==";
 
-  assert.equal(attachViewLayerImages(root, [{ name: "TextView", visible: true, x: 10, y: 20, width: 32, height: 16, pngDataUrl }]), 1);
-  assert.equal(exact.layerImageDataUrl, pngDataUrl);
+  assert.equal(attachViewLayerImages(root, [{ name: "TextView", visible: true, x: 10, y: 20, width: 32, height: 16, imageDataUrl }]), 1);
+  assert.equal(exact.layerImageDataUrl, imageDataUrl);
   assert.equal(nearby.layerImageDataUrl, undefined);
-  assert.equal(attachViewLayerImages(root, [{ name: "TextView", visible: true, x: 12, y: 20, width: 32, height: 16, pngDataUrl }]), 1);
-  assert.equal(nearby.layerImageDataUrl, pngDataUrl);
+  assert.equal(attachViewLayerImages(root, [{ name: "TextView", visible: true, x: 12, y: 20, width: 32, height: 16, imageDataUrl }]), 1);
+  assert.equal(nearby.layerImageDataUrl, imageDataUrl);
   assert.equal(exact.layerImageDataUrl, undefined);
-  assert.equal(attachViewLayerImages(root, [{ name: "TextView", visible: true, x: 13, y: 20, width: 32, height: 16, pngDataUrl }]), 0);
-  assert.equal(attachViewLayerImages(root, [{ name: "TextView", visible: true, x: 9, y: 20, width: 32, height: 16, pngDataUrl }, { name: "TextView", visible: true, x: 10, y: 21, width: 32, height: 16, pngDataUrl }]), 0);
+  assert.equal(attachViewLayerImages(root, [{ name: "TextView", visible: true, x: 13, y: 20, width: 32, height: 16, imageDataUrl }]), 0);
+  assert.equal(attachViewLayerImages(root, [{ name: "TextView", visible: true, x: 9, y: 20, width: 32, height: 16, imageDataUrl }, { name: "TextView", visible: true, x: 10, y: 21, width: 32, height: 16, imageDataUrl }]), 0);
 });
 
 test("real alpha hides transparent overlays and descendants; screen coordinates include translation", () => {
@@ -780,7 +811,7 @@ test("same-name/same-bounds layers are ambiguous, but an explicit view identity 
   const a = { ...makeNode("0/0"), resourceId: null, attributes: { "view-ref": "ViewGroup@a" } };
   const b = { ...makeNode("0/1"), resourceId: null, attributes: { "view-ref": "ViewGroup@b" } };
   const root = { ...makeNode("0"), children: [a, b] };
-  const layer = { name: "ViewGroup", visible: true, x: 0, y: 0, width: 360, height: 48, pngDataUrl: "data:image/png;base64,AA==" };
+  const layer = { name: "ViewGroup", visible: true, x: 0, y: 0, width: 360, height: 48, imageDataUrl: "data:image/png;base64,AA==" };
   assert.equal(attachViewLayerImages(root, [layer]), 0);
   assert.equal(root.children[0].layerImageStatus, "ambiguous");
   assert.equal(root.children[1].layerImageDataUrl, undefined);
@@ -792,8 +823,8 @@ test("same-name/same-bounds layers are ambiguous, but an explicit view identity 
 test("duplicate bitmap records do not silently attach the first image", () => {
   const child: UiNode = { ...makeNode("0/0"), resourceId: null };
   const root = { ...makeNode("0"), children: [child] };
-  const layer = { name: "ViewGroup", visible: true, x: 0, y: 0, width: 360, height: 48, pngDataUrl: "data:image/png;base64,AA==" };
-  assert.equal(attachViewLayerImages(root, [layer, { ...layer, pngDataUrl: "other" }]), 0);
+  const layer = { name: "ViewGroup", visible: true, x: 0, y: 0, width: 360, height: 48, imageDataUrl: "data:image/png;base64,AA==" };
+  assert.equal(attachViewLayerImages(root, [layer, { ...layer, imageDataUrl: "other" }]), 0);
   assert.equal(child.layerImageStatus, "ambiguous");
   assert.equal(child.layerImageDataUrl, undefined);
 });
@@ -802,7 +833,7 @@ test("skip-draw containers do not compete with anonymous drawable images, but re
   const child: UiNode = { ...makeNode("0/0/0"), resourceId: null, attributes: { "view-ref": "ViewGroup@b", "skip-draw": "false" } };
   const parent: UiNode = { ...makeNode("0/0"), resourceId: null, attributes: { "view-ref": "ViewGroup@a", "skip-draw": "true" }, children: [child], layerImageEmpty: true };
   const root = { ...makeNode("0"), children: [parent] };
-  const layer = { name: "ViewGroup", visible: true, x: 0, y: 0, width: 360, height: 48, pngDataUrl: "child-own-image" };
+  const layer = { name: "ViewGroup", visible: true, x: 0, y: 0, width: 360, height: 48, imageDataUrl: "child-own-image" };
   assert.equal(attachViewLayerImages(root, [layer]), 1);
   assert.equal(parent.layerImageStatus, "unavailable");
   assert.equal(parent.layerImageDataUrl, undefined);

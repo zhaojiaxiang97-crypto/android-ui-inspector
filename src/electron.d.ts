@@ -7,7 +7,7 @@ declare global {
       updateAppMenu?: (state: AppMenuState) => Promise<void>;
       onAppMenuAction?: (callback: (action: AppMenuAction) => void) => () => void;
       probeAdb: () => Promise<AdbProbeResult>;
-      inspectDevice: (serial: string, requestId: string) => Promise<UiSnapshot>;
+      inspectDevice: (serial: string, requestId: string, priorityViewRef?: string | null) => Promise<UiSnapshot>;
       captureGroup: (requestId: string, nodeId: string) => Promise<QmlGroupImage | null>;
       refreshViewNode: (requestId: string, nodeId: string, scope?: "node" | "branch") => Promise<ViewRefreshResult>;
       readViewStyle: (requestId: string, nodeId: string) => Promise<ViewStyleResult>;

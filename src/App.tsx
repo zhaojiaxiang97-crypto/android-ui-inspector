@@ -400,7 +400,7 @@ function App() {
     }
   }, []);
 
-  const inspectDevice = useCallback(async (serial: string) => {
+  const inspectDevice = useCallback(async (serial: string, priorityViewRef?: string | null) => {
     currentSnapshotRef.current = null;
     if (activeInspectionRef.current) void window.electronApi.cancelInspection(activeInspectionRef.current);
     const requestId = crypto.randomUUID();
@@ -430,7 +430,7 @@ function App() {
     setInspectionLoading(true);
 
     try {
-      const result = await window.electronApi.inspectDevice(serial, requestId);
+      const result = await window.electronApi.inspectDevice(serial, requestId, priorityViewRef);
       if (activeInspectionRef.current !== requestId) return;
       const hadPreview = previewShownRef.current;
       setSnapshot(result);
@@ -806,8 +806,10 @@ function App() {
     ? toolbarDevice?.state === "device" ? toolbarDevice : readyDevices[0] ?? null
     : null;
   const captureSelected = useCallback(() => {
-    if (captureSerial) void inspectDevice(captureSerial);
-  }, [captureSerial, inspectDevice]);
+    if (!captureSerial) return;
+    const priorityViewRef = snapshot?.serial === captureSerial ? selectedNode?.attributes?.["view-ref"] ?? null : null;
+    void inspectDevice(captureSerial, priorityViewRef);
+  }, [captureSerial, inspectDevice, selectedNode, snapshot?.serial]);
   const startDebugSession = useCallback(async () => {
     if (!captureSerial || mcpBusy || inspectionLoading || !window.electronApi.startDebugSession) return;
     setMcpBusy(true); setDebugStatus(null);

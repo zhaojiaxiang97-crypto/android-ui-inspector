@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import type { PixelSize, QmlGroupImage, UiNode } from "../../shared/types";
 import { buildLayerLayout, buildLayerOverview, type LayerRecord } from "../../shared/layer-layout";
-import { composeSubtreeImage, layerPlaneOpacity, subtreeImageNodes, textureDimensions } from "../../shared/layer-textures";
+import { clipLayerImageToOutlines, composeSubtreeImage, layerPlaneOpacity, shouldScanTextureAlpha, subtreeImageNodes, textureDimensions } from "../../shared/layer-textures";
 import { measureBounds, type BoundsMeasurement } from "../../shared/node-metrics";
 import { nodeDisplayLabel, nodeShortClass } from "../../shared/tree-utils";
 
@@ -190,6 +190,35 @@ function collapsedTextureKey(record: LayerRecord, visibilityKey: string, group: 
   return `subtree:${record.id}:${visibilityKey}:${refreshedAt}`;
 }
 
+function indexLayerTree(root: UiNode) {
+  const nodes = new Map<string, UiNode>(), parents = new Map<string, string | null>();
+  const pending: Array<{ node: UiNode; parentId: string | null }> = [{ node: root, parentId: null }];
+  while (pending.length) {
+    const { node, parentId } = pending.pop()!;
+    nodes.set(node.id, node); parents.set(node.id, parentId);
+    for (const child of node.children) pending.push({ node: child, parentId: node.id });
+  }
+  return { nodes, parents };
+}
+
+function outlineAncestors(record: LayerRecord, tree: ReturnType<typeof indexLayerTree>) {
+  const result: UiNode[] = [];
+  let id: string | null = record.id;
+  while (id) {
+    const node = tree.nodes.get(id);
+    if (node?.attributes?.["clip-to-outline"] === "true") result.push(node);
+    id = tree.parents.get(id) ?? null;
+  }
+  return result;
+}
+
+function outlineTextureKey(record: LayerRecord, clips: readonly UiNode[]) {
+  if (!clips.length) return record.node.layerImageDataUrl!;
+  const signature = clips.map(node => [node.id, node.bounds?.left, node.bounds?.top, node.bounds?.right, node.bounds?.bottom,
+    ...["Left", "Top", "Right", "Bottom", "Radius"].map(key => node.attributes?.[`sdk-outline${key}`])]);
+  return `${record.node.layerImageDataUrl!}#outline:${JSON.stringify(signature)}`;
+}
+
 function hasOwnVisualStyle(record: LayerRecord, size: PixelSize, hiddenNodeIds: ReadonlySet<string>, groups: ReadonlyMap<string, QmlGroupImage>) {
   const node = record.node;
   // Collapsed branches combine independent images; expanded nodes keep their own.
@@ -241,7 +270,7 @@ function sourceRect(record: LayerRecord): Rect {
   return { left, top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) };
 }
 
-function visualFor(record: LayerRecord, screenshotSize: PixelSize, visibilityKey: string, group: QmlGroupImage | null) {
+function visualFor(record: LayerRecord, screenshotSize: PixelSize, visibilityKey: string, group: QmlGroupImage | null, nativeTextureKey = record.node.layerImageDataUrl!) {
   if (record.isCollapsed) {
     const rect = sourceRect(record);
     if (group) {
@@ -260,7 +289,7 @@ function visualFor(record: LayerRecord, screenshotSize: PixelSize, visibilityKey
     const scaleX = textureSize.width / (bounds.right - bounds.left);
     const scaleY = textureSize.height / (bounds.bottom - bounds.top);
     const rect = sourceRect(record);
-    return { kind: "native" as const, textureSrc: record.node.layerImageDataUrl, textureSize, source: { left: (rect.left - bounds.left) * scaleX, top: (rect.top - bounds.top) * scaleY, width: rect.width * scaleX, height: rect.height * scaleY } };
+    return { kind: "native" as const, textureSrc: nativeTextureKey, textureSize, source: { left: (rect.left - bounds.left) * scaleX, top: (rect.top - bounds.top) * scaleY, width: rect.width * scaleX, height: rect.height * scaleY } };
   }
   return { kind: "isolated" as const, textureSrc: null, textureSize: screenshotSize, source: sourceRect(record) };
 }
@@ -363,7 +392,9 @@ function uploadTexture(renderer: Renderer, image: HTMLImageElement) {
 
 // Inspect the decoded independent image once, including historical snapshots.
 // Normalized coordinates also work for downsampled textures and folded branches.
-function textureContentRect(image: ImageBitmap | HTMLCanvasElement): Rect | null | undefined {
+function textureContentRect(image: ImageBitmap | HTMLCanvasElement, texturePixelBudget: number): Rect | null | undefined {
+  // ponytail: skip exact alpha scans above 256K pixels; retain the full View bounds to avoid main-thread stalls without cropping pixels.
+  if (!shouldScanTextureAlpha(image.width, image.height, texturePixelBudget)) return { left: 0, top: 0, width: 1, height: 1 };
   const canvas = image instanceof HTMLCanvasElement ? image : document.createElement("canvas");
   try {
     if (canvas !== image) {
@@ -416,7 +447,7 @@ function uploadLayerTexture(renderer: Renderer, src: string, image: ImageBitmap 
   gl.deleteTexture(renderer.layerTextures.get(src) ?? null);
   renderer.layerTextures.set(src, texture);
   renderer.layerTextureBytes.set(src, size.width * size.height * 4);
-  const content = textureContentRect(image);
+  const content = textureContentRect(image, maxPixels);
   if (content !== undefined) renderer.layerContentRects.set(src, content);
   renderer.sourcePlanes = null;
   return true;
@@ -668,6 +699,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
   const [groupImages, setGroupImages] = useState<ReadonlyMap<string, QmlGroupImage>>(() => new Map());
   const attemptedGroups = useRef(new Set<string>());
   const previousCollapsedGroups = useRef(new Set<string>());
+  const treeIndex = useMemo(() => indexLayerTree(root), [root]);
   const layout = useMemo(() => {
     if (!focusedNode) return buildLayerOverview(root, selectedNode, size, { maxLayers: 512, layerGap: camera.layerGap, expandedIds: expandedNodeIds });
     // Isolation is independent of selection, tree folding and manually hidden
@@ -686,10 +718,12 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
     && (record.node.attributes?.["inspection-source"] === "debug-qml" || root.attributes?.["tree-source"] === "debug-sdk")));
   const groupRequestKey = `${visibilityKey}|${collapsedRecords.map(record => record.id).join("|")}`;
   const shownGroupImages = collapsedRecords.map(record => groupImageFor(record, groupImages, hiddenNodeIds)).filter((image): image is QmlGroupImage => Boolean(image));
-  const textureRecords = [parent, ...records].filter((record): record is LayerRecord => Boolean(record && hasOwnVisualStyle(record, size, hiddenNodeIds, groupImages) && (record.isCollapsed || record.node.layerImageDataUrl)));
+  const textureRecords = useMemo(() => [parent, ...records].filter((record): record is LayerRecord => Boolean(record && hasOwnVisualStyle(record, size, hiddenNodeIds, groupImages) && (record.isCollapsed || record.node.layerImageDataUrl))), [groupImages, hiddenNodeIds, parent, records, size]);
+  const nativeLayerClips = useMemo(() => new Map(textureRecords.filter(record => !record.isCollapsed).map(record => [record.id, outlineAncestors(record, treeIndex)])), [textureRecords, treeIndex]);
+  const nativeTextureKeys = useMemo(() => new Map(textureRecords.filter(record => !record.isCollapsed).map(record => [record.id, outlineTextureKey(record, nativeLayerClips.get(record.id) ?? [])])), [textureRecords, nativeLayerClips]);
   const localCompositeCount = textureRecords.filter(record => record.isCollapsed && !groupImageFor(record, groupImages, hiddenNodeIds)).length;
   // Camera/hover changes don't change the required images or restart decoding.
-  const textureKey = `${visibilityKey}|${textureRecords.map((record) => `${record.id}:${record.isCollapsed ? collapsedTextureKey(record, visibilityKey, groupImageFor(record, groupImages, hiddenNodeIds)) : "own"}`).join("|")}`;
+  const textureKey = `${visibilityKey}|${textureRecords.map((record) => `${record.id}:${record.isCollapsed ? collapsedTextureKey(record, visibilityKey, groupImageFor(record, groupImages, hiddenNodeIds)) : nativeTextureKeys.get(record.id)}`).join("|")}`;
   const roles = useMemo(() => layerPlaneRoles(records, size, hiddenNodeIds, groupImages), [records, size, hiddenNodeIds, groupImages]);
   const selectedRecord = records.find((record) => record.isSelected) ?? (parent?.isSelected ? parent : null);
   const hoveredRecord = records.find((record) => record.id === hoveredId) ?? (parent?.id === hoveredId ? parent : null);
@@ -777,13 +811,13 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
     const planes: ScenePlane[] = [];
     if (parent) {
       const group = groupImageFor(parent, groupImages, hiddenNodeIds);
-      const visual = parentRole === "surface" ? visualFor(parent, size, visibilityKey, group) : null;
+      const visual = parentRole === "surface" ? visualFor(parent, size, visibilityKey, group, nativeTextureKeys.get(parent.id)) : null;
       planes.push({ id: `${parent.id}:parent`, node: parent.hitTestable ? parent.node : null, rect: scaledRect(parent, renderScale, renderOrigin), source: visual?.source ?? sourceRect(parent), textureSrc: visual?.textureSrc ?? null, textureSize: visual?.textureSize ?? size, z: parent.z * renderScale, kind: visual?.kind ?? "outline", opacity: parentRole === "surface" ? layerPlaneOpacity(parent.node, parent.isCollapsed, Boolean(group)) : 0.65, hitTestable: parent.hitTestable });
     }
     for (const record of records) {
       const role = roles.get(record.id) ?? "outline";
       const group = groupImageFor(record, groupImages, hiddenNodeIds);
-      const visual = role === "surface" ? visualFor(record, size, visibilityKey, group) : null;
+      const visual = role === "surface" ? visualFor(record, size, visibilityKey, group, nativeTextureKeys.get(record.id)) : null;
       planes.push({ id: record.id, node: record.node, rect: scaledRect(record, renderScale, renderOrigin), source: visual?.source ?? sourceRect(record), textureSrc: visual?.textureSrc ?? null, textureSize: visual?.textureSize ?? size, z: record.z * renderScale, kind: visual?.kind ?? "outline", opacity: role === "outline" ? (record.isCompact ? 0.42 : 0.78) : layerPlaneOpacity(record.node, record.isCollapsed, Boolean(group)), hitTestable: record.hitTestable });
     }
     for (const [record, kind] of [[selectedRecord, "selection"], [hoveredRecord?.isSelected ? null : hoveredRecord, "hover"]] as const) {
@@ -792,7 +826,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
       planes.push({ ...plane, id: `${record.id}:${kind}`, node: null, kind, opacity: 1, hitTestable: false });
     }
     return planes;
-  }, [hoveredRecord, parent, renderOrigin.left, renderOrigin.top, parentRole, records, renderScale, roles, selectedRecord, size, visibilityKey, groupImages, hiddenNodeIds]);
+  }, [hoveredRecord, parent, renderOrigin.left, renderOrigin.top, parentRole, records, renderScale, roles, selectedRecord, size, visibilityKey, groupImages, hiddenNodeIds, nativeTextureKeys]);
 
   const targetPresentation = useMemo(() => ({
     depths: new Map(scenePlanes.map(plane => [plane.id.replace(/:(parent|selection|hover)$/, ""), plane.z / renderScale])),
@@ -966,7 +1000,9 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
     if (!renderer) return;
     let alive = true;
     let repaint: number | null = null;
-    const wanted = new Map(textureRecords.map((record) => [record.isCollapsed ? collapsedTextureKey(record, visibilityKey, groupImageFor(record, groupImages, hiddenNodeIds)) : record.node.layerImageDataUrl!, record]));
+    const wanted = new Map(textureRecords.map((record) => [record.isCollapsed
+      ? collapsedTextureKey(record, visibilityKey, groupImageFor(record, groupImages, hiddenNodeIds))
+      : nativeTextureKeys.get(record.id) ?? record.node.layerImageDataUrl!, record]));
     const maxPixels = Math.min(2_000_000, Math.floor(MAX_LAYER_TEXTURE_PIXELS / Math.max(1, wanted.size)));
     setTextureWarning(null);
     for (const [key, texture] of renderer.layerTextures) {
@@ -983,7 +1019,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
       if (!alive) { image.close(); throw new Error("图层加载已取消"); }
       return image;
     };
-    // Decode serially: a folded branch may contain hundreds of full-size PNGs.
+    // Decode serially: a folded branch may contain hundreds of full-size layer images.
     void (async () => {
       for (const [key, record] of wanted) {
         if (!alive || rendererRef.current !== renderer) return;
@@ -994,6 +1030,12 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
           image = record.isCollapsed
             ? group ? await loadLayerImage(group.dataUrl) : await composeSubtreeImage(record.node, sourceRect(record), load, maxPixels, hiddenNodeIds)
             : await load(record.node);
+          if (!record.isCollapsed) {
+            const bitmap = image as ImageBitmap;
+            const clips = nativeLayerClips.get(record.id) ?? [];
+            try { image = clipLayerImageToOutlines(record.node, clips, bitmap); }
+            finally { if (image !== bitmap) bitmap.close(); }
+          }
           if (!alive || rendererRef.current !== renderer) return;
           if (!uploadLayerTexture(renderer, key, image, maxPixels)) throw new Error("图层纹理上传失败");
           if (repaint === null) repaint = requestAnimationFrame(() => { repaint = null; drawRef.current(); });
@@ -1013,7 +1055,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
       if (repaint === null) repaint = requestAnimationFrame(() => { repaint = null; drawRef.current(); });
     })();
     return () => { alive = false; if (repaint !== null) cancelAnimationFrame(repaint); };
-  }, [textureKey, rendererStatus, root, groupImages]);
+  }, [textureKey, rendererStatus, root, groupImages, nativeTextureKeys, nativeLayerClips]);
 
   function pickNode(clientX: number, clientY: number) {
     const canvas = canvasRef.current;

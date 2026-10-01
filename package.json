@@ -28,7 +28,7 @@
     "test:dpi": "node scripts/dpi-checks.mjs",
     "prepare:windows": "node scripts/prepare-windows-runtime.cjs",
     "diagnose:startup": "node scripts/startup-probe.mjs",
-    "smoke:app": "bun run build && node scripts/app-smoke.mjs",
+    "smoke:app": "bun run build && node --experimental-websocket scripts/app-smoke.mjs",
     "visual:baseline": "bun run build && bun scripts/visual-baseline.mjs",
     "visual:home": "bun run build && node scripts/home-visual-baseline.mjs",
     "visual:home:states": "bun run build && node scripts/home-state-visual-baseline.mjs",

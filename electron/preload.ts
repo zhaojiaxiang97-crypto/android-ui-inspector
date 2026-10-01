@@ -10,7 +10,7 @@ contextBridge.exposeInMainWorld("electronApi", {
     return () => ipcRenderer.removeListener("app-menu-action", listener);
   },
   probeAdb: () => ipcRenderer.invoke("probe-adb"),
-  inspectDevice: (serial: string, requestId: string) => ipcRenderer.invoke("inspect-device", serial, requestId),
+  inspectDevice: (serial: string, requestId: string, priorityViewRef?: string | null) => ipcRenderer.invoke("inspect-device", serial, requestId, priorityViewRef),
   captureGroup: (requestId: string, nodeId: string) => ipcRenderer.invoke("capture-group", requestId, nodeId),
   refreshViewNode: (requestId: string, nodeId: string, scope: "node" | "branch" = "node") => ipcRenderer.invoke("refresh-view-node", requestId, nodeId, scope),
   readViewStyle: (requestId: string, nodeId: string) => ipcRenderer.invoke("read-view-style", requestId, nodeId),

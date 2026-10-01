@@ -18,7 +18,7 @@ export type CapturedViewLayer = {
   y: number;
   width: number;
   height: number;
-  pngDataUrl: string | null;
+  imageDataUrl: string | null;
   viewRef?: string;
 };
 
@@ -153,6 +153,31 @@ function pngSize(data: Buffer) {
   return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
 }
 
+function webpSize(data: Buffer) {
+  if (data.length < 20 || data.toString("ascii", 0, 4) !== "RIFF" || data.toString("ascii", 8, 12) !== "WEBP"
+      || data.readUInt32LE(4) + 8 !== data.length) return null;
+  let offset = 12, size: { width: number; height: number } | null = null;
+  while (offset + 8 <= data.length) {
+    const kind = data.toString("ascii", offset, offset + 4), length = data.readUInt32LE(offset + 4), start = offset + 8, end = start + length;
+    if (end > data.length) return null;
+    if (kind === "VP8X" && length >= 10) size = { width: data.readUIntLE(start + 4, 3) + 1, height: data.readUIntLE(start + 7, 3) + 1 };
+    else if (kind === "VP8L" && length >= 5 && data[start] === 0x2f) {
+      size = { width: 1 + data[start + 1] + ((data[start + 2] & 0x3f) << 8), height: 1 + (data[start + 2] >> 6) + (data[start + 3] << 2) + ((data[start + 4] & 0x0f) << 10) };
+    } else if (kind === "VP8 " && length >= 10 && data[start + 3] === 0x9d && data[start + 4] === 0x01 && data[start + 5] === 0x2a) {
+      size = { width: data.readUInt16LE(start + 6) & 0x3fff, height: data.readUInt16LE(start + 8) & 0x3fff };
+    }
+    offset = end + (length & 1);
+  }
+  return offset === data.length && size?.width && size.height ? size : null;
+}
+
+function imageInfo(data: Buffer) {
+  const png = pngSize(data);
+  if (png) return { ...png, mime: "image/png" };
+  const webp = webpSize(data);
+  return webp ? { ...webp, mime: "image/webp" } : null;
+}
+
 export function parseCapturedViewLayers(data: Buffer): CapturedViewLayer[] {
   if (data.length < 9) return [];
   const layers: CapturedViewLayer[] = [];
@@ -180,13 +205,17 @@ export function parseCapturedViewLayers(data: Buffer): CapturedViewLayer[] {
       image = data.subarray(offset, offset + imageLength);
       offset += imageLength;
     }
-    const size = image ? pngSize(image) : null;
-    layers.push({ name, visible, x, y, width: size?.width ?? 0, height: size?.height ?? 0, pngDataUrl: size ? `data:image/png;base64,${image!.toString("base64")}` : null });
+    const info = image ? imageInfo(image) : null;
+    if (info?.mime === "image/webp") {
+      if (offset + 4 > data.length || crc32(image!) !== data.readUInt32BE(offset)) throw new Error("Debug View WebP 校验失败。");
+      offset += 4;
+    }
+    layers.push({ name, visible, x, y, width: info?.width ?? 0, height: info?.height ?? 0, imageDataUrl: info ? `data:${info.mime};base64,${image!.toString("base64")}` : null });
   }
   return layers;
 }
 
-/** Only publish complete PNG records while the SDK is still writing the file. */
+/** Only publish complete, checksum-verified image records while the SDK is writing the file. */
 export function parseCapturedViewLayerPrefix(data: Buffer, nonce?: string): CapturedViewLayer[] {
   if (data.length < 8 || !data.subarray(0, 8).equals(nonce ? Buffer.from(nonce, "hex") : Buffer.alloc(8))) return [];
   let offset = 8;
@@ -198,14 +227,18 @@ export function parseCapturedViewLayerPrefix(data: Buffer, nonce?: string): Capt
     if (imageLengthAt + 4 > data.length) break;
     if (data[offset + 3 + nameLength] !== 1) throw new Error("SDK 图层可见状态无效");
     const imageLength = data.readUInt32BE(imageLengthAt);
-    if (imageLength < 45 || imageLength > 10_000_000) throw new Error("SDK 图层图片长度无效");
+    if (imageLength < 12 || imageLength > 10_000_000) throw new Error("SDK 图层图片长度无效");
     const imageAt = imageLengthAt + 4;
     if (imageAt + imageLength > data.length) break;
-    const png = data.subarray(imageAt, imageAt + imageLength);
-    if (!validCompletePng(png)) throw new Error("SDK 图层 PNG 校验失败");
-    offset = imageAt + imageLength;
+    const image = data.subarray(imageAt, imageAt + imageLength);
+    const webp = Boolean(webpSize(image));
+    if (webp) {
+      if (imageAt + imageLength + 4 > data.length) break;
+      if (crc32(image) !== data.readUInt32BE(imageAt + imageLength)) throw new Error("SDK 图层 WebP 校验失败");
+    } else if (!validCompletePng(image)) throw new Error("SDK 图层图片校验失败");
+    offset = imageAt + imageLength + (webp ? 4 : 0);
   }
-  if (offset < data.length && data[offset] !== 1 && data[offset] !== 2) throw new Error("SDK 图层记录无效");
+    if (offset < data.length && data[offset] !== 1 && data[offset] !== 2) throw new Error("SDK 图层记录无效");
   return parseCapturedViewLayers(Buffer.concat([data.subarray(0, offset), Buffer.from([2])]));
 }
 
@@ -273,7 +306,7 @@ export async function captureViewLayers(port: number, options: { rootRefs: reado
     const batch = await requestChunk(socket, reader, sequence, "VURT", selected.request, (wait, read, size) => { waitMs = wait; readMs = read; bytes = size; });
     const parseStarted = performance.now();
     const layers = parseCapturedViewLayers(batch);
-    options.onBatchTiming?.({ waitMs, readMs, parseMs: performance.now() - parseStarted, bytes, layers: layers.length, images: layers.filter((layer) => Boolean(layer.pngDataUrl)).length });
+    options.onBatchTiming?.({ waitMs, readMs, parseMs: performance.now() - parseStarted, bytes, layers: layers.length, images: layers.filter((layer) => Boolean(layer.imageDataUrl)).length });
     return layers;
   } finally {
     socket.destroy();
@@ -291,7 +324,7 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
   const events: Buffer[] = [];
   const pinned = new Set<Buffer>();
   type Kind = "own" | "texture" | "surface";
-  const results = new Map<string, { width: number; height: number; pngDataUrl: string; kind: Kind; empty: boolean }>();
+  const results = new Map<string, { width: number; height: number; imageDataUrl: string; kind: Kind; empty: boolean }>();
   const failures = new Map<string, string>();
   const kinds = new Map<string, Kind>();
   const skipDraw = new Set<string>();
@@ -681,7 +714,7 @@ export async function captureViewBitmaps(port: number, target: { rootRef: string
         timing.compressMs += performance.now() - compressStarted;
         signal?.throwIfAborted();
         const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header), chunk("IDAT", compressed), chunk("IEND", Buffer.alloc(0))]);
-        results.set(view.ref, { width, height, pngDataUrl: `data:image/png;base64,${png.toString("base64")}`, kind, empty });
+        results.set(view.ref, { width, height, imageDataUrl: `data:image/png;base64,${png.toString("base64")}`, kind, empty });
       } catch (error) {
         signal?.throwIfAborted();
         if (socket.destroyed) throw error;

@@ -2,7 +2,7 @@
 
 这里包含 Debug SDK 和画面验证样例。SDK 提供真实 View 树、属性和独立图；接入 SDK 且至少 200 节点的页面默认尝试 `capture-visible`，DDMS/JDWP 保留兼容采集、局部刷新及缺图/特殊缓冲补采。样例通过 `debugImplementation` 引入 SDK；Release 使用无操作的 `ProbeRunner`，不包含 SDK。当前能力与下一步见 [Lookin 对齐计划](../docs/LOOKIN_ALIGNMENT_PLAN.md)。
 
-新版 SDK 的 `capture-visible` 可携带 16 位十六进制请求标识，写入私有临时文件头并回显；树中用 `visibleStreamVersion=1` 标明能力。桌面仅对匹配本轮标识、当前进程/窗口、对象及尺寸且 PNG 校验通过的完整记录提前预览，最多三批；最终仍核对完整文件 SHA-256。旧 SDK 不轮询，照原路径等整包。取消后不交付迟到批次。
+新版 SDK 的 `capture-visible` 可携带 16 位十六进制请求标识，写入私有临时文件头并回显。`visibleStreamVersion=1` 使用 PNG，`visibleStreamVersion=2`（Android 11/API 30+）使用无损 WebP；桌面仅对匹配本轮标识、当前进程/窗口、对象、尺寸及图片校验的完整记录提前预览，最多三批，最终仍核对完整文件 SHA-256。旧 SDK 不轮询，照原路径等整包；取消后不交付迟到批次。Android 11 以下继续 PNG 兼容路径。
 
 构建环境：JDK 17+、Gradle 9.6+、Android Platform 36 与 Build Tools 36。SDK 可集成到最低 Android 5 的 Debug App，但自身图仅对 Android 8+ 开放；目前只在 Android 14 真机验过。取得许可并安装官方 SDK 后，可在本目录执行：
 
@@ -16,7 +16,7 @@ gradle :sample-app:assembleDebug :sample-app:assembleRelease
 
 Debug Provider 除 `capture` 树外，还可按 `ref` 调用 `capture-own`；返回尺寸、进程实例和 PNG 的 SHA-256，图片放在 App 私有 `no_backup/inspector-own-image.png`。请求只接受 shell UID、`android.permission.DUMP` 和可调试包。未知对象返回错误，不会把整组图冒充自身图。此入口尚未接入桌面 UI；其他系统版本、自绘类型和性能仍需单独验证。
 
-在线混合快照收起父层时可按需调用 `capture-group(ref)`，在 App 内用 `View.draw` 取得整组图。桌面在抓取前后核对进程、窗口、对象、分支结构与尺寸，并核对 PNG 摘要；失败或分支含 SurfaceView/TextureView 时沿用本地合成图，展开仍只显示各层自身图。`View.draw` 不保留圆角轮廓裁剪，因此新版 SDK 遇到非完整矩形轮廓会拒绝失真整组图；可读圆角用独立图在本机裁剪合成，自定义路径无法读取时只提示，不伪造画面。运行 `adb shell am start -S -n com.androiduiinspector.sample/.MainActivity --es mode visual` 后可用 `adb exec-out run-as com.androiduiinspector.sample cat files/isolation-probe/visual-result.json | jq -e '.visualPassed == true'` 复验。Android 14 样例与本机像素回归已通过；业务 App 已升级 SDK，但当前首页没有可验的圆角父层，仍需在合适页面复验。
+在线混合快照收起父层时可按需调用 `capture-group(ref)`，在 App 内用 `View.draw` 取得整组图。桌面在抓取前后核对进程、窗口、对象、分支结构与尺寸，并核对 PNG 摘要；失败或分支含 SurfaceView/TextureView 时沿用本地合成图。3D 展开仍只显示每层自身图；SDK 给出完整 `clipToOutline` 时，桌面按原始坐标为子图套用自身和祖先的圆角遮罩。`View.draw` 不保留圆角轮廓裁剪，因此遇到非完整矩形轮廓会拒绝失真整组图；可读轮廓用独立图在本机合成，未知自定义路径只显示边框。运行 `adb shell am start -S -n com.androiduiinspector.sample/.MainActivity --es mode visual` 后可用 `adb exec-out run-as com.androiduiinspector.sample cat files/isolation-probe/visual-result.json | jq -e '.visualPassed == true'` 复验。Android 14 样例嵌套圆角像素回归与 3D 真机冒烟已通过；业务 App 当前首页没有可验的圆角父层，仍需在合适页面复验。
 
 实验入口 `capture-own-batch` 一次接受逗号分隔的 1–10 个 `ref`，仅抓每个控件自身、单张最多 100 万像素、整批最多 200 万像素、每张最多 1 MB PNG，批处理预算 5 秒（单张等待超时可能使最终返回略晚）。图片及带 SHA-256 的清单位于私有 `no_backup/inspector-own-batch-*.png` 和 `inspector-own-batch.json`；读取者必须核对返回的清单摘要、进程实例、页面根节点、每张图片摘要与尺寸，并自行验证前台窗口。Android 14 样例同 10 个小文字控件的批量图与逐张图完全一致，三轮约 2.3–2.4 秒，逐张约 13.0 秒。运行样例回归：先用 `adb shell am start -n com.androiduiinspector.sample/.MainActivity --es mode stress` 打开页面，再执行 `bun scripts/sdk-batch-probe.ts DEVICE_SERIAL`。此接口尚未接入桌面默认采集，不能代替全量采集。
 
@@ -30,7 +30,7 @@ SDK 还按实际 Java 父类返回去重的类继承表；属性栏仅在查看�
 
 交互卡读取 View 的可长按、上下文点击、标准点击监听器、按下与激活标志。动态样例已验证长按和标准点击监听器可分别识别；未安装标准监听器不代表控件或子项不能响应自定义手势。旧 SDK 无此数据时不会显示该卡。
 
-原生布局规则目前只读取系统 `FrameLayout.LayoutParams.gravity` 与 `LinearLayout.LayoutParams.gravity/weight`。样例真机已验证居中、右下及非零权重；其他布局不按控件位置猜测约束。
+原生布局规则读取系统 `FrameLayout.LayoutParams.gravity`、`LinearLayout.LayoutParams.gravity/weight`、`RelativeLayout.LayoutParams` 的相对/父容器对齐规则，以及 ConstraintLayout `LayoutParams` 的锚点、偏置、环绕和宽高比。ConstraintLayout 通过读取其公开布局参数字段，不增加 SDK 对 ConstraintLayout 的编译依赖。Android 14 样例已验证 gravity/weight；业务 Debug App 的 1211 节点真机快照已与独立 Debug View 树严格匹配，358 个 RelativeLayout/ConstraintLayout 规则节点全量通过桥接，并在新版桌面属性栏截图确认两类规则可见。其他布局不按控件位置猜测约束。
 
 新版 Debug SDK 的 `capture-style(ref)` 只按需读取一个控件的背景 Drawable 类型、可确定的纯色源色，以及 TextView 当前文字色和 px 字号；桌面属性栏点击“读取实时样式”后才调用。Android 14 样例已验纯色父层和文字层。渐变、自绘或 tint 不推断最终显示色；业务 App 需重新构建并接入新版 SDK 才能使用。
 

@@ -1,7 +1,7 @@
 import type { UiNode, UiSnapshot } from "../shared/types";
 
 type RecordValue = Record<string, unknown>;
-const MAX_POSITION_DRIFT_PX = 8;
+export const MAX_POSITION_DRIFT_PX = 8;
 
 function record(value: unknown): value is RecordValue {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -26,6 +26,58 @@ function boolean(value: unknown, label: string): boolean {
 function number(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`SDK ${label} 无效`);
   return value;
+}
+
+const relativeRuleNames = new Set([
+  "leftOf", "rightOf", "above", "below", "alignBaseline", "alignLeft", "alignTop", "alignRight", "alignBottom",
+  "alignParentLeft", "alignParentTop", "alignParentRight", "alignParentBottom", "centerInParent", "centerHorizontal",
+  "centerVertical", "startOf", "endOf", "alignStart", "alignEnd", "alignParentStart", "alignParentEnd",
+]);
+const relativeBooleanRules = new Set([
+  "alignParentLeft", "alignParentTop", "alignParentRight", "alignParentBottom", "alignParentStart", "alignParentEnd",
+  "centerInParent", "centerHorizontal", "centerVertical",
+]);
+const constraintRuleNames = new Set([
+  "leftToLeft", "leftToRight", "rightToLeft", "rightToRight", "startToStart", "startToEnd", "endToStart", "endToEnd",
+  "topToTop", "topToBottom", "bottomToTop", "bottomToBottom", "baselineToBaseline", "baselineToTop", "baselineToBottom",
+  "circleConstraint", "horizontalBias", "verticalBias", "circleRadius", "circleAngle", "dimensionRatio",
+]);
+const constraintTargetRules = new Set([
+  "leftToLeft", "leftToRight", "rightToLeft", "rightToRight", "startToStart", "startToEnd", "endToStart", "endToEnd",
+  "topToTop", "topToBottom", "bottomToTop", "bottomToBottom", "baselineToBaseline", "baselineToTop", "baselineToBottom",
+  "circleConstraint",
+]);
+
+function sdkLayoutRules(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (!record(value) || (value.type !== "RelativeLayout" && value.type !== "ConstraintLayout") || !record(value.rules))
+    throw new Error("SDK 原生布局规则无效");
+  const names = value.type === "RelativeLayout" ? relativeRuleNames : constraintRuleNames;
+  const entries = Object.entries(value.rules);
+  if (!entries.length || entries.length > 24) throw new Error("SDK 原生布局规则数量无效");
+  const rules: Record<string, string | boolean> = {};
+  for (const [name, raw] of entries) {
+    if (!names.has(name)) throw new Error(`SDK 布局规则不支持：${name}`);
+    if (value.type === "RelativeLayout" && relativeBooleanRules.has(name)) {
+      if (typeof raw !== "boolean") throw new Error(`SDK RelativeLayout 规则无效：${name}`);
+      rules[name] = raw;
+      continue;
+    }
+    if (typeof raw !== "string" || raw.length > 256) throw new Error(`SDK 布局规则无效：${name}`);
+    if ((value.type === "RelativeLayout" || constraintTargetRules.has(name))
+        && !/^(?:parent|[\w.]+:id\/[\w.]+|id\/0x[a-f\d]+)$/i.test(raw))
+      throw new Error(`SDK 布局目标无效：${name}`);
+    if (["horizontalBias", "verticalBias", "circleRadius", "circleAngle"].includes(name)) {
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed) || Math.abs(parsed) > 100_000
+          || (name.endsWith("Bias") && (parsed < 0 || parsed > 1)) || (name === "circleRadius" && parsed < 0))
+        throw new Error(`SDK 布局数值无效：${name}`);
+    }
+    if (name === "dimensionRatio" && !/^(?:[WH],)?\d+(?:\.\d+)?(?::\d+(?:\.\d+)?)?$/.test(raw))
+      throw new Error("SDK ConstraintLayout 宽高比无效");
+    rules[name] = raw;
+  }
+  return JSON.stringify({ type: value.type, rules });
 }
 
 /** Fail closed: no SDK property or old bitmap is used unless the full trees match. */
@@ -73,6 +125,8 @@ export function joinSdkTreeAndDebugImages(snapshot: UiSnapshot, sdkValue: unknow
       "sdk-elevation": String(number(source.elevation, "高度")),
       "sdk-process-instance": sdkValue.processInstance as string,
     };
+    const layoutRules = sdkLayoutRules(source.layoutRules);
+    if (layoutRules && source.layoutParamsClass === undefined) throw new Error("SDK 原生布局规则缺少 LayoutParams");
     if (record(classHierarchy)) {
       const ancestors = classHierarchy[className];
       if (!Array.isArray(ancestors) || ancestors.length < 1 || ancestors.length > 24
@@ -117,6 +171,7 @@ export function joinSdkTreeAndDebugImages(snapshot: UiSnapshot, sdkValue: unknow
       if (!marginKeys.every(key => source[key] !== undefined) || source.layoutParamsClass === undefined) throw new Error("SDK margin 不完整");
       for (const key of marginKeys) properties[`sdk-${key}`] = String(integer(source[key], key));
     }
+    if (layoutRules) properties["sdk-layout-rules"] = layoutRules;
     return {
       ...old, className,
       text: source.text === undefined ? old.text : string(source.text, "文本"),

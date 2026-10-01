@@ -13,7 +13,7 @@ import { inspectQmlHierarchy, type QmlDebugNode, type QmlGrab } from "./qml-debu
 import { captureViewLayers, captureViewBitmaps, matchesViewRoot, parseCapturedViewLayers, parseCapturedViewLayerPrefix, type CapturedViewLayer } from "./view-debug";
 import { qmlColorCss, qmlStyleSvg } from "../shared/qml-style";
 import { textureDimensions } from "../shared/layer-textures";
-import { joinSdkTreeAndDebugImages, sdkGroupBranchMatches, verifySdkTreeBeforeImages } from "./sdk-hybrid";
+import { joinSdkTreeAndDebugImages, MAX_POSITION_DRIFT_PX, sdkGroupBranchMatches, verifySdkTreeBeforeImages } from "./sdk-hybrid";
 
 const COMMAND_TIMEOUT_MS = 30_000;
 const APP_READY_TIMEOUT_MS = 18_000;
@@ -24,7 +24,7 @@ const IMAGE_TIMEOUT_MS = 90_000;
 const STARTUP_RETRY_TIMEOUT_MS = 45_000;
 const MAX_UI_HIERARCHY_DEPTH = 200;
 const QML_DEBUG_PORT = 3768;
-type InspectionOptions = { signal?: AbortSignal; onProgress?: (stage: string, elapsedMs: number) => void; onPreview?: (phase: "tree" | "layers", snapshot: UiSnapshot) => void; onViewTreeReady?: (packageName: string, root: UiNode) => Promise<void>; expectedPackage?: string; pinFirstComponent?: string | null; startupRetry?: boolean; allowAppRestart?: boolean; preferVisibleSdk?: boolean };
+type InspectionOptions = { signal?: AbortSignal; onProgress?: (stage: string, elapsedMs: number) => void; onPreview?: (phase: "tree" | "layers", snapshot: UiSnapshot) => void; onViewTreeReady?: (packageName: string, root: UiNode) => Promise<void>; expectedPackage?: string; pinFirstComponent?: string | null; startupRetry?: boolean; allowAppRestart?: boolean; preferVisibleSdk?: boolean; priorityViewRef?: string };
 // Task-local cancellation also covers nested ADB commands, without affecting probes.
 const inspectionContext = new AsyncLocalStorage<InspectionOptions>();
 
@@ -469,13 +469,13 @@ export function attachViewLayerImages(root: UiNode, layers: readonly CapturedVie
   }
   const counts = new Map<string, number>();
   for (const layer of layers) {
-    if (!layer.visible || !layer.pngDataUrl || layer.width < 1 || layer.height < 1) continue;
+    if (!layer.visible || !layer.imageDataUrl || layer.width < 1 || layer.height < 1) continue;
     const id = key(layer.viewRef ?? layer.name, layer.x + windowOrigin.x, layer.y + windowOrigin.y, layer.width, layer.height);
     counts.set(id, (counts.get(id) ?? 0) + 1);
   }
   let attached = 0;
   for (const layer of layers) {
-    if (!layer.visible || !layer.pngDataUrl || layer.width < 1 || layer.height < 1) continue;
+    if (!layer.visible || !layer.imageDataUrl || layer.width < 1 || layer.height < 1) continue;
     const id = key(layer.viewRef ?? layer.name, layer.x + windowOrigin.x, layer.y + windowOrigin.y, layer.width, layer.height);
     const matches = candidates.get(id) ?? [];
     if (matches.length !== 1 || counts.get(id) !== 1) {
@@ -484,7 +484,7 @@ export function attachViewLayerImages(root: UiNode, layers: readonly CapturedVie
     }
     const node = matches[0];
     if (node.layerImageStatus === "captured") continue;
-    node.layerImageDataUrl = layer.pngDataUrl;
+    node.layerImageDataUrl = layer.imageDataUrl;
     node.layerImageSize = { width: layer.width, height: layer.height };
     node.layerImageStatus = "captured";
     attached += 1;
@@ -497,14 +497,14 @@ export function attachViewLayerImages(root: UiNode, layers: readonly CapturedVie
     return keys;
   };
   for (const layer of layers) {
-    if (!layer.visible || !layer.pngDataUrl || layer.width < 1 || layer.height < 1) continue;
+    if (!layer.visible || !layer.imageDataUrl || layer.width < 1 || layer.height < 1) continue;
     const name = layer.viewRef ?? layer.name, x = layer.x + windowOrigin.x, y = layer.y + windowOrigin.y;
     if (candidates.has(key(name, x, y, layer.width, layer.height))) continue;
     const matches = [...new Set(nearbyKeys(name, x, y, layer.width, layer.height).flatMap((id) => candidates.get(id) ?? []))];
     if (matches.length !== 1 || matches[0].layerImageStatus !== "unavailable") continue;
     const node = matches[0], bounds = node.bounds!;
     if (nearbyKeys(name, bounds.left, bounds.top, layer.width, layer.height).reduce((sum, id) => sum + (counts.get(id) ?? 0), 0) !== 1) continue;
-    node.layerImageDataUrl = layer.pngDataUrl;
+    node.layerImageDataUrl = layer.imageDataUrl;
     node.layerImageSize = { width: layer.width, height: layer.height };
     node.layerImageStatus = "captured";
     attached += 1;
@@ -549,7 +549,10 @@ async function captureSdkVisibleLayers(adbPath: string, serial: string, packageN
   try {
     const callStarted = performance.now();
     const nonce = randomUUID().replace(/-/g, "").slice(0, 16);
-    const request = runCommand(adbPath, ["-s", serial, "shell", "content", "call", "--uri", `content://${packageName}.inspector`, "--method", "capture-visible", "--arg", nonce], 65_000)
+    const command = ["-s", serial, "shell", "content", "call", "--uri", `content://${packageName}.inspector`, "--method", "capture-visible", "--arg", nonce];
+    const priorityViewRef = inspectionContext.getStore()?.priorityViewRef;
+    if (priorityViewRef) command.push("--extra", `priorityViewRef:s:${priorityViewRef}`);
+    const request = runCommand(adbPath, command, 65_000)
       .then((reply) => ({ reply, error: null as unknown }), (error: unknown) => ({ reply: null, error }));
     let partialCount = 0, previews = 0, polls = 0;
     while (onPartial && previews < 3 && polls++ < 12) {
@@ -600,7 +603,7 @@ async function captureSdkVisibleLayers(adbPath: string, serial: string, packageN
     const readMs = Math.round(performance.now() - readStarted);
     if (file.code !== 0 || file.stdout.length !== bytes || createHash("sha256").update(file.stdout).digest("hex") !== sha256) throw new Error("SDK 可见层文件校验失败");
     const layers = parseCapturedViewLayers(file.stdout);
-    if (layers.length !== count || !layers.every((layer) => layer.visible && layer.pngDataUrl && layer.name.includes("@"))) throw new Error("SDK 可见层记录不完整");
+    if (layers.length !== count || !layers.every((layer) => layer.visible && layer.imageDataUrl && layer.name.includes("@"))) throw new Error("SDK 可见层记录不完整");
     const { matched, moved, unmatched, refs } = matchSdkVisibleLayers(root, layers);
     if ([...specialRefs].some((ref) => !refs.has(ref))) throw new Error("SDK 特殊画面控件与当前控件树不一致");
     if ([...pureRefs].some((ref) => !refs.has(ref) || specialRefs.has(ref))) throw new Error("SDK 纯布局控件与当前控件树不一致");
@@ -657,7 +660,7 @@ async function captureDebugViewImages(adbPath: string, serial: string, packageNa
     if (useVisibleSdk()) {
       try {
         const started = performance.now();
-        const visible = await captureSdkVisibleLayers(adbPath, serial, packageName, root, preview && root.attributes?.["sdk-visible-stream"] === "1" ? async (partial) => {
+        const visible = await captureSdkVisibleLayers(adbPath, serial, packageName, root, preview && ["1", "2"].includes(root.attributes?.["sdk-visible-stream"] ?? "") ? async (partial) => {
           attachViewLayerImages(root, partial);
           await preview("layers");
         } : undefined);
@@ -667,7 +670,7 @@ async function captureDebugViewImages(adbPath: string, serial: string, packageNa
         if (timings) Object.assign(timings, {
           "SDK 可见层图": Math.round(performance.now() - started),
           "SDK 设备绘制": visible.timing.renderMs,
-          "SDK PNG 编码": visible.timing.encodeMs,
+          "SDK 图像编码": visible.timing.encodeMs,
           "SDK 设备总耗时": visible.timing.durationMs,
           "SDK 调用往返": visible.timing.callMs,
           "SDK 文件读取": visible.timing.readMs,
@@ -740,7 +743,7 @@ async function captureDebugViewImages(adbPath: string, serial: string, packageNa
             continue;
           }
           if (node.layerImageStatus !== "captured") count++;
-          node.layerImageDataUrl = image.pngDataUrl;
+          node.layerImageDataUrl = image.imageDataUrl;
           node.layerImageSize = { width: image.width, height: image.height };
           node.layerImageStatus = "captured";
           node.layerImageEmpty = image.empty;
@@ -1225,7 +1228,7 @@ export function captureViewNodes(serial: string, snapshot: UiSnapshot, nodeId: s
           delete attributes["image-refresh-error"];
           if (image && sizeMatches) {
             node.layerImageStatus = "captured";
-            node.layerImageDataUrl = image.pngDataUrl;
+            node.layerImageDataUrl = image.imageDataUrl;
             node.layerImageSize = { width: image.width, height: image.height };
             node.layerImageEmpty = image.empty;
             attributes["image-source"] = kind === "surface" ? "SurfaceView / OpenGL 独立缓冲层" : kind === "texture" ? "TextureView 自身缓冲区" : "按对象身份独立采集，不含子节点";
@@ -1285,7 +1288,7 @@ export function captureViewNodes(serial: string, snapshot: UiSnapshot, nodeId: s
           ...original, bounds: latest.bounds, text: latest.text, contentDesc: latest.contentDesc, clickable: latest.clickable,
           enabled: latest.enabled, focusable: latest.focusable, focused: latest.focused,
           selected: latest.selected, scrollable: latest.scrollable, attributes,
-          layerImageStatus: image ? "captured" : "unavailable", layerImageDataUrl: image?.pngDataUrl,
+          layerImageStatus: image ? "captured" : "unavailable", layerImageDataUrl: image?.imageDataUrl,
           layerImageSize: image ? { width: image.width, height: image.height } : undefined,
           layerImageEmpty: image?.empty, children: [], // The renderer keeps the original subtree.
         });
@@ -1316,7 +1319,8 @@ export function parseViewStyleReply(output: string, ref: string, rootRef: string
     if (!raw || !/^-?\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw new Error("样式数据中的控件尺寸无效。");
     return Number(raw);
   };
-  if (coordinate("x") !== bounds.left || coordinate("y") !== bounds.top
+  if (Math.abs(coordinate("x") - bounds.left) > MAX_POSITION_DRIFT_PX
+      || Math.abs(coordinate("y") - bounds.top) > MAX_POSITION_DRIFT_PX
       || coordinate("width") !== bounds.right - bounds.left || coordinate("height") !== bounds.bottom - bounds.top)
     throw new Error("控件位置或尺寸已变化，请刷新控件后再读取样式。");
   const capturedAtMillis = coordinate("capturedAtMillis");
@@ -1578,8 +1582,8 @@ export function inspectPreferredDevice(serial: string, options: InspectionOption
         const tree = await readSdkCapture(adbPath, serial, packageName);
         const after = await checkedDebugTarget(adbPath, serial, packageName);
         if (before.component !== after.component || before.windowId !== after.windowId || pid !== await singleAppPid(adbPath, serial, packageName)) throw new Error("进程或窗口已变化");
-        if (tree && typeof tree === "object" && "visibleStreamVersion" in tree && tree.visibleStreamVersion === 1) {
-          root.attributes = { ...root.attributes, "sdk-visible-stream": "1" };
+        if (tree && typeof tree === "object" && "visibleStreamVersion" in tree && (tree.visibleStreamVersion === 1 || tree.visibleStreamVersion === 2)) {
+          root.attributes = { ...root.attributes, "sdk-visible-stream": String(tree.visibleStreamVersion) };
         }
         try {
           verifySdkTreeBeforeImages(root, countNodes(root), tree, packageName, pid);

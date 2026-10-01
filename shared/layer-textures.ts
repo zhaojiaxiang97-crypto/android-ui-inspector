@@ -1,5 +1,53 @@
 import type { UiNode } from "./types";
 
+const MAX_TEXTURE_ALPHA_SCAN_PIXELS = 262_144;
+
+export function shouldScanTextureAlpha(width: number, height: number, texturePixelBudget: number) {
+  return Number.isSafeInteger(width) && Number.isSafeInteger(height) && width > 0 && height > 0
+    && Number.isSafeInteger(texturePixelBudget) && texturePixelBudget > 0
+    && width * height <= Math.min(MAX_TEXTURE_ALPHA_SCAN_PIXELS, texturePixelBudget);
+}
+
+export function clipLayerImageToOutlines(node: UiNode, clipNodes: readonly UiNode[], image: ImageBitmap | HTMLCanvasElement) {
+  const bounds = node.bounds;
+  if (!bounds || bounds.right <= bounds.left || bounds.bottom <= bounds.top || image.width < 1 || image.height < 1)
+    throw new Error("图层轮廓裁剪缺少有效尺寸，已隐藏不准确的画面。");
+  const scaleX = image.width / (bounds.right - bounds.left), scaleY = image.height / (bounds.bottom - bounds.top);
+  const paths: Array<{ left: number; top: number; right: number; bottom: number; radius: number }> = [];
+  for (const clipNode of clipNodes) {
+    const parent = clipNode.bounds;
+    const [left, top, right, bottom, radius] = ["Left", "Top", "Right", "Bottom", "Radius"]
+      .map(key => Number(clipNode.attributes?.[`sdk-outline${key}`]));
+    if (!parent || ![parent.left, parent.top, parent.right, parent.bottom, left, top, right, bottom, radius].every(Number.isFinite)
+        || parent.right <= parent.left || parent.bottom <= parent.top || right <= left || bottom <= top || radius < 0)
+      throw new Error("该控件使用暂不支持的自定义轮廓裁剪，已隐藏不准确的画面。");
+    const path = {
+      left: (parent.left + left - bounds.left) * scaleX,
+      top: (parent.top + top - bounds.top) * scaleY,
+      right: (parent.left + right - bounds.left) * scaleX,
+      bottom: (parent.top + bottom - bounds.top) * scaleY,
+      radius: Math.min(radius * scaleX, radius * scaleY),
+    };
+    // Screen-sized rectangular outlines already match the render bounds; avoid
+    // allocating a copied texture for this common root View.
+    if (path.radius === 0 && path.left <= 0 && path.top <= 0 && path.right >= image.width && path.bottom >= image.height) continue;
+    paths.push(path);
+  }
+  if (!paths.length) return image;
+  const canvas = document.createElement("canvas");
+  canvas.width = image.width;
+  canvas.height = image.height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("无法建立图层轮廓裁剪画布。");
+  for (const path of paths) {
+    context.beginPath();
+    context.roundRect(path.left, path.top, path.right - path.left, path.bottom - path.top, path.radius);
+    context.clip();
+  }
+  context.drawImage(image, 0, 0);
+  return canvas;
+}
+
 export function layerPlaneOpacity(node: Pick<UiNode, "attributes">, collapsed: boolean, hasGroupImage: boolean) {
   // Qt grabToImage omits the captured item's own opacity; a locally composed subtree already includes it.
   if (collapsed && !hasGroupImage) return 1;
