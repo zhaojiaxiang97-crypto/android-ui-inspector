@@ -12,6 +12,7 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 public final class MainActivity extends Activity {
@@ -21,6 +22,7 @@ public final class MainActivity extends Activity {
     private FrameLayout visualStage;
     private boolean captured;
     private boolean changed;
+    private boolean listAdded;
     private int branchStep;
 
     @Override public void onCreate(Bundle savedInstanceState) {
@@ -92,6 +94,41 @@ public final class MainActivity extends Activity {
                     testParent.addView(testText);
                 }
             });
+        } else if ("list".equals(mode)) {
+            // 列表级结构变化场景：24 个条目（每个条目含 4 个控件、共约 96 个可见控件 → 触发多批 ≤64 装箱）、
+            // 条目大部分在视口外；点击「条目 0」在顶部插入 2 个新条目——供 scope="list" 可见项分批刷新端到端验证。
+            testParent.setVisibility(View.GONE);
+            ScrollView scroll = new ScrollView(this);
+            LinearLayout list = new LinearLayout(this);
+            list.setOrientation(LinearLayout.VERTICAL);
+            ProbeRunner.label(list, "样例列表容器");
+            for (int i = 0; i < 24; i++) {
+                LinearLayout item = new LinearLayout(this);
+                item.setOrientation(LinearLayout.VERTICAL);
+                item.setBackgroundColor(i % 2 == 0 ? Color.rgb(235, 240, 250) : Color.rgb(250, 245, 235));
+                item.addView(cell("条目 " + i, 16), new LinearLayout.LayoutParams(-1, dp(56)));
+                item.addView(cell("说明 " + i, 12), new LinearLayout.LayoutParams(-1, dp(40)));
+                item.addView(cell("#" + i, 10), new LinearLayout.LayoutParams(-1, dp(24)));
+                list.addView(item, new LinearLayout.LayoutParams(-1, dp(120)));
+                if (i == 5) item.setVisibility(View.INVISIBLE); // 进树但 visible=false：验证「非视口条目 → out-of-viewport 标注 + 保留旧图」分支
+                if (i == 0) {
+                    item.setOnClickListener(view -> {
+                        if (listAdded) return; // 幂等：探针重复点击（事件被吞时重试）不重复插入
+                        listAdded = true;
+                        for (String name : new String[]{"新增条目 A", "新增条目 B"}) {
+                            LinearLayout added = new LinearLayout(this);
+                            added.setOrientation(LinearLayout.VERTICAL);
+                            added.setBackgroundColor(Color.rgb(220, 255, 220));
+                            added.addView(cell(name, 16), new LinearLayout.LayoutParams(-1, dp(56)));
+                            added.addView(cell(name + " · 说明", 12), new LinearLayout.LayoutParams(-1, dp(40)));
+                            added.addView(cell("#新", 10), new LinearLayout.LayoutParams(-1, dp(24)));
+                            list.addView(added, 0, new LinearLayout.LayoutParams(-1, dp(120)));
+                        }
+                    });
+                }
+            }
+            scroll.addView(list);
+            page.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
         } else if ("resize".equals(mode)) {
             testText.setOnClickListener(view -> {
                 if (changed) return;
@@ -160,6 +197,14 @@ public final class MainActivity extends Activity {
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private TextView cell(String text, int sizeSp) {
+        TextView cell = new TextView(this);
+        cell.setText(text);
+        cell.setTextSize(sizeSp);
+        cell.setGravity(Gravity.CENTER);
+        return cell;
     }
 
     private static final class DecoratedParent extends FrameLayout {

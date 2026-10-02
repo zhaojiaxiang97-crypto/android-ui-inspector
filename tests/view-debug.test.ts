@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:net";
 import { crc32, deflateSync, inflateSync } from "node:zlib";
-import { applyViewProperties, attachViewLayerImages, captureSignal, debugViewTree, hasActivityHierarchy, matchSdkVisibleLayers, nativeViewBranchContextMatches, nativeViewBranchMatches, nativeViewNodeMatches, needsViewBitmapFallback, parsePureViewRefs, parseViewStyleReply } from "../electron/adb";
+import { applyViewProperties, attachViewLayerImages, captureSignal, debugViewTree, hasActivityHierarchy, isTransientTreeReadError, matchSdkVisibleLayers, nativeViewBranchContextMatches, nativeViewBranchMatches, nativeViewNodeMatches, needsViewBitmapFallback, parsePureViewRefs, parseViewStyleReply, partitionViewItems, shouldReclaimSession } from "../electron/adb";
 import { captureViewBitmaps, captureViewLayers, matchesViewRoot, parseCapturedViewLayers, parseCapturedViewLayerPrefix } from "../electron/view-debug";
 import { inspectQmlHierarchy } from "../electron/qml-debug";
 import { makeNode } from "../benchmarks/fixtures";
@@ -999,4 +999,43 @@ test("next debugger handshake survives an earlier canceled layer capture", { tim
     const address = server.address(); assert.ok(address && typeof address !== "string");
     await assert.rejects(captureViewLayers(address.port, { rootRefs: ["DecorView@a"], onHierarchy: () => undefined, signal: AbortSignal.timeout(8_000) }), /窗口与当前控件树不一致/);
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
+
+test("分支刷新的瞬态读树失败可判定为可重试，身份变化类不重试", () => {
+  assert.equal(isTransientTreeReadError("Debug V2 控件属性不完整或格式无效。"), true);
+  assert.equal(isTransientTreeReadError("Debug View 返回内容为空。"), true);
+  assert.equal(isTransientTreeReadError("Debug View 返回了无效数据。"), true);
+  assert.equal(isTransientTreeReadError("无法从 Debug App 读取 View Hierarchy。"), true);
+  assert.equal(isTransientTreeReadError("控件身份、位置或层级已变化，请重新采集整页。"), false, "身份漂移绝不能靠重读掩盖");
+  assert.equal(isTransientTreeReadError("分支在刷新期间变化，请重试。"), false);
+  assert.equal(isTransientTreeReadError("目标 App、进程或窗口已变化，请重新采集整页。"), false);
+  assert.equal(isTransientTreeReadError(""), false);
+});
+
+test("可见项分批：以条目为单位装箱、单批不超上限、单条超限进 oversized", () => {
+  const a = partitionViewItems([10, 20, 30, 40], 64);
+  assert.deepEqual(a.batches, [[0, 1, 2], [3]]);
+  assert.deepEqual(a.oversized, []);
+  const b = partitionViewItems([5, 70, 5], 64);
+  assert.deepEqual(b.batches, [[0], [2]]);
+  assert.deepEqual(b.oversized, [1]);
+  const c = partitionViewItems([64, 1], 64);
+  assert.deepEqual(c.batches, [[0], [1]]);
+  const d = partitionViewItems([], 64);
+  assert.deepEqual(d.batches, []);
+  assert.deepEqual(d.oversized, []);
+  const e = partitionViewItems([1, 2, 3], 1);
+  assert.deepEqual(e.batches, [[0]]);
+  assert.deepEqual(e.oversized, [1, 2]); // 超过上限的条目跳过并记录，不单条成批
+  assert.throws(() => partitionViewItems([1], 0), /分批上限无效/);
+  assert.throws(() => partitionViewItems([-1], 64), /条目可见控件数无效/);
+});
+
+test("会话空闲回收判定：在飞请求不回收、达到阈值即回收、禁用不回收", () => {
+  assert.equal(shouldReclaimSession({ idleMs: 300_000, now: 10_000, lastUsedAt: 0, pendingCount: 1 }), false, "在飞请求保护");
+  assert.equal(shouldReclaimSession({ idleMs: 300_000, now: 299_999, lastUsedAt: 0, pendingCount: 0 }), false, "未到阈值");
+  assert.equal(shouldReclaimSession({ idleMs: 300_000, now: 300_000, lastUsedAt: 0, pendingCount: 0 }), true, "达到阈值（含边界）");
+  assert.equal(shouldReclaimSession({ idleMs: 300_000, now: 300_100, lastUsedAt: 100, pendingCount: 0 }), true, "按最近一次使用计时");
+  assert.equal(shouldReclaimSession({ idleMs: 0, now: 10_000_000, lastUsedAt: 0, pendingCount: 0 }), false, "禁用");
+  assert.equal(shouldReclaimSession({ idleMs: -5, now: 10_000_000, lastUsedAt: 0, pendingCount: 0 }), false, "非法值按禁用处理");
 });

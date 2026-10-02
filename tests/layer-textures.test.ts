@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { layerPlaneOpacity, shouldScanTextureAlpha, subtreeImageNodes, textureDimensions } from "../shared/layer-textures";
+import { alphaScanSliceRows, layerPlaneOpacity, subtreeImageNodes, textureAlphaScanMode, textureDimensions } from "../shared/layer-textures";
 
 test("live Qt group applies the root opacity once; local composite does not double it", () => {
   const node = { attributes: { "effective-alpha": "0.5" } };
@@ -22,10 +22,12 @@ test("texture allocations obey pixel/dimension limits and preserve small images"
   assert.deepEqual(textureDimensions(1, 100_000, 100), { width: 1, height: 100 });
 });
 
-test("large layer textures skip full-resolution alpha scans without exceeding the texture budget", () => {
-  assert.equal(shouldScanTextureAlpha(512, 512, 2_000_000), true);
-  assert.equal(shouldScanTextureAlpha(513, 512, 2_000_000), false);
-  assert.equal(shouldScanTextureAlpha(512, 512, 65_536), false);
+test("large layer textures use sliced alpha scans instead of losing transparent bounds", () => {
+  assert.equal(textureAlphaScanMode(512, 512), "sync");
+  assert.equal(textureAlphaScanMode(513, 512), "sliced");
+  assert.equal(textureAlphaScanMode(0, 512), "none");
+  assert.equal(alphaScanSliceRows(284), 256);
+  assert.equal(alphaScanSliceRows(100), 100);
 });
 
 test("collapsed texture includes own background and ordered descendants, never siblings or hidden subtrees", () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import "./styles/tokens.css";
 import "./App.css";
@@ -255,6 +255,8 @@ function App() {
   const [inspectionLoading, setInspectionLoading] = useState(false);
   const activeInspectionRef = useRef<string | null>(null);
   const previewShownRef = useRef(false);
+  // Ids the user collapsed while a capture is in flight; the final snapshot keeps them closed.
+  const userCollapsedIdsRef = useRef<Set<string>>(new Set());
   const inspectionStartedRef = useRef(0);
   const [inspectionStage, setInspectionStage] = useState("连接 Debug App");
   const [inspectionElapsed, setInspectionElapsed] = useState(0);
@@ -273,8 +275,7 @@ function App() {
     if (!preview.root) return;
     const first = !previewShownRef.current;
     previewShownRef.current = true;
-    setSnapshot(preview);
-    if (first) {
+    setSnapshot(preview);    if (first) {
       setSelectedNode(preview.root);
       setTreeExpandedIds(expandedTreeNodeIds(preview.root));
     } else {
@@ -313,6 +314,15 @@ function App() {
   const [treeSession, setTreeSession] = useState(0);
   useEffect(() => setWarningDismissed(false), [treeSession]);
   const [treeExpandedIds, setTreeExpandedIds] = useState<ReadonlySet<string>>(new Set());
+  const handleExpandedChange = useCallback((next: SetStateAction<ReadonlySet<string>>) => {
+    setTreeExpandedIds((current) => {
+      const value = typeof next === "function" ? next(current) : next;
+      // Remember which branches the user closed so a capture result can keep them closed.
+      for (const id of current) if (!value.has(id)) userCollapsedIdsRef.current.add(id);
+      for (const id of value) if (!current.has(id)) userCollapsedIdsRef.current.delete(id);
+      return value;
+    });
+  }, []);
   const [treeRevealRequest, setTreeRevealRequest] = useState(0);
   const [sceneToolbarHost, setSceneToolbarHost] = useState<HTMLDivElement | null>(null);
   const [savedSnapshots, setSavedSnapshots] = useState<SavedSnapshot[]>([]);
@@ -440,7 +450,12 @@ function App() {
       if (hadPreview && result.root) {
         const nodes = flattenNodes(result.root);
         setSelectedNode((current) => (current && nodes.get(current.id)) ?? result.root);
-        setTreeExpandedIds((current) => new Set([...current].filter((id) => nodes.has(id))));
+        // The early preview can miss views that only arrive with the final merge, and tree
+        // ids are positional, so rebuild the default (everything with children expanded)
+        // minus branches the user collapsed during this capture.
+        setTreeExpandedIds(() => new Set([...nodes.values()]
+          .filter((node) => node.children.length > 0 && !userCollapsedIdsRef.current.has(node.id))
+          .map((node) => node.id)));
       } else {
         setSelectedNode(result.root);
         setTreeExpandedIds(result.root ? expandedTreeNodeIds(result.root) : new Set());
@@ -503,7 +518,7 @@ function App() {
     ? window.electronApi.captureGroup(groupRequestId, node.id)
     : Promise.resolve(null), [groupRequestId]);
 
-  const refreshViewNode = useCallback(async (node: UiNode, scope: "node" | "branch" = "node") => {
+  const refreshViewNode = useCallback(async (node: UiNode, scope: "node" | "branch" | "list" = "node") => {
     if (!snapshot?.root || !viewLiveRequestId || viewRefreshActiveRef.current || inspectionLoading) return;
     viewRefreshActiveRef.current = true;
     const sourceSnapshot = snapshot;
@@ -513,7 +528,7 @@ function App() {
     try {
       const result = await window.electronApi.refreshViewNode(viewLiveRequestId, node.id, scope);
       if (currentSnapshotRef.current !== sourceSnapshot || activeInspectionRef.current) return;
-      if (scope === "branch") {
+      if (scope === "branch" || scope === "list") {
         if (!result.branch) throw new Error("没有返回可更新的分支。");
         const replacement = replaceTreeBranch(sourceRoot, node.id, result.branch);
         const freshNodes = flattenNodes(replacement);
@@ -533,7 +548,7 @@ function App() {
           }
           return result.branch!;
         });
-        setViewRefreshStatus({ nodeId: node.id, message: `分支已更新，共 ${flattenNodes(result.branch).size} 层${result.failures.length ? `，${result.failures.length} 层补图失败` : ""}` });
+        setViewRefreshStatus({ nodeId: node.id, message: `${scope === "list" ? "可见项分批刷新完成" : "分支已更新"}，共 ${flattenNodes(result.branch).size} 层${result.failures.length ? `，${result.failures.length} 层补图失败` : ""}` });
         return;
       }
       const sourceNodes = flattenNodes(sourceRoot);
@@ -1013,7 +1028,7 @@ function App() {
                       filterActive={hasTreeFilter}
                       filterKey={JSON.stringify([treeQuery, interactiveOnly, identifiedOnly])}
                       revealRequest={treeRevealRequest}
-                      onExpandedChange={setTreeExpandedIds}
+                      onExpandedChange={handleExpandedChange}
                       onSelect={setSelectedNode}
                       onClearFilter={clearTreeFilter}
                     />
@@ -1124,6 +1139,7 @@ function App() {
                         copyStatus={copyStatus}
                         onRefresh={viewLiveRequestId && detailNode.attributes?.["view-ref"] && !inspectionLoading && !debugState?.active ? () => void refreshViewNode(detailNode) : undefined}
                         onRefreshBranch={(snapshot.inspectionSource === "debug-view" || snapshot.inspectionSource === "debug-hybrid") && viewLiveRequestId && detailNode.children.length > 0 && detailNode.attributes?.["view-ref"] && !inspectionLoading && !debugState?.active ? () => void refreshViewNode(detailNode, "branch") : undefined}
+                        onRefreshList={(snapshot.inspectionSource === "debug-view" || snapshot.inspectionSource === "debug-hybrid") && viewLiveRequestId && detailNode.attributes?.["view-ref"] && !inspectionLoading && !debugState?.active && (/(RecyclerView|AbsListView|ListView|GridView|ViewPager)$/.test(detailNode.className ?? "") || detailNode.children.length >= 12) ? () => void refreshViewNode(detailNode, "list") : undefined}
                         onReadStyle={snapshot.inspectionSource === "debug-hybrid" && snapshot.root.attributes?.["sdk-style-version"] === "1" && viewLiveRequestId && detailNode.attributes?.["view-ref"] && !inspectionLoading && !debugState?.active ? () => window.electronApi.readViewStyle(viewLiveRequestId, detailNode.id) : undefined}
                         refreshBusy={viewRefreshingNodeId !== null}
                         refreshStatus={viewRefreshStatus?.nodeId === detailNode.id ? viewRefreshStatus.message : null}

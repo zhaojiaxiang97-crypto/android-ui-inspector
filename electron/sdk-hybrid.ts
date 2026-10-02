@@ -1,4 +1,5 @@
 import type { UiNode, UiSnapshot } from "../shared/types";
+import { matchesViewRoot } from "./view-debug";
 
 type RecordValue = Record<string, unknown>;
 export const MAX_POSITION_DRIFT_PX = 8;
@@ -195,6 +196,97 @@ export function joinSdkTreeAndDebugImages(snapshot: UiSnapshot, sdkValue: unknow
     root: { ...snapshot.root, attributes: { ...snapshot.root.attributes, "tree-source": "debug-sdk", "sdk-process-instance": sdkValue.processInstance,
       ...(sdkValue.styleVersion === 1 ? { "sdk-style-version": "1" } : {}) }, children: [decor] },
   };
+}
+
+/**
+ * SDK-only happy path: rebuild the tree from the SDK hierarchy without the DDMS property export.
+ * The cheap dump tree is only cross-checked (refs, classes, sizes, parentage) and used as an
+ * attribute donor; geometry and effective visibility come from the SDK so scroll/translation
+ * offsets in the dump model cannot leak into the result.
+ */
+export function adoptSdkTree(root: UiNode, sdkValue: unknown, expectedPackage: string, expectedPid: number): void {
+  if (!root || root.children.length !== 1) throw new Error("当前控件树不是单窗口 Debug View 树");
+  if (!record(sdkValue) || sdkValue.version !== 1 || sdkValue.packageName !== expectedPackage
+      || sdkValue.pid !== expectedPid || typeof sdkValue.processInstance !== "string"
+      || !/^[0-9a-f-]{36}$/i.test(sdkValue.processInstance)
+      || !Number.isSafeInteger(sdkValue.capturedAtMillis) || !record(sdkValue.root)) {
+    throw new Error("SDK 树的包名、进程或协议不匹配");
+  }
+  const expectedCount = integer(sdkValue.nodeCount, "节点数量", 1, 5000);
+  const windowRef = string(sdkValue.root.ref, "根身份")!;
+  const sources = new Map<string, RecordValue>();
+  const ancestors = new Map<string, readonly string[]>();
+  const pending: Array<[RecordValue, number, readonly string[]]> = [[sdkValue.root, 0, []]];
+  while (pending.length) {
+    const [source, depth, chain] = pending.pop()!;
+    if (depth > 150 || sources.size >= 5000) throw new Error("SDK 树超过深度或节点上限");
+    const ref = string(source.ref, "对象身份")!;
+    if (!/^[\w.$]+@[0-9a-f]+$/i.test(ref) || sources.has(ref)) throw new Error(`SDK 控件身份无效：${ref}`);
+    if (!Array.isArray(source.children)) throw new Error("SDK 子节点无效");
+    sources.set(ref, source);
+    ancestors.set(ref, chain);
+    for (const child of source.children as unknown[]) {
+      if (!record(child)) throw new Error("SDK 子节点无效");
+      pending.push([child, depth + 1, [...chain, ref]]);
+    }
+  }
+  if (sources.size !== expectedCount) throw new Error("SDK 树节点数量不一致");
+  if (!matchesViewRoot(root.children[0].attributes?.["view-ref"] ?? "", windowRef)) throw new Error("SDK 树的窗口与当前控件树不一致");
+  const queue: Array<{ node: UiNode; parentRef: string }> = [];
+  for (const child of root.children[0].children) queue.push({ node: child, parentRef: windowRef });
+  while (queue.length) {
+    const { node, parentRef } = queue.pop()!;
+    const ref = node.attributes?.["view-ref"];
+    if (!ref || !/^[\w.$]+@[0-9a-f]+$/i.test(ref)) throw new Error("当前控件树缺少对象身份");
+    const source = sources.get(ref);
+    if (!source) throw new Error(`当前控件树的控件不在 SDK 树中：${ref}`);
+    if (source.className !== node.className) throw new Error(`SDK 与当前控件树的类名不一致：${ref}`);
+    // The dump text drops nodes without coordinates (for example custom TextureView wrappers),
+    // so the donor parent only has to sit on the SDK ancestor chain, not directly above.
+    if (!ancestors.get(ref)?.includes(parentRef)) throw new Error(`SDK 与当前控件树的父子关系不一致：${ref}`);
+    if (node.bounds) {
+      if (node.bounds.right - node.bounds.left !== integer(source.width, "宽度", 0)
+          || node.bounds.bottom - node.bounds.top !== integer(source.height, "高度", 0)) {
+        throw new Error(`SDK 与当前控件树的尺寸不一致：${ref}`);
+      }
+    }
+    for (const child of node.children) queue.push({ node: child, parentRef: ref });
+  }
+  const donors = new Map<string, UiNode>();
+  const collect = [...root.children];
+  while (collect.length) {
+    const node = collect.pop()!;
+    const ref = node.attributes?.["view-ref"];
+    if (ref) donors.set(ref, node);
+    collect.push(...node.children);
+  }
+  const buildSkeleton = (source: RecordValue, id: string, alpha: number, visible: boolean): UiNode => {
+    const ref = string(source.ref, "对象身份")!;
+    const width = integer(source.width, "宽度", 0), height = integer(source.height, "高度", 0);
+    const left = integer(source.screenX, "屏幕 X"), top = integer(source.screenY, "屏幕 Y");
+    const ownAlpha = Math.max(0, Math.min(1, number(source.alpha, "透明度")));
+    const effective = alpha * ownAlpha;
+    const visibleToUser = visible && (source.visible === undefined || boolean(source.visible, "可见")) && effective > 0;
+    const children = (source.children as RecordValue[]).map((child, index) => buildSkeleton(child, `${id}/${index}`, effective, visibleToUser));
+    const donor = donors.get(ref);
+    return {
+      id, index: Number(id.slice(id.lastIndexOf("/") + 1)), package: root.package, className: string(source.className, "类名")!,
+      text: null, resourceId: null, contentDesc: null,
+      bounds: { left, top, right: left + width, bottom: top + height, raw: `[${left},${top}][${left + width},${top + height}]` },
+      clickable: false, enabled: true, focusable: false, focused: false, scrollable: false, selected: false,
+      visibleToUser,
+      attributes: { ...(donor?.attributes ?? {}), "inspection-source": "debug-view", "view-ref": ref, alpha: String(source.alpha), "effective-alpha": String(effective) },
+      children,
+    };
+  };
+  const skeleton = buildSkeleton(sdkValue.root, "0/0", 1, true);
+  // Feed the SDK-shaped skeleton through the normal merger so attributes match join() exactly.
+  const adopted = joinSdkTreeAndDebugImages({
+    serial: "", root: { ...root, children: [skeleton] }, nodeCount: expectedCount + 1, xmlSize: 0, rawXml: null, screenshotDataUrl: null,
+    error: null, warning: null, inspectionSource: "debug-view",
+  }, sdkValue, expectedPackage, expectedPid);
+  root.children = adopted.root!.children;
+  root.attributes = adopted.root!.attributes;
 }
 
 /** Check the current DDMS tree before choosing the SDK image path. */

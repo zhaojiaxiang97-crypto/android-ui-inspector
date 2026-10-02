@@ -265,6 +265,35 @@ export function matchesViewRoot(expected: string, actual: string) {
     && (actual.endsWith(`.${expected}`) || actual.endsWith(`$${expected}`)));
 }
 
+/** Resolve the ViewDebug window name without exporting the full hierarchy. */
+export async function probeWindowName(port: number, rootRefs: readonly string[], signal?: AbortSignal) {
+  const { socket, reader } = await connect(port, signal);
+  try {
+    const names = parseWindowNames(await requestChunk(socket, reader, 1, "VULW"));
+    if (names.length > 32) throw new Error("Debug 窗口数量异常。");
+    let selected: string | null = null;
+    let sequence = 2;
+    for (const name of names) {
+      const encodedName = utf16be(name);
+      const request = Buffer.alloc(8 + encodedName.length);
+      request.writeUInt32BE(1, 0);
+      request.writeUInt32BE(name.length, 4);
+      encodedName.copy(request, 8);
+      // Identity-only probe: enough to match the window, no property export.
+      const dump = Buffer.concat([request, Buffer.from([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0])]);
+      const hierarchy = (await requestChunk(socket, reader, sequence++, "VURT", dump)).toString("utf8");
+      const rootRef = hierarchy.trimStart().split(/\s/)[0];
+      if (!rootRefs.some((expected) => matchesViewRoot(expected, rootRef))) continue;
+      if (selected) throw new Error("多个 Debug 窗口匹配当前控件树，请关闭弹窗后重新采集。");
+      selected = name;
+    }
+    if (!selected) throw new Error("Debug 窗口与当前控件树不一致，请重新采集。");
+    return selected;
+  } finally {
+    socket.destroy();
+  }
+}
+
 export async function captureViewLayers(port: number, options: { rootRefs: readonly string[]; onHierarchy: (hierarchy: string, windowName: string) => void | Promise<void>; onBatchTiming?: (timing: { waitMs: number; readMs: number; parseMs: number; bytes: number; layers: number; images: number }) => void; skipImages?: boolean | (() => boolean); signal?: AbortSignal }) {
   const { socket, reader } = await connect(port, options.signal);
   try {

@@ -2,7 +2,7 @@
 
 这里包含 Debug SDK 和画面验证样例。SDK 提供真实 View 树、属性和独立图；接入 SDK 且至少 200 节点的页面默认尝试 `capture-visible`，DDMS/JDWP 保留兼容采集、局部刷新及缺图/特殊缓冲补采。样例通过 `debugImplementation` 引入 SDK；Release 使用无操作的 `ProbeRunner`，不包含 SDK。当前能力与下一步见 [Lookin 对齐计划](../docs/LOOKIN_ALIGNMENT_PLAN.md)。
 
-新版 SDK 的 `capture-visible` 可携带 16 位十六进制请求标识，写入私有临时文件头并回显。`visibleStreamVersion=1` 使用 PNG，`visibleStreamVersion=2`（Android 11/API 30+）使用无损 WebP；桌面仅对匹配本轮标识、当前进程/窗口、对象、尺寸及图片校验的完整记录提前预览，最多三批，最终仍核对完整文件 SHA-256。旧 SDK 不轮询，照原路径等整包；取消后不交付迟到批次。Android 11 以下继续 PNG 兼容路径。
+新版 SDK 的 `capture-visible` 可携带 16 位十六进制请求标识，写入私有临时文件头并回显。`visibleStreamVersion=1` 使用 PNG，`visibleStreamVersion=2`（Android 11/API 30+）使用无损 WebP；桌面仅对匹配本轮标识、当前进程/窗口、对象、尺寸及图片校验的完整记录提前预览，最多三批，最终仍核对完整文件 SHA-256。旧 SDK 不轮询，照原路径等整包；取消后不交付迟到批次。Android 11 以下继续 PNG 兼容路径。整页可见图采集在设备侧采用有界流水线（渲染与编码重叠、2 路编码池顺序写文件）；业务页 207 张 WebP 单次约 2.8–3.3 秒（改造前 5.2–5.9 秒），流式预览与摘要校验不变。特殊层补齐改用批接口 `capture-refs`：一次最多 80 个指定控件，普通控件取自身图、TextureView 读自身缓冲、SurfaceView 用 `PixelCopy` 取当前帧（受保护内容返回失败，不绕过 DRM），纯布局/空白/失败分别标注；桌面校验（进程实例、根、对象、尺寸、SHA-256 与逐图 CRC）不符时回退 JDWP。业务页补齐阶段约 5.1 → 2.3 秒，Surface/Texture 首次拿到真实缓冲帧。桌面侧 happy path 不再全量导出 DDMS/JDWP 层级：先以 VULW + 身份探针匹配窗口，再用 SDK 树重建结构（ref/类名/尺寸/祖先链/窗口锚点/进程逐项交叉校验，任一不符回退原 DDMS 导出），JDWP 仅作兼容回退。`capture-visible` 可携带 `withTree` 布尔扩展：调用开始先原子写入本次 nonce 的 SDK 树文件（≤4MB），桌面在调用中途 adopt 并据此匹配分片预览；旧 SDK 忽略扩展时回退经典两段式读取。Provider 另提供 `open-session`/`close-session`：桌面经 `adb forward tcp:0 localabstract:<包名>.inspector.session` 连接应用内 `LocalServerSocket` 会话通道调用同一批 handler（行式 JSON、回复与 `content` CLI 同格式），免去每次 `content` CLI 的进程启动（约 1.2 秒/次）；对端校验 shell/root UID，超时或取消即关闭会话并回退 content 调用，旧 SDK 无该方法时自动走原通道。
 
 构建环境：JDK 17+、Gradle 9.6+、Android Platform 36 与 Build Tools 36。SDK 可集成到最低 Android 5 的 Debug App，但自身图仅对 Android 8+ 开放；目前只在 Android 14 真机验过。取得许可并安装官方 SDK 后，可在本目录执行：
 
@@ -22,7 +22,7 @@ Debug Provider 除 `capture` 树外，还可按 `ref` 调用 `capture-own`；返
 
 同一 Android 14 真机，动态样例新增子项后父自身图保持不变、变化的文字和新控件均各有自身图。业务 Debug App 的 10 个文字层也通过逐张/批量图片摘要对照；运行 `bun scripts/sdk-batch-probe.ts DEVICE_SERIAL com.smile.gifmaker` 可复测。业务页批量三轮调用约 2.3/4.4/3.2 秒，逐张 10 次约 17.8 秒；读图还需约 1–1.3 秒。当前只验证 10 张，尚未替代桌面 170+ 张图的完整采集。
 
-混合模式的 Debug Provider 使用 `android.permission.DUMP` 和 shell UID 校验，没有开放网络端口。桌面从 App 私有目录读取按需生成的树，仅在进程、窗口、节点身份和几何全部匹配时与独立画面合并；失败就保留旧快照并提示。加入不透明子项后，样例真机上 14/14 个 View 匹配（另有 1 个合成根）、9 张独立图，无警告。
+混合模式的 Debug Provider 使用 `android.permission.DUMP` 和 shell UID 校验，没有开放网络端口。桌面从 App 私有目录读取按需生成的树，仅在进程、窗口、节点身份和几何全部匹配时与独立画面合并；失败就保留旧快照并提示。整树 JSON 在主线程只做视图遍历与对象构建，字符串化与写盘在调用线程；业务页 1204 节点实测不再触发 ≥1 秒的主线程长任务（2026-10-01）。加入不透明子项后，样例真机上 14/14 个 View 匹配（另有 1 个合成根）、9 张独立图，无警告。
 
 Debug 构建中可调用 `DebugNames.set(view, "业务名称")` 为没有文本/ID 的控件加显示名；Release 构建请沿用样例的无操作包装，不引入 SDK。混合快照保留真实类名、ID、文本，同时读取 `LayoutParams` 类型、宽高和真实 margin；没有 margin 的参数类型不伪造 0。Android 14 真机样例已验证两处名称及负 margin；Release APK 无 SDK 类或 Provider。
 

@@ -1,11 +1,35 @@
 import type { UiNode } from "./types";
 
 const MAX_TEXTURE_ALPHA_SCAN_PIXELS = 262_144;
+const ALPHA_SCAN_ROWS_PER_SLICE = 256;
 
-export function shouldScanTextureAlpha(width: number, height: number, texturePixelBudget: number) {
-  return Number.isSafeInteger(width) && Number.isSafeInteger(height) && width > 0 && height > 0
-    && Number.isSafeInteger(texturePixelBudget) && texturePixelBudget > 0
-    && width * height <= Math.min(MAX_TEXTURE_ALPHA_SCAN_PIXELS, texturePixelBudget);
+export function textureAlphaScanMode(width: number, height: number) {
+  if (![width, height].every(value => Number.isSafeInteger(value) && value > 0)) return "none" as const;
+  return width * height <= MAX_TEXTURE_ALPHA_SCAN_PIXELS ? "sync" as const : "sliced" as const;
+}
+
+export function alphaScanSliceRows(height: number) {
+  if (!Number.isSafeInteger(height) || height <= 0) return 0;
+  return Math.min(height, ALPHA_SCAN_ROWS_PER_SLICE);
+}
+
+export function alphaScanBounds(
+  getAlpha: (x: number, y: number) => number,
+  width: number,
+  height: number,
+) {
+  if (![width, height].every(value => Number.isSafeInteger(value) && value > 0)) return null;
+  let left = width, top = height, right = 0, bottom = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (!getAlpha(x, y)) continue;
+      if (x < left) left = x;
+      if (y < top) top = y;
+      if (x + 1 > right) right = x + 1;
+      if (y + 1 > bottom) bottom = y + 1;
+    }
+  }
+  return right > left && bottom > top ? { left: left / width, top: top / height, width: (right - left) / width, height: (bottom - top) / height } : null;
 }
 
 export function clipLayerImageToOutlines(node: UiNode, clipNodes: readonly UiNode[], image: ImageBitmap | HTMLCanvasElement) {

@@ -108,6 +108,10 @@ export function layerImageBaseline(root: UiNode) {
   return new Map([...flattenNodes(root)].map(([id, node]) => [id, layerImageState(node)]));
 }
 
+export function layerImageUpdates(root: UiNode): LayerImageUpdate[] {
+  return [...flattenNodes(root).values()].map(layerImageState).filter((update) => Boolean(update.layerImageDataUrl));
+}
+
 export function changedLayerImages(root: UiNode, previous: Map<string, LayerImageUpdate>): LayerImageUpdate[] | null {
   const nodes = flattenNodes(root);
   if (nodes.size !== previous.size || [...nodes.keys()].some(id => !previous.has(id))) return null;

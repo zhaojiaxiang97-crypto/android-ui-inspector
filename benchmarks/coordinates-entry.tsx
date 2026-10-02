@@ -798,7 +798,8 @@ async function verifyLayerContentBounds() {
     const clippedBar = { ...bar, bounds: { left: -50, top: 80, right: 1030, bottom: 364, raw: "[-50,80][1030,364]" } };
     const clippedRoot = { ...root, children: [clippedBar] };
     flushSync(() => reactRoot.render(<Layer3DPreview ref={scene} src={back.layerImageDataUrl!} root={clippedRoot} selectedNode={clippedBar} expandedNodeIds={new Set([root.id])} size={{ width: 1080, height: 500 }} renderScale={.5} origin={{ left: 60, top: 40 }} camera={camera} onSelect={() => {}} />));
-    await until(() => canvas().dataset.layerTextureCount === "1" && canvas().dataset.layerTrimmedCount === "1" && canvas().dataset.layerTextureVisibility === "[]", "screen-clipped content did not settle");
+    await until(() => canvas().dataset.layerTextureCount === "1" && canvas().dataset.layerTrimmedCount === "1" && canvas().dataset.layerTextureVisibility === "[]",
+      `screen-clipped content did not settle: texture=${canvas().dataset.layerTextureCount} trimmed=${canvas().dataset.layerTrimmedCount} visibility=${canvas().dataset.layerTextureVisibility}`);
     scene.current!.paintCamera(camera);
     near(highlight()[0], 60, "offscreen content must stay clipped at the screen edge");
     near(highlight()[2], 499.5, "cropped source UV must exclude only the offscreen/transparent pixels");

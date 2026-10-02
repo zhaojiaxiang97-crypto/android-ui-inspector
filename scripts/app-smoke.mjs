@@ -41,6 +41,10 @@ const args = [
   ...(packaged ? [] : [project]),
   "--remote-debugging-port=0",
   "--remote-debugging-address=127.0.0.1",
+  // Occluded windows stop painting and throttle timers, which stalls the renderer waits.
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
+  "--disable-background-timer-throttling",
   `--user-data-dir=${join(output, "profile")}`,
 ];
 const environment = { ...process.env };
@@ -86,15 +90,16 @@ async function connect(url) {
   const errors = [];
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
-    if (message.method === "Runtime.exceptionThrown" || message.method === "Network.loadingFailed" || (message.method === "Log.entryAdded" && message.params.entry.level === "error")) errors.push(message);
+    if (message.method === "Runtime.exceptionThrown" || (message.method === "Log.entryAdded" && message.params.entry.level === "error")) errors.push(message);
     const task = pending.get(message.id);
     if (!task) return;
     pending.delete(message.id);
     clearTimeout(task.timer);
     if (message.error) task.reject(new Error(message.error.message)); else task.resolve(message.result);
   });
-  socket.addEventListener("close", () => {
-    for (const task of pending.values()) { clearTimeout(task.timer); task.reject(new Error("Application debugger disconnected")); }
+  socket.addEventListener("close", (event) => {
+    const detail = `code=${event.code}${event.reason ? ` reason=${JSON.stringify(String(event.reason).slice(0, 200))}` : ""}`;
+    for (const task of pending.values()) { clearTimeout(task.timer); task.reject(new Error(`Application debugger disconnected (${detail})`)); }
     pending.clear();
   });
   return {
@@ -134,7 +139,11 @@ try {
   }
   await connection.send("Runtime.enable");
   await connection.send("Log.enable");
-  await connection.send("Network.enable");
+  // Never enable the Network domain here. Screenshot and layer images are multi-MB data URLs;
+  // Chromium then emits Network.requestWillBeSent/responseReceived events carrying the whole
+  // data URL, and the built-in Node WebSocket (undici 6.x, cap ~4 MiB per message) kills the
+  // connection with "Max decompressed message size exceeded" (close 1006) while the app keeps
+  // running. Resource load failures still surface through Log.entryAdded below.
   const evaluate = async (expression) => {
     const result = await connection.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
@@ -1044,14 +1053,36 @@ try {
     recordCheck("snapshot save/load and history preview retain capture geometry");
 
     if (report.inspectionSummary.includes("SDK 树")) {
+      // Feed rows recycle between the two captures, so pick a control that survives: the
+      // shallowest visible text control fully inside the screen (persistent chrome), read
+      // from the restored snapshot instead of the virtualised tree markup.
+      const priorityTarget = await evaluate(`window.electronApi.loadSnapshots().then(result => {
+        if (result.error) throw new Error(result.error);
+        const root = result.snapshots[0]?.snapshot.root;
+        if (!root) return null;
+        const screen = ${JSON.stringify(report.screenshot)};
+        let best = null;
+        const stack = [[root, "0"]];
+        while (stack.length) {
+          const [node, id] = stack.pop();
+          const segments = id.split("/").length;
+          const bounds = node.bounds;
+          const onScreen = bounds && bounds.left >= 0 && bounds.top >= 0
+            && (!screen || (bounds.right <= screen.width && bounds.bottom <= screen.height));
+          if (node.visibleToUser && onScreen && node.text && node.className.includes("TextView")
+              && (!best || segments < best.segments)) best = { id, segments, text: node.text };
+          for (let index = node.children.length - 1; index >= 0; index--) stack.push([node.children[index], id + "/" + index]);
+        }
+        return best && { id: best.id, query: best.text.trim().slice(0, 24) };
+      })`);
+      assert.ok(priorityTarget && priorityTarget.id && priorityTarget.query, "Could not find a stable visible TextView for priority capture");
       await evaluate("document.querySelector('.tree-search').focus()");
-      await connection.send("Input.insertText", { text: "TextView" });
-      await until(() => evaluate("document.querySelector('.tree-search').value === 'TextView'"), "priority TextView filter input");
-      await evaluate("(() => { const tree = document.querySelector('.ui-tree-scroll'); tree.scrollTop = tree.scrollHeight; })()");
-      await until(() => evaluate(`Boolean(Array.from(document.querySelectorAll('.tree-row[data-tree-kind="text"]')).find(row => row.title.toLowerCase().includes('textview') && !row.classList.contains('is-muted')))`), "visible TextView filter for priority capture");
+      await connection.send("Input.insertText", { text: priorityTarget.query });
+      await until(() => evaluate("document.querySelector('.tree-search').value !== ''"), "priority TextView filter input");
+      await evaluate("(() => { const tree = document.querySelector('.ui-tree-scroll'); tree.scrollTop = 0; })()");
+      await until(() => evaluate(`Boolean(document.querySelector('.tree-row[data-tree-id=${JSON.stringify(priorityTarget.id)}]'))`), "priority capture target row");
       const selectedId = await evaluate(`(() => {
-        const row = Array.from(document.querySelectorAll('.tree-row[data-tree-kind="text"]'))
-          .reverse().find(candidate => candidate.title.toLowerCase().includes('textview') && !candidate.classList.contains('is-muted'));
+        const row = document.querySelector('.tree-row[data-tree-id=${JSON.stringify(priorityTarget.id)}]');
         if (!row) return null;
         row.click();
         return row.dataset.treeId;
@@ -1062,7 +1093,10 @@ try {
       await until(() => evaluate("document.querySelector('.tree-search').value === ''"), "clear priority capture filter");
       await evaluate(`(() => {
         const events = [];
+        const stages = [];
         window.__appSmokePriorityEvents = events;
+        window.__appSmokePriorityStages = stages;
+        window.electronApi.onInspectionProgress((progress) => stages.push({ atMs: Math.round(performance.now()), stage: progress.stage, elapsedMs: progress.elapsedMs }));
         window.electronApi.onInspectionPreview((preview) => {
           if (preview.phase !== "layers") return;
           events.push(preview.updates.filter(update => Boolean(update.layerImageDataUrl)).map(update => update.id));
@@ -1072,8 +1106,32 @@ try {
       await until(() => evaluate("Boolean(document.querySelector('.capture-button[disabled]'))"), "priority capture start", 5000);
       await until(() => evaluate("Boolean(document.querySelector('.capture-button:not([disabled])') || document.querySelector('.error-placeholder'))"), "priority capture completion", 90_000);
       const priorityEvents = await evaluate("window.__appSmokePriorityEvents || []");
-      assert.ok(priorityEvents[0]?.includes(selectedId), "Selected View was not included in the first independent-image update");
-      report.priorityCapture = { selectedId, firstUpdateCount: priorityEvents[0].length, updateCount: priorityEvents.length };
+      const priorityStages = await evaluate("window.__appSmokePriorityStages || []");
+      const priorityOutcome = await evaluate(`(() => ({
+        warning: document.querySelector('.snapshot-warning-message')?.textContent ?? null,
+        errorText: document.querySelector('.error-placeholder p')?.textContent ?? null,
+        summary: document.querySelector('.snapshot-summary')?.textContent ?? null,
+        buttonEnabled: Boolean(document.querySelector('.capture-button:not([disabled])')),
+      }))()`);
+      const priorityTreeState = await evaluate(`(() => ({
+        rowCount: document.querySelectorAll('.tree-row').length,
+        dataRowCount: document.querySelector('.ui-tree-scroll')?.dataset.rowCount ?? null,
+        selectedRowPresent: Array.from(document.querySelectorAll('.tree-row')).some((row) => row.dataset.treeId === ${JSON.stringify(selectedId)}),
+        nowSelected: document.querySelector('.tree-row.selected')?.dataset.treeId ?? null,
+      }))()`);
+      report.priorityCapture = {
+        selectedId,
+        firstUpdateCount: priorityEvents[0]?.length ?? 0,
+        updateCount: priorityEvents.length,
+        totalImageUpdates: priorityEvents.reduce((total, batch) => total + batch.length, 0),
+        firstBatchHead: priorityEvents[0]?.slice(0, 40) ?? [],
+        firstBatchContainsSelected: Boolean(priorityEvents[0]?.includes(selectedId)),
+        anyBatchContainsSelected: priorityEvents.some((batch) => batch.includes(selectedId)),
+        treeAfterCapture: priorityTreeState,
+        outcome: priorityOutcome,
+        priorityStages: priorityStages.slice(-80),
+      };
+      assert.ok(report.priorityCapture.firstBatchContainsSelected, "Selected View was not included in the first independent-image update");
       recordCheck("selected View is included in the first independent-image update");
     }
 
@@ -1094,7 +1152,7 @@ try {
     try {
       const failure = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
       writeFileSync(join(output, "failure.png"), Buffer.from(failure.data, "base64"));
-      report.failureState = await connection.send("Runtime.evaluate", { expression: "({ focused: document.hasFocus(), selected: document.querySelector('.tree-row.selected')?.dataset.treeId, gesture: document.querySelector('.screenshot-frame')?.dataset.gesture, hovered: document.querySelector('.layer-scene')?.dataset.layerHoveredId, label: document.querySelector('.layer-hover-label')?.textContent })", returnByValue: true });
+      report.failureState = await connection.send("Runtime.evaluate", { expression: "({ focused: document.hasFocus(), selected: document.querySelector('.tree-row.selected')?.dataset.treeId, warning: document.querySelector('.snapshot-warning-message')?.textContent ?? null, errorText: document.querySelector('.error-placeholder p')?.textContent ?? null, summary: document.querySelector('.snapshot-summary')?.textContent ?? null, gesture: document.querySelector('.screenshot-frame')?.dataset.gesture, hovered: document.querySelector('.layer-scene')?.dataset.layerHoveredId, label: document.querySelector('.layer-hover-label')?.textContent, priorityStages: (window.__appSmokePriorityStages ?? []).slice(-80), priorityBatchSizes: (window.__appSmokePriorityEvents ?? []).map(batch => batch.length) })", returnByValue: true });
     } catch (diagnosticError) { report.diagnosticError = String(diagnosticError); }
   }
   process.exitCode = 1;

@@ -3,14 +3,14 @@ import type { MenuItemConstructorOptions, SaveDialogOptions } from "electron";
 import { writeFile } from "node:fs/promises";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { captureQmlGroupImage, captureViewGroupImage, captureViewNodes, captureViewStyle, getDebugTarget, inspectPreferredDevice, observeDebugApp, parseUiHierarchy, probeAdb } from "./adb";
+import { captureListViewItems, captureQmlGroupImage, captureViewGroupImage, captureViewNodes, captureViewStyle, closeProviderSessions, getDebugTarget, inspectPreferredDevice, observeDebugApp, parseUiHierarchy, probeAdb } from "./adb";
 import { DebugSession } from "./debug-session";
 import { clearLiveEndpoint, openLiveBridge } from "./mcp-live";
 import { clearSnapshots, loadSnapshots, saveSnapshot } from "./snapshot-store";
 import { measureLayerImages } from "./layer-images";
 import { publishMcpSnapshot, revokeMcpSnapshot } from "./mcp-snapshot";
 import { isUiSnapshot } from "../shared/snapshot-validation";
-import { changedLayerImages, flattenNodes, layerImageBaseline, replaceTreeBranch } from "../shared/tree-utils";
+import { changedLayerImages, flattenNodes, layerImageBaseline, layerImageUpdates, replaceTreeBranch } from "../shared/tree-utils";
 import type { AppMenuAction, AppMenuState, DeviceInfo, ExportFormat, ExportSnapshotRequest, ExportSnapshotResult, LayerImageUpdate, LayerMenuAction, QmlGroupImage, UiNode, UiSnapshot, ViewRefreshResult } from "../shared/types";
 
 const rendererUrl = process.env.ELECTRON_RENDERER_URL;
@@ -364,10 +364,16 @@ ipcMain.handle("inspect-device", async (event, serial: unknown, requestId: unkno
         const updates = phase === "layers" && previewImages ? changedLayerImages(snapshot.root, previewImages) : null;
         if (updates) {
           if (updates.length) sender.send("inspection-preview", { requestId, phase: "layers", updates });
-        } else {
-          previewImages = layerImageBaseline(snapshot.root);
-          sender.send("inspection-preview", { requestId, phase: "tree", snapshot });
+          return;
         }
+        // The tree changed shape since the baseline was taken (fresh read or SDK adoption), so
+        // there is nothing to diff. Re-anchor on the new tree and still forward every current
+        // image: otherwise a partial batch would only repaint the tree and the images that
+        // arrived with it would never flow into the layer pipeline.
+        previewImages = layerImageBaseline(snapshot.root);
+        sender.send("inspection-preview", { requestId, phase: "tree", snapshot });
+        const images = layerImageUpdates(snapshot.root);
+        if (images.length) sender.send("inspection-preview", { requestId, phase: "layers", updates: images });
       },
     });
     await measureLayerImages(snapshot.root, controller.signal);
@@ -412,7 +418,7 @@ ipcMain.handle("refresh-view-node", async (event, requestId: unknown, nodeId: un
   if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) throw new Error("无效的抓图来源。");
   if (typeof requestId !== "string" || requestId.length > 128 || typeof nodeId !== "string" || !/^0(?:\/\d+)*$/.test(nodeId) || nodeId.length > 600)
     throw new Error("控件标识无效。");
-  if (scope !== "node" && scope !== "branch") throw new Error("刷新范围无效。");
+  if (scope !== "node" && scope !== "branch" && scope !== "list") throw new Error("刷新范围无效。");
   const ownerId = event.sender.id;
   const session = liveSessions.get(ownerId);
   if (!session || (session.snapshot.inspectionSource !== "debug-view" && session.snapshot.inspectionSource !== "debug-hybrid")
@@ -425,7 +431,9 @@ ipcMain.handle("refresh-view-node", async (event, requestId: unknown, nodeId: un
   const done = (async () => {
     await previous?.done.catch(() => undefined);
     controller.signal.throwIfAborted();
-    const result = await captureViewNodes(session.snapshot.serial, session.snapshot, nodeId, scope === "branch", controller.signal);
+    const result = scope === "list"
+      ? await captureListViewItems(session.snapshot.serial, session.snapshot, nodeId, controller.signal)
+      : await captureViewNodes(session.snapshot.serial, session.snapshot, nodeId, scope === "branch", controller.signal);
     controller.signal.throwIfAborted();
     if (session.snapshot.root && liveSessions.get(ownerId) === session) {
       const old = flattenNodes(session.snapshot.root).get(nodeId);
@@ -587,6 +595,7 @@ app.on("before-quit", (event) => {
   if (quitting) return;
   quitting = true;
   stopMcpSharing();
+  closeProviderSessions();
   const captures = [...inspections.values()];
   for (const capture of captures) capture.controller.abort();
   const groups = [...groupCaptures.values()];

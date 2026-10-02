@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import type { PixelSize, QmlGroupImage, UiNode } from "../../shared/types";
 import { buildLayerLayout, buildLayerOverview, type LayerRecord } from "../../shared/layer-layout";
-import { clipLayerImageToOutlines, composeSubtreeImage, layerPlaneOpacity, shouldScanTextureAlpha, subtreeImageNodes, textureDimensions } from "../../shared/layer-textures";
+import { alphaScanBounds, alphaScanSliceRows, clipLayerImageToOutlines, composeSubtreeImage, layerPlaneOpacity, subtreeImageNodes, textureAlphaScanMode, textureDimensions } from "../../shared/layer-textures";
 import { measureBounds, type BoundsMeasurement } from "../../shared/node-metrics";
 import { nodeDisplayLabel, nodeShortClass } from "../../shared/tree-utils";
 
@@ -58,6 +58,7 @@ type Renderer = {
   layerTextures: Map<string, WebGLTexture>;
   layerTextureBytes: Map<string, number>;
   layerContentRects: Map<string, Rect | null>;
+  layerAlphaScans: Map<string, Promise<Rect | null>>;
   unitLocation: number;
   lineLocation: number;
   lineVertices: Float32Array;
@@ -173,6 +174,21 @@ function subtreeHasHidden(node: UiNode, hiddenNodeIds: ReadonlySet<string>) {
   return false;
 }
 
+// Texture cache keys stay compact: one version per node id and image value. Incremental
+// batches and the final capture result replace node objects while unchanged images keep
+// the same data URL, so comparing by value keeps their textures cached.
+const textureImageVersions = new Map<string, { image: string | undefined; version: number }>();
+let nextTextureImageVersion = 1;
+
+function textureNodeVersion(node: UiNode) {
+  const image = node.layerImageDataUrl;
+  const cached = textureImageVersions.get(node.id);
+  if (cached && cached.image === image) return cached.version;
+  const version = nextTextureImageVersion++;
+  textureImageVersions.set(node.id, { image, version });
+  return version;
+}
+
 function groupImageFor(record: LayerRecord, groups: ReadonlyMap<string, QmlGroupImage>, hiddenNodeIds: ReadonlySet<string>) {
   if (!record.isCollapsed || !groups.has(record.id) || subtreeHasHidden(record.node, hiddenNodeIds)) return null;
   return groups.get(record.id)!;
@@ -212,11 +228,12 @@ function outlineAncestors(record: LayerRecord, tree: ReturnType<typeof indexLaye
   return result;
 }
 
-function outlineTextureKey(record: LayerRecord, clips: readonly UiNode[]) {
-  if (!clips.length) return record.node.layerImageDataUrl!;
+function nativeTextureKey(record: LayerRecord, clips: readonly UiNode[]) {
+  const version = `v${textureNodeVersion(record.node)}`;
+  if (!clips.length) return `${record.id}:${version}`;
   const signature = clips.map(node => [node.id, node.bounds?.left, node.bounds?.top, node.bounds?.right, node.bounds?.bottom,
     ...["Left", "Top", "Right", "Bottom", "Radius"].map(key => node.attributes?.[`sdk-outline${key}`])]);
-  return `${record.node.layerImageDataUrl!}#outline:${JSON.stringify(signature)}`;
+  return `${record.id}:${version}#outline:${JSON.stringify(signature)}`;
 }
 
 function hasOwnVisualStyle(record: LayerRecord, size: PixelSize, hiddenNodeIds: ReadonlySet<string>, groups: ReadonlyMap<string, QmlGroupImage>) {
@@ -353,7 +370,7 @@ function createRenderer(canvas: HTMLCanvasElement): Renderer | null {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  return { canvas, gl, program, quadBuffer, lineBuffer, texture, layerTextures: new Map(), layerTextureBytes: new Map(), layerContentRects: new Map(), unitLocation, lineLocation, lineVertices: new Float32Array(0), sourcePlanes: null, preparedPlanes: [], uniforms: uniforms as Record<string, WebGLUniformLocation>, textureReady: false, cssWidth: 0, cssHeight: 0, renderVersion: 0 };
+  return { canvas, gl, program, quadBuffer, lineBuffer, texture, layerTextures: new Map(), layerTextureBytes: new Map(), layerContentRects: new Map(), layerAlphaScans: new Map(), unitLocation, lineLocation, lineVertices: new Float32Array(0), sourcePlanes: null, preparedPlanes: [], uniforms: uniforms as Record<string, WebGLUniformLocation>, textureReady: false, cssWidth: 0, cssHeight: 0, renderVersion: 0 };
 }
 
 function disposeRenderer(renderer: Renderer) {
@@ -390,11 +407,15 @@ function uploadTexture(renderer: Renderer, image: HTMLImageElement) {
   return renderer.textureReady;
 }
 
+type TextureContentResult = { rect: Rect | null | undefined; scan: (() => Promise<Rect | null>) | null };
+type LayerTextureUpload = false | { uploaded: true; scan: (() => Promise<Rect | null>) | null };
+
 // Inspect the decoded independent image once, including historical snapshots.
 // Normalized coordinates also work for downsampled textures and folded branches.
-function textureContentRect(image: ImageBitmap | HTMLCanvasElement, texturePixelBudget: number): Rect | null | undefined {
-  // ponytail: skip exact alpha scans above 256K pixels; retain the full View bounds to avoid main-thread stalls without cropping pixels.
-  if (!shouldScanTextureAlpha(image.width, image.height, texturePixelBudget)) return { left: 0, top: 0, width: 1, height: 1 };
+function textureContentRect(image: ImageBitmap | HTMLCanvasElement, texturePixelBudget: number): TextureContentResult {
+  const mode = textureAlphaScanMode(image.width, image.height);
+  if (mode === "none" || image.width * image.height > texturePixelBudget) return { rect: { left: 0, top: 0, width: 1, height: 1 }, scan: null };
+  if (mode === "sliced") return { rect: null, scan: () => scanTextureContentRectInSlices(image) };
   const canvas = image instanceof HTMLCanvasElement ? image : document.createElement("canvas");
   try {
     if (canvas !== image) {
@@ -402,24 +423,49 @@ function textureContentRect(image: ImageBitmap | HTMLCanvasElement, texturePixel
       canvas.width = size.width; canvas.height = size.height;
     }
     const context = canvas.getContext("2d", { willReadFrequently: true });
-    if (!context) return undefined;
+    if (!context) return { rect: undefined, scan: null };
     if (canvas !== image) context.drawImage(image, 0, 0, canvas.width, canvas.height);
     const { width, height } = canvas;
     const pixels = context.getImageData(0, 0, width, height).data;
     // Solid backgrounds already reach every edge; don't scan their interiors.
-    if ([0, width - 1, (height - 1) * width, width * height - 1].every(index => pixels[index * 4 + 3] > 0)) return { left: 0, top: 0, width: 1, height: 1 };
-    let left = width, top = height, right = 0, bottom = 0;
-    for (let y = 0, offset = 3; y < height; y++) for (let x = 0; x < width; x++, offset += 4) {
-      if (!pixels[offset]) continue;
-      left = Math.min(left, x); top = Math.min(top, y);
-      right = Math.max(right, x + 1); bottom = Math.max(bottom, y + 1);
-    }
-    return right > left ? { left: left / width, top: top / height, width: (right - left) / width, height: (bottom - top) / height } : null;
-  } catch { return undefined; } // A failed read must not invent a smaller layout.
+    if ([0, width - 1, (height - 1) * width, width * height - 1].every(index => pixels[index * 4 + 3] > 0))
+      return { rect: { left: 0, top: 0, width: 1, height: 1 }, scan: null };
+    return { rect: alphaScanBounds((x, y) => pixels[(y * width + x) * 4 + 3], width, height), scan: null };
+  } catch { return { rect: undefined, scan: null }; } // A failed read must not invent a smaller layout.
   finally { if (canvas !== image) canvas.width = canvas.height = 0; }
 }
 
-function uploadLayerTexture(renderer: Renderer, src: string, image: ImageBitmap | HTMLCanvasElement, maxPixels: number) {
+async function scanTextureContentRectInSlices(image: ImageBitmap | HTMLCanvasElement): Promise<Rect | null> {
+  const width = image.width, height = image.height;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  try {
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return null;
+    context.drawImage(image, 0, 0);
+    let left = width, top = height, right = 0, bottom = 0;
+    const rows = alphaScanSliceRows(height);
+    for (let startY = 0; startY < height; startY += rows) {
+      const sliceHeight = Math.min(rows, height - startY);
+      const pixels = context.getImageData(0, startY, width, sliceHeight).data;
+      const bounds = alphaScanBounds((x, y) => pixels[(y * width + x) * 4 + 3], width, sliceHeight);
+      if (bounds) {
+        const sliceLeft = Math.round(bounds.left * width), sliceRight = Math.round((bounds.left + bounds.width) * width);
+        left = Math.min(left, sliceLeft);
+        top = Math.min(top, startY + Math.round(bounds.top * sliceHeight));
+        right = Math.max(right, sliceRight);
+        bottom = Math.max(bottom, startY + Math.round((bounds.top + bounds.height) * sliceHeight));
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+    }
+    return right > left && bottom > top ? { left: left / width, top: top / height, width: (right - left) / width, height: (bottom - top) / height } : null;
+  } finally {
+    canvas.width = canvas.height = 0;
+  }
+}
+
+function uploadLayerTexture(renderer: Renderer, src: string, image: ImageBitmap | HTMLCanvasElement, maxPixels: number): LayerTextureUpload {
   const { gl } = renderer;
   const size = textureDimensions(image.width, image.height, maxPixels, gl.getParameter(gl.MAX_TEXTURE_SIZE));
   let resized: HTMLCanvasElement | null = null;
@@ -448,9 +494,9 @@ function uploadLayerTexture(renderer: Renderer, src: string, image: ImageBitmap 
   renderer.layerTextures.set(src, texture);
   renderer.layerTextureBytes.set(src, size.width * size.height * 4);
   const content = textureContentRect(image, maxPixels);
-  if (content !== undefined) renderer.layerContentRects.set(src, content);
+  if (content.rect !== undefined) renderer.layerContentRects.set(src, content.rect);
   renderer.sourcePlanes = null;
-  return true;
+  return { uploaded: true, scan: content.scan };
 }
 
 function contentPlane(renderer: Renderer, plane: ScenePlane): ScenePlane | null {
@@ -720,7 +766,11 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
   const shownGroupImages = collapsedRecords.map(record => groupImageFor(record, groupImages, hiddenNodeIds)).filter((image): image is QmlGroupImage => Boolean(image));
   const textureRecords = useMemo(() => [parent, ...records].filter((record): record is LayerRecord => Boolean(record && hasOwnVisualStyle(record, size, hiddenNodeIds, groupImages) && (record.isCollapsed || record.node.layerImageDataUrl))), [groupImages, hiddenNodeIds, parent, records, size]);
   const nativeLayerClips = useMemo(() => new Map(textureRecords.filter(record => !record.isCollapsed).map(record => [record.id, outlineAncestors(record, treeIndex)])), [textureRecords, treeIndex]);
-  const nativeTextureKeys = useMemo(() => new Map(textureRecords.filter(record => !record.isCollapsed).map(record => [record.id, outlineTextureKey(record, nativeLayerClips.get(record.id) ?? [])])), [textureRecords, nativeLayerClips]);
+  const nativeTextureKeys = useMemo(() => new Map(textureRecords.filter(record => !record.isCollapsed).map(record => [record.id, nativeTextureKey(record, nativeLayerClips.get(record.id) ?? [])])), [textureRecords, nativeLayerClips]);
+  // Drop version entries for nodes that left the tree so stale images are not retained.
+  useEffect(() => {
+    for (const id of textureImageVersions.keys()) if (!treeIndex.nodes.has(id)) textureImageVersions.delete(id);
+  }, [treeIndex]);
   const localCompositeCount = textureRecords.filter(record => record.isCollapsed && !groupImageFor(record, groupImages, hiddenNodeIds)).length;
   // Camera/hover changes don't change the required images or restart decoding.
   const textureKey = `${visibilityKey}|${textureRecords.map((record) => `${record.id}:${record.isCollapsed ? collapsedTextureKey(record, visibilityKey, groupImageFor(record, groupImages, hiddenNodeIds)) : nativeTextureKeys.get(record.id)}`).join("|")}`;
@@ -1011,6 +1061,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
       renderer.layerTextures.delete(key);
       renderer.layerTextureBytes.delete(key);
       renderer.layerContentRects.delete(key);
+      renderer.layerAlphaScans.delete(key);
       renderer.sourcePlanes = null;
     }
     const load = async (node: UiNode) => {
@@ -1037,8 +1088,21 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
             finally { if (image !== bitmap) bitmap.close(); }
           }
           if (!alive || rendererRef.current !== renderer) return;
-          if (!uploadLayerTexture(renderer, key, image, maxPixels)) throw new Error("图层纹理上传失败");
+          const upload = uploadLayerTexture(renderer, key, image, maxPixels);
+          if (upload === false) throw new Error("图层纹理上传失败");
           if (repaint === null) repaint = requestAnimationFrame(() => { repaint = null; drawRef.current(); });
+          if (upload.scan) {
+            let scan = renderer.layerAlphaScans.get(key);
+            if (!scan) {
+              scan = upload.scan();
+              renderer.layerAlphaScans.set(key, scan);
+            }
+            const content = await scan;
+            if (rendererRef.current !== renderer) return;
+            renderer.layerContentRects.set(key, content);
+            renderer.sourcePlanes = null;
+            if (alive && repaint === null) repaint = requestAnimationFrame(() => { repaint = null; drawRef.current(); });
+          }
         } catch (error) {
           if (alive) setTextureWarning(error instanceof Error ? error.message : "部分图层未能加载");
         } finally {

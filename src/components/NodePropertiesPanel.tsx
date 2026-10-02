@@ -13,6 +13,7 @@ type Props = {
   copyStatus: string | null;
   onRefresh?: () => void;
   onRefreshBranch?: () => void;
+  onRefreshList?: () => void;
   onReadStyle?: () => Promise<ViewStyleResult>;
   refreshBusy?: boolean;
   refreshStatus?: string | null;
@@ -93,7 +94,7 @@ function placeInspector(panel: HTMLElement, x: number, y: number) {
   panel.style.setProperty("--inspector-top", `${Math.max(minTop, Math.min(y, viewportHeight - Math.min(panel.offsetHeight, 160) - 16))}px`);
 }
 
-export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, onCopy, copyStatus, onRefresh, onRefreshBranch, onReadStyle, refreshBusy, refreshStatus, children }: Props) {
+export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, onCopy, copyStatus, onRefresh, onRefreshBranch, onRefreshList, onReadStyle, refreshBusy, refreshStatus, children }: Props) {
   const [visible, setVisible] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
   const [search, setSearch] = useState("");
@@ -403,6 +404,7 @@ export function NodePropertiesPanel({ root, node, screenshotSize, toolbarHost, o
                 {onReadStyle && <button className="inspector-style-read" type="button" disabled={styleBusy} onClick={() => void readStyle()}>{styleBusy ? "正在读取样式…" : "读取实时样式"}</button>}
                 {onRefresh && <button className="inspector-image-refresh" type="button" disabled={refreshBusy} onClick={onRefresh}>{refreshBusy ? "正在刷新…" : "刷新当前控件"}</button>}
                 {onRefreshBranch && <button className="inspector-image-refresh" type="button" disabled={refreshBusy} onClick={onRefreshBranch}>{refreshBusy ? "正在刷新…" : "刷新此分支"}</button>}
+                {onRefreshList && <button className="inspector-image-refresh" type="button" disabled={refreshBusy} onClick={onRefreshList}>{refreshBusy ? "正在刷新…" : "刷新可见项（分批）"}</button>}
                 {styleError && <p className="inspector-image-note" role="status">{styleError}</p>}
                 {shownStyle && <>
                   <p className="inspector-image-note">Debug SDK 实时读取 · {new Date(shownStyle.capturedAtMillis).toLocaleString()} · 不修改快照</p>

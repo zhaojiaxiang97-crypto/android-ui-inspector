@@ -1,8 +1,67 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { joinSdkTreeAndDebugImages, sdkGroupBranchMatches, verifySdkTreeBeforeImages } from "../electron/sdk-hybrid";
+import { adoptSdkTree, joinSdkTreeAndDebugImages, sdkGroupBranchMatches, verifySdkTreeBeforeImages } from "../electron/sdk-hybrid";
 import { makeNode } from "../benchmarks/fixtures";
 import type { UiNode, UiSnapshot } from "../shared/types";
+
+test("SDK-only happy path adopts the SDK tree and fails closed on dump mismatches", () => {
+  const props = { visible: true, clickable: false, enabled: true, focusable: false, focused: false, selected: false,
+    scrollable: false, alpha: 1, elevation: 0, paddingLeft: 0, paddingTop: 0, paddingRight: 0, paddingBottom: 0 };
+  const child = { ...props, ref: "android.widget.TextView@b", className: "android.widget.TextView",
+    width: 30, height: 20, screenX: 10, screenY: 20, text: "RED CHILD", layoutParamsClass: "android.widget.FrameLayout$LayoutParams",
+    layoutWidth: -1, layoutHeight: 20, children: [] };
+  const sdk = { version: 1, styleVersion: 1, packageName: "sample.app", pid: 42,
+    processInstance: "11111111-1111-1111-1111-111111111111", capturedAtMillis: 1, nodeCount: 2,
+    root: { ...props, ref: "android.widget.FrameLayout@a", className: "android.widget.FrameLayout",
+      width: 100, height: 100, screenX: 0, screenY: 0,
+      layoutParamsClass: "android.widget.LinearLayout$LayoutParams", layoutWidth: 100, layoutHeight: 100, children: [child] } };
+  const donors = () => {
+    const text: UiNode = { ...makeNode("0/0/0"), className: "android.widget.TextView", text: null,
+      bounds: { left: 19, top: 29, right: 49, bottom: 49, raw: "[19,29][49,49]" },
+      attributes: { "view-ref": "android.widget.TextView@b", "inspection-source": "debug-view", "view-flags": "V.E....." } };
+    const parent: UiNode = { ...makeNode("0/0"), className: "android.widget.FrameLayout", text: null,
+      bounds: { left: 0, top: 0, right: 100, bottom: 100, raw: "[0,0][100,100]" },
+      attributes: { "view-ref": "android.widget.FrameLayout@a", "inspection-source": "debug-view" }, children: [text] };
+    return { ...makeNode("0"), package: "sample.app", children: [parent] } as UiNode;
+  };
+  const root = donors();
+  adoptSdkTree(root, sdk, "sample.app", 42);
+  assert.equal(root.children[0].bounds?.left, 0, "adopted geometry comes from the SDK");
+  assert.equal(root.children[0].children[0].bounds?.left, 10, "stale dump coordinates do not leak into the tree");
+  assert.equal(root.children[0].children[0].text, "RED CHILD", "SDK text is used when the dump has none");
+  assert.equal(root.children[0].children[0].attributes?.["tree-source"], "debug-sdk");
+  assert.equal(root.children[0].children[0].attributes?.["view-flags"], "V.E.....", "dump extras are kept");
+  assert.equal(root.children[0].children[0].attributes?.["alpha"], "1");
+  assert.equal(root.children[0].children[0].attributes?.["effective-alpha"], "1");
+  assert.equal(root.attributes?.["sdk-process-instance"], sdk.processInstance);
+  assert.doesNotThrow(() => verifySdkTreeBeforeImages(root, 3, sdk, "sample.app", 42), "the adopted tree satisfies the normal merger");
+  const faded = donors();
+  adoptSdkTree(faded, { ...sdk, root: { ...sdk.root, alpha: 0.5, children: [{ ...child, alpha: 0 }] } }, "sample.app", 42);
+  assert.equal(faded.children[0].children[0].attributes?.["effective-alpha"], "0");
+  assert.equal(faded.children[0].children[0].visibleToUser, false, "a transparent branch is hidden");
+
+  const wrapped = donors();
+  const mid = { ...props, ref: "android.widget.FrameLayout@c2", className: "android.widget.FrameLayout",
+    width: 100, height: 100, screenX: 0, screenY: 0, layoutParamsClass: "android.widget.LinearLayout$LayoutParams",
+    layoutWidth: 100, layoutHeight: 100, children: [{ ...child }] };
+  adoptSdkTree(wrapped, { ...sdk, nodeCount: 3, root: { ...sdk.root, children: [mid] } }, "sample.app", 42);
+  assert.equal(wrapped.children[0].children[0].attributes?.["view-ref"], "android.widget.FrameLayout@c2", "a wrapper dropped by the dump text is restored from the SDK");
+  assert.equal(wrapped.children[0].children[0].children[0].attributes?.["view-ref"], "android.widget.TextView@b");
+
+  const extra = donors();
+  extra.children[0].children.push({ ...makeNode("0/0/1"), className: "android.widget.ImageView",
+    attributes: { "view-ref": "android.widget.ImageView@e1", "inspection-source": "debug-view" } });
+  assert.throws(() => adoptSdkTree(extra, sdk, "sample.app", 42), /不在 SDK 树中/);
+  const resized = donors();
+  resized.children[0].children[0].bounds = { left: 10, top: 20, right: 41, bottom: 40, raw: "[10,20][41,40]" };
+  assert.throws(() => adoptSdkTree(resized, sdk, "sample.app", 42), /尺寸不一致/);
+  const misplaced = donors();
+  misplaced.children[0].children[0].children.push({ ...makeNode("0/0/0/0"), className: "android.widget.FrameLayout",
+    attributes: { "view-ref": "android.widget.FrameLayout@a", "inspection-source": "debug-view" } });
+  assert.throws(() => adoptSdkTree(misplaced, sdk, "sample.app", 42), /父子关系/);
+  assert.throws(() => adoptSdkTree(donors(), { ...sdk, root: { ...sdk.root, ref: "android.widget.FrameLayout@c" } }, "sample.app", 42), /窗口/);
+  assert.throws(() => adoptSdkTree(donors(), sdk, "sample.app", 43), /进程/);
+});
 
 test("SDK tree joins only the same process, view identities and geometry", () => {
   const text: UiNode = { ...makeNode("0/0/0"), className: "android.widget.TextView", text: null,

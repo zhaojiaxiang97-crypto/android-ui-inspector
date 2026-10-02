@@ -9,7 +9,7 @@ declare global {
       probeAdb: () => Promise<AdbProbeResult>;
       inspectDevice: (serial: string, requestId: string, priorityViewRef?: string | null) => Promise<UiSnapshot>;
       captureGroup: (requestId: string, nodeId: string) => Promise<QmlGroupImage | null>;
-      refreshViewNode: (requestId: string, nodeId: string, scope?: "node" | "branch") => Promise<ViewRefreshResult>;
+      refreshViewNode: (requestId: string, nodeId: string, scope?: "node" | "branch" | "list") => Promise<ViewRefreshResult>;
       readViewStyle: (requestId: string, nodeId: string) => Promise<ViewStyleResult>;
       cancelInspection: (requestId: string) => Promise<void>;
       showLayerMenu: (canHide: boolean, canRestore: boolean, canExitFocus: boolean) => Promise<LayerMenuAction>;

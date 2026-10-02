@@ -13,6 +13,10 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.database.Cursor;
+import android.net.Credentials;
+import android.net.LocalServerSocket;
+import android.net.LocalSocket;
+import android.net.LocalSocketAddress;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
@@ -21,10 +25,12 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
 import android.os.SystemClock;
+import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.SurfaceView;
 import android.view.TextureView;
+import android.view.PixelCopy;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
@@ -34,10 +40,14 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
@@ -48,10 +58,16 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.CRC32;
 import org.lsposed.hiddenapibypass.HiddenApiBypass;
@@ -84,6 +100,8 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
     private static final HashMap<Class<?>, HashMap<String, Field>> CONSTRAINT_FIELDS = new HashMap<>();
     private final String processInstance = UUID.randomUUID().toString();
     private volatile WeakReference<Activity> resumed = new WeakReference<>(null);
+    private static final String SESSION_SUFFIX = ".inspector.session";
+    private volatile Session session;
 
     @Override public boolean onCreate() {
         Application app = (Application) getContext().getApplicationContext();
@@ -91,24 +109,162 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
         return true;
     }
 
+    private static boolean isDataMethod(String method) {
+        return "capture".equals(method) || "capture-own".equals(method) || "capture-own-batch".equals(method)
+                || "capture-group".equals(method) || "capture-visible".equals(method) || "capture-refs".equals(method)
+                || "capture-style".equals(method);
+    }
+
     @Override public synchronized Bundle call(String method, String arg, Bundle extras) {
         Bundle answer = new Bundle();
         Application app = (Application) getContext().getApplicationContext();
-        if (!("capture".equals(method) || "capture-own".equals(method) || "capture-own-batch".equals(method) || "capture-group".equals(method) || "capture-visible".equals(method) || "capture-style".equals(method)) || Binder.getCallingUid() != 2000 // Android shell UID
+        if (!(isDataMethod(method) || "open-session".equals(method) || "close-session".equals(method)) || Binder.getCallingUid() != 2000 // Android shell UID
                 || (app.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0) {
             answer.putString("error", "Unauthorized or unsupported request");
             return answer;
         }
-        if (Build.VERSION.SDK_INT < 26 && !"capture".equals(method) && !"capture-style".equals(method)) {
+        return dispatch(method, arg, extras);
+    }
+
+    /** Runs one provider request on the same monitor as binder calls, for both transports. */
+    private synchronized Bundle dispatch(String method, String arg, Bundle extras) {
+        Bundle answer = new Bundle();
+        Application app = (Application) getContext().getApplicationContext();
+        if (Build.VERSION.SDK_INT < 26 && !"capture".equals(method) && !"capture-style".equals(method)
+                && !"open-session".equals(method) && !"close-session".equals(method)) {
             answer.putString("error", "Own View capture requires Android 8 or later");
             return answer;
         }
+        if ("open-session".equals(method)) return openSession(app);
+        if ("close-session".equals(method)) return closeSession();
         if ("capture-own".equals(method)) return captureOwn(app, arg);
         if ("capture-own-batch".equals(method)) return captureOwnBatch(app, arg);
         if ("capture-group".equals(method)) return captureView(app, arg, "inspector-group-image.png", 20_000_000, 4_000_000, true);
         if ("capture-visible".equals(method)) return captureVisible(app, arg, extras);
+        if ("capture-refs".equals(method)) return captureRefs(app, arg, extras);
         if ("capture-style".equals(method)) return captureStyle(arg);
-        AtomicReference<String> data = new AtomicReference<>();
+        try {
+            writeTreeFile(app, FILE_NAME);
+            answer.putString("result", "ok");
+        } catch (Exception error) {
+            answer.putString("error", error.getMessage());
+        }
+        return answer;
+    }
+
+    /** Experimental: opens a debug-only local session so the desktop can reach the same handlers without a `content` CLI process per request. */
+    private Bundle openSession(Application app) {
+        Bundle answer = new Bundle();
+        try {
+            Session current = session;
+            if (current == null) {
+                current = new Session(app, this);
+                session = current;
+            }
+            current.touch();
+            answer.putString("result", "ok");
+            answer.putString("socket", app.getPackageName() + SESSION_SUFFIX);
+        } catch (Exception error) {
+            answer.putString("error", String.valueOf(error));
+        }
+        return answer;
+    }
+
+    private Bundle closeSession() {
+        Session current = session;
+        session = null;
+        if (current != null) current.close();
+        Bundle answer = new Bundle();
+        answer.putString("result", "ok");
+        return answer;
+    }
+
+    /**
+     * Experimental session channel: a local abstract socket serving the same handlers (line-delimited
+     * JSON request, "Result: Bundle[...]" reply). Debug-only, shell/root peer UID required.
+     */
+    private static final class Session {
+        private final HierarchyProvider provider;
+        private final LocalServerSocket server;
+        private final String name;
+        private volatile boolean stopped;
+
+        Session(Application app, HierarchyProvider provider) throws IOException {
+            this.provider = provider;
+            this.name = app.getPackageName() + SESSION_SUFFIX;
+            this.server = new LocalServerSocket(name);
+            Thread thread = new Thread(this::loop, "inspector-session");
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        void touch() { }
+
+        void close() {
+            stopped = true;
+            // Closing the server socket does not wake a blocked accept(); a self-connection does.
+            try { LocalSocket wake = new LocalSocket(); wake.connect(new LocalSocketAddress(name)); wake.close(); }
+            catch (IOException ignored) { }
+            try { server.close(); } catch (IOException ignored) { }
+        }
+
+        private void loop() {
+            while (!stopped) {
+                LocalSocket client;
+                try { client = server.accept(); }
+                catch (IOException closed) { return; }
+                if (stopped) {
+                    try { client.close(); } catch (IOException ignored) { }
+                    return;
+                }
+                handle(client);
+            }
+        }
+
+        private void handle(LocalSocket client) {
+            try {
+                Credentials credentials = client.getPeerCredentials();
+                int uid = credentials == null ? -1 : credentials.getUid();
+                Log.i("InspectorSession", "peer uid=" + uid);
+                if (uid != 2000 && uid != 0) return;
+                BufferedReader reader = new BufferedReader(new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
+                OutputStream output = client.getOutputStream();
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    JSONObject request = new JSONObject(line);
+                    String method = request.getString("method");
+                    String arg = request.isNull("arg") ? null : request.optString("arg", null);
+                    Bundle extras = new Bundle();
+                    JSONObject wanted = request.optJSONObject("extras");
+                    if (wanted != null) {
+                        for (Iterator<String> keys = wanted.keys(); keys.hasNext(); ) {
+                            String key = keys.next();
+                            Object value = wanted.get(key);
+                            if (value instanceof Boolean) extras.putBoolean(key, (Boolean) value);
+                            else extras.putString(key, String.valueOf(value));
+                        }
+                    }
+                    Bundle answer;
+                    if (isDataMethod(method)) {
+                        answer = provider.dispatch(method, arg, extras);
+                    } else {
+                        answer = new Bundle();
+                        answer.putString("error", "Unknown session method");
+                    }
+                    output.write(("Result: " + answer + "\n").getBytes(StandardCharsets.UTF_8));
+                    output.flush();
+                }
+            } catch (Exception error) {
+                Log.w("InspectorSession", "request failed: " + error);
+            } finally {
+                try { client.close(); } catch (IOException ignored) { }
+            }
+        }
+    }
+
+    /** Builds the hierarchy JSON on the main thread and publishes it atomically. */
+    private void writeTreeFile(Application app, String fileName) throws Exception {
+        AtomicReference<JSONObject> data = new AtomicReference<>();
         AtomicReference<Throwable> failure = new AtomicReference<>();
         CountDownLatch ready = new CountDownLatch(1);
         new Handler(Looper.getMainLooper()).post(() -> {
@@ -117,29 +273,24 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
                 if (activity == null) throw new IllegalStateException("No resumed Activity");
                 View root = activity.getWindow().getDecorView();
                 if (!root.isAttachedToWindow()) throw new IllegalStateException("Window is detached");
-                data.set(captureTree(app, root).toString());
+                data.set(captureTree(app, root));
             } catch (Throwable error) {
                 failure.set(error);
             } finally {
                 ready.countDown();
             }
         });
-        try {
-            if (!ready.await(3, TimeUnit.SECONDS)) throw new IllegalStateException("View tree timed out");
-            if (failure.get() != null) throw new IllegalStateException(failure.get().toString());
-            byte[] bytes = data.get().getBytes(StandardCharsets.UTF_8);
-            if (bytes.length > 4_000_000) throw new IllegalStateException("View tree exceeds 4 MB");
-            File file = new File(app.getNoBackupFilesDir(), FILE_NAME);
-            File pending = new File(app.getNoBackupFilesDir(), FILE_NAME + ".tmp");
-            try (FileOutputStream stream = new FileOutputStream(pending)) {
-                stream.write(bytes);
-            }
-            if (!pending.renameTo(file)) throw new IllegalStateException("Could not publish View tree");
-            answer.putString("result", "ok");
-        } catch (Exception error) {
-            answer.putString("error", error.getMessage());
+        if (!ready.await(3, TimeUnit.SECONDS)) throw new IllegalStateException("View tree timed out");
+        if (failure.get() != null) throw new IllegalStateException(failure.get().toString());
+        // ponytail: stringify off the main thread; serializing a large tree costs seconds and used to sit inside the 3 s main-thread budget.
+        byte[] bytes = data.get().toString().getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > 4_000_000) throw new IllegalStateException("View tree exceeds 4 MB");
+        File file = new File(app.getNoBackupFilesDir(), fileName);
+        File pending = new File(app.getNoBackupFilesDir(), fileName + ".tmp");
+        try (FileOutputStream stream = new FileOutputStream(pending)) {
+            stream.write(bytes);
         }
-        return answer;
+        if (!pending.renameTo(file)) throw new IllegalStateException("Could not publish View tree");
     }
 
     private Bundle captureOwn(Application app, String wanted) {
@@ -228,6 +379,66 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
         }
     }
 
+    private static final int MAX_PIPELINE_DEPTH = 4;
+
+    private static final class VisibleRecord {
+        final String ref;
+        final int x, y;
+        final byte[] image;
+        final int crc;
+        final boolean webp;
+        VisibleRecord(String ref, int x, int y, byte[] image, int crc, boolean webp) {
+            this.ref = ref;
+            this.x = x;
+            this.y = y;
+            this.image = image;
+            this.crc = crc;
+            this.webp = webp;
+        }
+    }
+
+    private static VisibleRecord encodeVisibleLayer(Bitmap bitmap, String ref, int x, int y, boolean webpLossless, AtomicLong encodeMs) {
+        long imageStarted = SystemClock.uptimeMillis();
+        try {
+            ByteArrayOutputStream png = new ByteArrayOutputStream();
+            Bitmap.CompressFormat format = webpLossless ? Bitmap.CompressFormat.WEBP_LOSSLESS : Bitmap.CompressFormat.PNG;
+            if (!bitmap.compress(format, webpLossless ? 0 : 100, png) || png.size() > 10_000_000)
+                throw new IllegalStateException("View image exceeds capture budget");
+            byte[] image = png.toByteArray();
+            int crc = 0;
+            if (webpLossless) {
+                CRC32 checksum = new CRC32();
+                checksum.update(image);
+                crc = (int) checksum.getValue();
+            }
+            return new VisibleRecord(ref, x, y, image, crc, webpLossless);
+        } finally {
+            encodeMs.addAndGet(SystemClock.uptimeMillis() - imageStarted);
+            bitmap.recycle();
+        }
+    }
+
+    private static int writeVisibleRecord(DataOutputStream output, Future<VisibleRecord> future) throws Exception {
+        VisibleRecord record;
+        try {
+            record = future.get();
+        } catch (ExecutionException wrapped) {
+            Throwable cause = wrapped.getCause();
+            if (cause instanceof Exception) throw (Exception) cause;
+            if (cause instanceof Error) throw (Error) cause;
+            throw wrapped;
+        }
+        output.writeByte(1);
+        output.writeUTF(record.ref);
+        output.writeByte(1);
+        output.writeInt(record.x);
+        output.writeInt(record.y);
+        output.writeInt(record.image.length);
+        output.write(record.image);
+        if (record.webp) output.writeInt(record.crc);
+        return 1;
+    }
+
     private static boolean customDispatchDraw(Class<?> type) {
         for (Class<?> current = type; current != View.class && current != ViewGroup.class; current = current.getSuperclass()) {
             try { current.getDeclaredMethod("dispatchDraw", Canvas.class); return true; }
@@ -247,6 +458,17 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
         if (priorityRef != null && !priorityRef.matches("[\\w.$]+@[0-9a-fA-F]{1,8}")) {
             answer.putString("error", "Invalid priority View identity");
             return answer;
+        }
+        // Merged capture: write the hierarchy first so the desktop can adopt it while the
+        // layers render; the layer request itself is unchanged and independent of the tree.
+        if (extras != null && extras.getBoolean("withTree", false) && nonce != null) {
+            try {
+                writeTreeFile(app, "inspector-tree-" + nonce + ".json");
+                answer.putString("tree", "ok");
+            } catch (Exception error) {
+                // The layer capture below is independent; the desktop falls back to the classic fetch.
+                answer.putString("tree", "failed");
+            }
         }
         File file = new File(app.getNoBackupFilesDir(), "inspector-visible-layers.bin");
         File pending = new File(app.getNoBackupFilesDir(), "inspector-visible-layers.bin.tmp");
@@ -329,14 +551,25 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
             }
         });
         long started = SystemClock.uptimeMillis();
+        ExecutorService encoders = null;
         try {
             if (!ready.await(3, TimeUnit.SECONDS)) throw new IllegalStateException("View selection timed out");
             if (failure.get() != null) throw new IllegalStateException(failure.get().toString());
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             int count = 0, empty = 0;
             StringBuilder specialRefs = new StringBuilder();
-            long renderMs = 0, encodeMs = 0;
+            long renderMs = 0;
+            AtomicLong encodeMs = new AtomicLong();
             boolean webpLossless = Build.VERSION.SDK_INT >= 30;
+            // ponytail: render and encode used to run back-to-back in one loop; a bounded two-worker
+            // pipeline now overlaps WEBP/PNG compression with the next View capture, while the ordered
+            // writer keeps the streaming file and its digest identical to the serial loop.
+            encoders = Executors.newFixedThreadPool(2, runnable -> {
+                Thread thread = new Thread(runnable, "inspector-encode");
+                thread.setDaemon(true);
+                return thread;
+            });
+            ArrayDeque<Future<VisibleRecord>> inFlight = new ArrayDeque<>();
             try (DataOutputStream output = new DataOutputStream(new DigestOutputStream(new FileOutputStream(pending), digest))) {
                 output.writeLong(nonce == null ? 0 : Long.parseUnsignedLong(nonce, 16)); // Request identity in the DDMS header.
                 Class<?> debug = Class.forName("android.view.ViewDebug");
@@ -354,31 +587,10 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
                     if (bitmap == null) {
                         empty++; continue;
                     }
-                    try {
-                        ByteArrayOutputStream png = new ByteArrayOutputStream();
-                        imageStarted = SystemClock.uptimeMillis();
-                        Bitmap.CompressFormat format = webpLossless ? Bitmap.CompressFormat.WEBP_LOSSLESS : Bitmap.CompressFormat.PNG;
-                        if (!bitmap.compress(format, webpLossless ? 0 : 100, png) || png.size() > 10_000_000)
-                            throw new IllegalStateException("View image exceeds capture budget");
-                        encodeMs += SystemClock.uptimeMillis() - imageStarted;
-                        output.writeByte(1);
-                        output.writeUTF(layer.ref);
-                        output.writeByte(1);
-                        output.writeInt(layer.x);
-                        output.writeInt(layer.y);
-                        output.writeInt(png.size());
-                        if (webpLossless) {
-                            byte[] encoded = png.toByteArray();
-                            output.write(encoded);
-                            CRC32 checksum = new CRC32();
-                            checksum.update(encoded);
-                            output.writeInt((int) checksum.getValue());
-                        } else png.writeTo(output);
-                        count++;
-                    } finally {
-                        bitmap.recycle();
-                    }
+                    while (inFlight.size() >= MAX_PIPELINE_DEPTH) count += writeVisibleRecord(output, inFlight.pollFirst());
+                    inFlight.addLast(encoders.submit(() -> encodeVisibleLayer(bitmap, layer.ref, layer.x, layer.y, webpLossless, encodeMs)));
                 }
+                while (!inFlight.isEmpty()) count += writeVisibleRecord(output, inFlight.pollFirst());
                 output.writeByte(2);
             }
             if (selectedRoot.get() != resumed.get().getWindow().getDecorView() || !selectedRoot.get().isAttachedToWindow()
@@ -393,7 +605,7 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
             answer.putString("specialRefs", specialRefs.length() == 0 ? "-" : specialRefs.toString());
             answer.putString("pureRefs", pureRefs.get());
             answer.putLong("renderMs", renderMs);
-            answer.putLong("encodeMs", encodeMs);
+            answer.putLong("encodeMs", encodeMs.get());
             answer.putLong("durationMs", SystemClock.uptimeMillis() - started);
             answer.putLong("bytes", file.length());
             StringBuilder sha256 = new StringBuilder(64);
@@ -403,9 +615,275 @@ public final class HierarchyProvider extends ContentProvider implements Applicat
             file.delete();
             answer.putString("error", error.toString());
         } finally {
+            if (encoders != null) encoders.shutdownNow();
             pending.delete();
         }
         return answer;
+    }
+
+    private Bundle captureRefs(Application app, String arg, Bundle extras) {
+        Bundle answer = new Bundle();
+        if (arg == null || arg.length() > 12_000) {
+            answer.putString("error", "Invalid ref list");
+            return answer;
+        }
+        String[] refs = arg.split(";", -1);
+        if (refs.length < 1 || refs.length > 80) {
+            answer.putString("error", "Ref batch supports 1-80 Views");
+            return answer;
+        }
+        HashSet<String> unique = new HashSet<>();
+        for (String ref : refs) {
+            if (ref.length() > 256 || !ref.matches("[\\w.$]+@[0-9a-f]{1,8}") || !unique.add(ref)) {
+                answer.putString("error", "Invalid or duplicate View identity");
+                return answer;
+            }
+        }
+        String nonce = extras == null ? null : extras.getString("nonce");
+        if (nonce != null && !nonce.matches("[0-9a-f]{16}")) {
+            answer.putString("error", "Invalid capture nonce");
+            return answer;
+        }
+        File file = new File(app.getNoBackupFilesDir(), "inspector-ref-layers.bin");
+        File pending = new File(app.getNoBackupFilesDir(), "inspector-ref-layers.bin.tmp");
+        file.delete();
+        pending.delete();
+        AtomicReference<ArrayList<RefLayer>> selected = new AtomicReference<>();
+        AtomicReference<View> selectedRoot = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        CountDownLatch ready = new CountDownLatch(1);
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                Activity activity = resumed.get();
+                if (activity == null) throw new IllegalStateException("No resumed Activity");
+                View root = activity.getWindow().getDecorView();
+                if (!root.isAttachedToWindow()) throw new IllegalStateException("Window is detached");
+                Field flags = null, overlay = null;
+                for (Field field : HiddenApiBypass.getInstanceFields(View.class)) {
+                    if ("mPrivateFlags".equals(field.getName())) flags = field;
+                    if ("mOverlay".equals(field.getName())) overlay = field;
+                }
+                if (flags == null) throw new IllegalStateException("View draw flags unavailable");
+                flags.setAccessible(true);
+                try { if (overlay != null) overlay.setAccessible(true); }
+                catch (RuntimeException unavailable) { overlay = null; }
+                ArrayList<RefLayer> result = new ArrayList<>();
+                int[] position = new int[2];
+                for (String wanted : refs) {
+                    View view = findUnique(root, wanted);
+                    if (view == null || !view.isShown() || view.getWidth() <= 0 || view.getHeight() <= 0) {
+                        result.add(new RefLayer(wanted, "控件缺失或不可见", '-'));
+                        continue;
+                    }
+                    view.getLocationOnScreen(position);
+                    int x = position[0], y = position[1];
+                    if (view instanceof SurfaceView) {
+                        // ponytail: surface buffers are copied after the main-thread pass; a live frame is required.
+                        result.add(new RefLayer(wanted, (SurfaceView) view, x, y));
+                        continue;
+                    }
+                    if (view instanceof TextureView) {
+                        Bitmap frame = ((TextureView) view).getBitmap(view.getWidth(), view.getHeight());
+                        result.add(frame == null ? new RefLayer(wanted, "缓冲层读取失败", 'T') : new RefLayer(wanted, frame, x, y, 'T'));
+                        continue;
+                    }
+                    if ((flags.getInt(view) & 0x80) != 0 && (overlay == null || overlay.get(view) == null) && !customDispatchDraw(view.getClass())) {
+                        result.add(new RefLayer(wanted, "结构容器，系统跳过自身绘制", '-', true));
+                        continue;
+                    }
+                    Bitmap own = IsolatedCapture.own(view);
+                    result.add(own == null ? new RefLayer(wanted, "位图生成失败", '-') : new RefLayer(wanted, own, x, y, '-'));
+                }
+                selectedRoot.set(root);
+                selected.set(result);
+            } catch (Throwable error) {
+                failure.set(error);
+            } finally {
+                ready.countDown();
+            }
+        });
+        long started = SystemClock.uptimeMillis();
+        ExecutorService encoders = null;
+        try {
+            if (!ready.await(3, TimeUnit.SECONDS)) throw new IllegalStateException("View selection timed out");
+            if (failure.get() != null) throw new IllegalStateException(failure.get().toString());
+            StringBuilder special = new StringBuilder();
+            StringBuilder pure = new StringBuilder();
+            StringBuilder failures = new StringBuilder();
+            StringBuilder empties = new StringBuilder();
+            for (RefLayer layer : selected.get()) {
+                if (layer.surface != null) copySurfaceLayer(layer);
+                if (layer.pure) {
+                    if (pure.length() > 0) pure.append(';');
+                    pure.append(layer.ref);
+                } else if (layer.failure != null) {
+                    if (failures.length() > 0) failures.append(';');
+                    failures.append(layer.ref).append(':').append(layer.failure);
+                } else {
+                    boolean blank = isEmptyBitmap(layer.bitmap);
+                    if (layer.special != '-' && blank) {
+                        layer.bitmap.recycle();
+                        layer.bitmap = null;
+                        if (failures.length() > 0) failures.append(';');
+                        failures.append(layer.ref).append(':').append(BUFFER_EMPTY_REASON);
+                        continue;
+                    }
+                    if (layer.special != '-') {
+                        if (special.length() > 0) special.append(';');
+                        special.append(layer.special).append(':').append(layer.ref);
+                    }
+                    if (blank) {
+                        if (empties.length() > 0) empties.append(';');
+                        empties.append(layer.ref);
+                    }
+                }
+                if (special.length() > 6_000 || pure.length() > 16_000 || failures.length() > 16_000 || empties.length() > 16_000)
+                    throw new IllegalStateException("Ref capture result exceeds budget");
+            }
+            long renderMs = SystemClock.uptimeMillis() - started;
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            boolean webpLossless = Build.VERSION.SDK_INT >= 30;
+            int count = 0;
+            AtomicLong encodeMs = new AtomicLong();
+            // ponytail: same bounded render/encode pipeline as capture-visible; records keep the request order.
+            encoders = Executors.newFixedThreadPool(2, runnable -> {
+                Thread thread = new Thread(runnable, "inspector-encode");
+                thread.setDaemon(true);
+                return thread;
+            });
+            ArrayDeque<Future<VisibleRecord>> inFlight = new ArrayDeque<>();
+            try (DataOutputStream output = new DataOutputStream(new DigestOutputStream(new FileOutputStream(pending), digest))) {
+                output.writeLong(nonce == null ? 0 : Long.parseUnsignedLong(nonce, 16));
+                for (RefLayer layer : selected.get()) {
+                    if (layer.bitmap == null) continue;
+                    if (SystemClock.uptimeMillis() - started > 60_000) throw new IllegalStateException("Ref capture time budget exceeded");
+                    while (inFlight.size() >= MAX_PIPELINE_DEPTH) count += writeVisibleRecord(output, inFlight.pollFirst());
+                    Bitmap bitmap = layer.bitmap;
+                    String ref = layer.ref;
+                    int x = layer.x, y = layer.y;
+                    inFlight.addLast(encoders.submit(() -> encodeVisibleLayer(bitmap, ref, x, y, webpLossless, encodeMs)));
+                }
+                while (!inFlight.isEmpty()) count += writeVisibleRecord(output, inFlight.pollFirst());
+                output.writeByte(2);
+            } finally {
+                encoders.shutdownNow();
+            }
+            if (selectedRoot.get() != resumed.get().getWindow().getDecorView() || !selectedRoot.get().isAttachedToWindow()
+                    || pending.length() > 64_000_000 || !pending.renameTo(file)) throw new IllegalStateException("Activity changed during ref capture");
+            answer.putString("result", "ok");
+            if (nonce != null) answer.putString("nonce", nonce);
+            answer.putString("processInstance", processInstance);
+            answer.putString("rootRef", ref(selectedRoot.get()));
+            answer.putInt("count", count);
+            answer.putInt("requested", refs.length);
+            answer.putString("special", special.length() == 0 ? "-" : special.toString());
+            answer.putString("pure", pure.length() == 0 ? "-" : pure.toString());
+            answer.putString("failures", failures.length() == 0 ? "-" : failures.toString());
+            answer.putString("empty", empties.length() == 0 ? "-" : empties.toString());
+            answer.putLong("renderMs", renderMs);
+            answer.putLong("encodeMs", encodeMs.get());
+            answer.putLong("durationMs", SystemClock.uptimeMillis() - started);
+            answer.putLong("bytes", file.length());
+            StringBuilder sha256 = new StringBuilder(64);
+            for (byte value : digest.digest()) sha256.append(String.format("%02x", value & 0xff));
+            answer.putString("sha256", sha256.toString());
+        } catch (Throwable error) {
+            file.delete();
+            answer.putString("error", error.toString());
+        } finally {
+            if (encoders != null) encoders.shutdownNow();
+            pending.delete();
+        }
+        return answer;
+    }
+
+    private static final String BUFFER_EMPTY_REASON = "独立缓冲区返回全透明像素，未确认取得视频画面；不代表控件本身没有内容";
+
+    private static final class RefLayer {
+        final String ref;
+        final SurfaceView surface;
+        final char special;
+        final boolean pure;
+        final int x, y;
+        Bitmap bitmap;
+        String failure;
+        RefLayer(String ref, String failure, char special) { this(ref, failure, special, false); }
+        RefLayer(String ref, String failure, char special, boolean pure) {
+            this.ref = ref;
+            this.surface = null;
+            this.special = special;
+            this.pure = pure;
+            this.x = 0;
+            this.y = 0;
+            this.failure = failure;
+        }
+        RefLayer(String ref, Bitmap bitmap, int x, int y, char special) {
+            this.ref = ref;
+            this.surface = null;
+            this.special = special;
+            this.pure = false;
+            this.x = x;
+            this.y = y;
+            this.bitmap = bitmap;
+        }
+        RefLayer(String ref, SurfaceView surface, int x, int y) {
+            this.ref = ref;
+            this.surface = surface;
+            this.special = 'S';
+            this.pure = false;
+            this.x = x;
+            this.y = y;
+        }
+    }
+
+    private static void copySurfaceLayer(RefLayer layer) {
+        if (Build.VERSION.SDK_INT < 24) {
+            layer.failure = "系统版本不支持独立缓冲采集";
+            return;
+        }
+        Bitmap bitmap = Bitmap.createBitmap(layer.surface.getWidth(), layer.surface.getHeight(), Bitmap.Config.ARGB_8888);
+        CountDownLatch copied = new CountDownLatch(1);
+        int[] status = new int[1];
+        try {
+            PixelCopy.request(layer.surface, bitmap, (result) -> { status[0] = result; copied.countDown(); }, new Handler(Looper.getMainLooper()));
+        } catch (Throwable error) {
+            bitmap.recycle();
+            layer.failure = "缓冲层读取失败";
+            return;
+        }
+        try {
+            if (!copied.await(2, TimeUnit.SECONDS)) {
+                bitmap.recycle();
+                layer.failure = "缓冲层未在限定时间内返回画面";
+                return;
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            bitmap.recycle();
+            layer.failure = "缓冲层读取失败";
+            return;
+        }
+        if (status[0] != PixelCopy.SUCCESS) {
+            bitmap.recycle();
+            layer.failure = "缓冲层读取失败";
+            return;
+        }
+        layer.bitmap = bitmap;
+    }
+
+    private static boolean isEmptyBitmap(Bitmap bitmap) {
+        long pixels = (long) bitmap.getWidth() * bitmap.getHeight();
+        if (pixels > 1_000_000) return false; // ponytail: skip the scan for oversized bitmaps; treat as opaque.
+        int[] row = new int[bitmap.getWidth()];
+        try {
+            for (int y = 0; y < bitmap.getHeight(); y++) {
+                bitmap.getPixels(row, 0, row.length, 0, y, row.length, 1);
+                for (int value : row) if ((value >>> 24) != 0) return false;
+            }
+        } catch (Throwable unsupported) {
+            return false; // ponytail: pixel access is not available for every bitmap config; unknown stays opaque.
+        }
+        return true;
     }
 
     private Bundle captureOwn(Application app, String wanted, String fileName, int byteLimit, int pixelLimit) {
