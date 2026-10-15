@@ -17,4 +17,5 @@ android {
 
 dependencies {
     debugImplementation(project(":inspector-sdk"))
+    debugImplementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.0")
 }

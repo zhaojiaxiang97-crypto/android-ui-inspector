@@ -4,8 +4,17 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const project = fileURLToPath(new URL("../", import.meta.url));
+const options = process.argv.slice(2).filter((argument) => argument !== "--");
+if (options.length > 1 || options.some((argument) => !["--home", "--home-states"].includes(argument))) {
+  throw new Error("Supported options: --home | --home-states");
+}
+const homeOnly = options.length > 0;
+const allHomeStates = options.includes("--home-states");
+const states = allHomeStates ? ["connected", "loading", "unauthorized", "empty", "adb-missing"] : ["connected"];
 const reportRoot = join(project, ".benchmarks", "app-smoke");
-const output = join(project, ".benchmarks", "visual-baseline", new Date().toISOString().replace(/[:.]/g, "-"));
+const outputName = allHomeStates ? "home-state-visual-baseline" : homeOnly ? "home-visual-baseline" : "visual-baseline";
+const output = join(project, ".benchmarks", outputName, new Date().toISOString().replace(/[:.]/g, "-"));
+const runner = process.versions.bun ? process.execPath : "bun";
 const viewports = [
   { width: 1264, height: 816 },
   { width: 1440, height: 900 },
@@ -14,7 +23,7 @@ const viewports = [
 
 mkdirSync(output, { recursive: true });
 
-function latestReport(startedAt) {
+function latestReport(startedAt, fixtureState, viewport) {
   const candidates = readdirSync(reportRoot, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => {
@@ -22,23 +31,32 @@ function latestReport(startedAt) {
       const resultPath = join(directory, "result.json");
       try {
         const stat = statSync(resultPath);
-        return stat.mtimeMs >= startedAt ? { directory, resultPath, mtimeMs: stat.mtimeMs } : null;
+        const result = JSON.parse(readFileSync(resultPath, "utf8"));
+        return stat.mtimeMs >= startedAt && result.fixture && result.homeOnly === homeOnly && result.reducedMotion === allHomeStates
+          && result.fixtureState === fixtureState && result.requestedViewport?.width === viewport.width
+          && result.requestedViewport?.height === viewport.height
+          ? { directory, result, mtimeMs: stat.mtimeMs } : null;
       } catch {
         return null;
       }
     })
     .filter((value) => value !== null)
     .sort((left, right) => right.mtimeMs - left.mtimeMs)[0];
-  if (!candidates) throw new Error("没有找到视觉基线 smoke 报告");
+  if (!candidates) throw new Error(`没有找到匹配 ${fixtureState} ${viewport.width}x${viewport.height} 的视觉基线 smoke 报告`);
   return candidates;
 }
 
-async function runViewport(viewport) {
+async function runCase(fixtureState, viewport) {
   const startedAt = Date.now();
-  const args = [join(project, "scripts", "app-smoke.mjs"), "--fixture", `--viewport=${viewport.width}x${viewport.height}`];
-  const child = spawn(process.execPath, args, {
+  const args = [join(project, "scripts", "app-smoke.mjs"), "--fixture", `--viewport=${viewport.width}x${viewport.height}`,
+    ...(homeOnly ? ["--home-only"] : []),
+    ...(allHomeStates ? ["--reduced-motion", `--fixture-state=${fixtureState}`] : []),
+  ];
+  const environment = { ...process.env };
+  delete environment.ELECTRON_RUN_AS_NODE;
+  const child = spawn(runner, args, {
     cwd: project,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined },
+    env: environment,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
@@ -50,21 +68,27 @@ async function runViewport(viewport) {
     child.once("error", reject);
     child.once("close", (status) => resolve(status ?? 1));
   });
-  const report = latestReport(startedAt);
-  const result = JSON.parse(readFileSync(report.resultPath, "utf8"));
-  if (code !== 0 || !result.success) {
-    throw new Error(`${viewport.width}x${viewport.height} 视觉基线失败：${result.error ?? (stderr.slice(-1200) || stdout.slice(-1200))}`);
+  let report;
+  try {
+    report = latestReport(startedAt, fixtureState, viewport);
+  } catch (error) {
+    throw new Error(`${error.message}：${stderr.slice(-1200) || stdout.slice(-1200)}`);
   }
-  const name = `viewport-${viewport.width}x${viewport.height}`;
+  const result = report.result;
+  if (code !== 0 || !result.success) {
+    throw new Error(`${fixtureState} ${viewport.width}x${viewport.height} 视觉基线失败：${result.error ?? (stderr.slice(-1200) || stdout.slice(-1200))}`);
+  }
+  const name = `${allHomeStates ? `state-${fixtureState}/` : ""}viewport-${viewport.width}x${viewport.height}`;
   mkdirSync(join(output, name), { recursive: true });
-  copyFileSync(join(report.directory, "app.png"), join(output, name, "app.png"));
-  copyFileSync(join(report.directory, "layers3d.png"), join(output, name, "layers3d.png"));
+  const screenshots = homeOnly ? ["home.png"] : ["app.png", "layers3d.png"];
+  for (const screenshot of screenshots) copyFileSync(join(report.directory, screenshot), join(output, name, screenshot));
   writeFileSync(join(output, name, "result.json"), JSON.stringify(result, null, 2) + "\n");
   return {
     viewport,
-    report: result,
+    ...(allHomeStates ? { fixtureState } : {}),
     sourceReport: report.directory,
-    artifacts: `${name}/app.png, ${name}/layers3d.png, ${name}/result.json`,
+    artifacts: [...screenshots, "result.json"].map((file) => `${name}/${file}`).join(", "),
+    ...(homeOnly ? { homeLayout: result.homeLayout } : { workspaceLayout: result.workspaceLayout, screenshot: result.screenshot }),
   };
 }
 
@@ -73,18 +97,20 @@ const manifest = {
   source: {
     hierarchy: "tests/fixtures/uiautomator-portrait.xml",
     screenshot: "tests/fixtures/visual-screen.svg",
-    coordinateSpace: { width: 1080, height: 2400 },
+    ...(homeOnly ? { mode: "home-only" } : { coordinateSpace: { width: 1080, height: 2400 } }),
   },
+  ...(allHomeStates ? { states } : {}),
   viewports,
   success: false,
   runs: [],
 };
 
 try {
-  for (const viewport of viewports) {
-    const run = await runViewport(viewport);
-    manifest.runs.push({ viewport: run.viewport, sourceReport: run.sourceReport, artifacts: run.artifacts, workspaceLayout: run.report.workspaceLayout, screenshot: run.report.screenshot });
-    console.log(`PASS: fixed visual baseline ${viewport.width}x${viewport.height}`);
+  for (const fixtureState of states) {
+    for (const viewport of viewports) {
+      manifest.runs.push(await runCase(fixtureState, viewport));
+      console.log(`PASS: ${outputName} ${fixtureState} ${viewport.width}x${viewport.height}`);
+    }
   }
   manifest.success = true;
 } catch (error) {

@@ -21,5 +21,6 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src", "shared", "electron", "scripts", "benchmarks", "tests"],
+  "exclude": ["**/node_modules", "scripts/experiments/tester-e2e"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

@@ -61,6 +61,49 @@ function node(id: string, rect: UiBounds, className = "android.view.ViewGroup"):
   };
 }
 
+test("optional invisible layouts keep real bounds and inherit an invisible ancestor", () => {
+  const root = node("root", bounds(0, 0, 100, 100));
+  const hidden = { ...node("hidden", bounds(10, 10, 80, 80)), visibleToUser: false };
+  const child = node("child", bounds(20, 20, 50, 50));
+  hidden.children = [child]; root.children = [hidden];
+  const before = JSON.stringify(root);
+  assert.deepEqual(buildLayerOverview(root, child, size).records, []);
+  const revealed = buildLayerOverview(root, child, size, { showInvisible: true });
+  assert.deepEqual(revealed.records.map(record => [record.id, record.isDeviceInvisible]), [["hidden", true], ["child", true]]);
+  assert.equal(revealed.records[1].node, child);
+  assert.equal(revealed.records[1].sourceBounds, child.bounds!);
+  assert.equal(revealed.records[1].isSelected, true);
+  const folded = buildLayerOverview(root, child, size, { showInvisible: true, expandedIds: new Set([root.id]) });
+  assert.deepEqual(folded.records.map(record => record.id), [hidden.id]);
+  assert.equal(folded.records[0].isCollapsed, true);
+  assert.equal(JSON.stringify(root), before);
+});
+
+test("transparent and placement-hidden layouts need the option; invalid geometry stays absent", () => {
+  const root = node("root", bounds(0, 0, 100, 100));
+  const alpha = { ...node("alpha", bounds(10, 10, 30, 30)), attributes: { alpha: "0" } };
+  const placed = { ...node("placed", bounds(30, 30, 50, 50)), layerCapturePlacement: {
+    screen: { left: 30, top: 30, width: 20, height: 20 }, source: { left: 0, top: 0, width: 20, height: 20 }, opacity: 0, hidden: true,
+  } };
+  const empty = node("empty", bounds(40, 40, 40, 60)), outside = node("outside", bounds(120, 120, 150, 150));
+  root.children = [alpha, placed, empty, outside];
+  assert.equal(buildLayerOverview(root, root, size).records.length, 0);
+  assert.deepEqual(buildLayerOverview(root, root, size, { showInvisible: true }).records.map(record => record.id), [alpha.id, placed.id]);
+});
+
+test("single-layer and branch focus preserve inherited invisibility", () => {
+  const root = { ...node("root", bounds(0, 0, 100, 100)), visibleToUser: false };
+  const child = node("child", bounds(10, 10, 40, 40)); root.children = [child];
+  const single = buildLayerLayout(root, child, size, { showInvisible: true, includeParents: false, includeChildren: false });
+  assert.equal(single.records.length, 1);
+  assert.equal(single.records[0].isDeviceInvisible, true);
+  assert.equal(buildLayerOverview(child, child, size, { ancestorInvisible: true }).parent, null);
+  assert.equal(buildLayerOverview(child, child, size, { ancestorInvisible: true, showInvisible: true }).parent?.isDeviceInvisible, true);
+  const all = buildLayerOverview(root, child, size, { showInvisible: true });
+  assert.equal(all.parent?.hitTestable, true);
+  assert.equal(all.records[0].isDeviceInvisible, true);
+});
+
 test("focus layout keeps the selected path and one child depth with deterministic z offsets", () => {
   const root = node("root", bounds(0, 0, 100, 100));
   const shell = node("shell", bounds(0, 0, 100, 100));
@@ -241,7 +284,7 @@ test("disjoint controls share depth and deep content stacks retain the requested
   assert.ok(stack.records.every((record, i) => i === 0 || record.z - stack.records[i - 1].z === 64));
 });
 
-test("only repeated confirmed-empty bounds compact; real, unknown and folded layers keep full spacing", () => {
+test("confirmed-empty bounds attach without a gap; real, unknown and folded layers keep full spacing", () => {
   const root = node("root", bounds(0, 0, 100, 100));
   const empty = { ...node("empty", root.bounds!), layerImageEmpty: true };
   const duplicate = { ...node("duplicate", root.bounds!), attributes: { "skip-draw": "true" } };
@@ -252,19 +295,19 @@ test("only repeated confirmed-empty bounds compact; real, unknown and folded lay
   const expandedIds = new Set([root.id, duplicate.id]);
   const result = buildLayerOverview(root, content, size, { layerGap: 100, expandedIds });
   const [a, b, child, c, d] = result.records;
-  assert.deepEqual(result.records.map(r => r.isCompact), [false, true, false, false, false]);
-  assert.equal(b.z - a.z, 28);
-  assert.equal(child.z - b.z, 100);
+  assert.deepEqual(result.records.map(r => r.isCompact), [true, true, false, false, false]);
+  assert.ok(b.z > a.z && b.z - a.z < .01);
+  assert.ok(Math.abs(child.z - b.z - 100) < .01);
   assert.equal(c.z - child.z, 100);
   assert.equal(d.z - c.z, 100);
   assert.ok(result.records.every(r => r.hitTestable));
   assert.deepEqual(buildLayerOverview(root, duplicate, size, { layerGap: 100, expandedIds }).records.map(r => r.z), result.records.map(r => r.z));
   const folded = buildLayerOverview(root, duplicate, size, { layerGap: 100, expandedIds: new Set([root.id]) });
   assert.equal(folded.records[1].isCompact, false);
-  assert.equal(folded.records[1].z - folded.records[0].z, 100);
+  assert.ok(Math.abs(folded.records[1].z - folded.records[0].z - 100) < .01);
   const wider = buildLayerOverview(root, content, size, { layerGap: 240, expandedIds });
   assert.equal(wider.records[3].z - wider.records[2].z, 240);
   const failed = buildLayerOverview({ ...root, children: [empty, { ...duplicate, layerImageStatus: "failed" }] }, null, size, { layerGap: 100, expandedIds });
   assert.equal(failed.records[1].isCompact, false, "SKIP_DRAW does not prove an unread custom decoration is empty");
-  assert.equal(failed.records[1].z - failed.records[0].z, 100);
+  assert.ok(Math.abs(failed.records[1].z - failed.records[0].z - 100) < .01);
 });

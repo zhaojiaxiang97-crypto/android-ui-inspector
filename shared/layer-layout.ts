@@ -1,6 +1,7 @@
 import type { PixelSize, UiBounds, UiNode } from "./types";
 import { clipBounds, type ScreenRect } from "./screen-coordinates";
 import { compareSiblingNodes, layerOrdering } from "./layer-textures";
+import { nodePresentationStatus } from "./node-presentation-status";
 
 const MAX_EXPLODED_DEPTH_SLOTS = 12;
 
@@ -14,6 +15,8 @@ export type LayerLayoutOptions = {
   maxDepth?: number;
   maxLayers?: number;
   layerGap?: number;
+  showInvisible?: boolean;
+  showOffscreen?: boolean;
 };
 
 export type LayerRecord = {
@@ -33,6 +36,7 @@ export type LayerRecord = {
   isCompact?: boolean;
   isVirtual: boolean;
   hitTestable: boolean;
+  isDeviceInvisible?: boolean;
 };
 
 export type LayerLayoutResult = {
@@ -47,8 +51,12 @@ export type LayerOverviewResult = LayerLayoutResult & {
   parentId: string | null;
 };
 
-export type LayerOverviewOptions = Pick<LayerLayoutOptions, "layerGap" | "maxLayers"> & {
+export type LayerOverviewOptions = Pick<LayerLayoutOptions, "layerGap" | "maxLayers" | "showInvisible" | "showOffscreen"> & {
   expandedIds?: ReadonlySet<string>;
+  ancestorInvisible?: boolean;
+  // Compact presentation keeps structural nodes without allocating empty Z gaps.
+  compactStructure?: boolean;
+  hiddenIds?: ReadonlySet<string>;
 };
 
 type NodeEntry = {
@@ -56,6 +64,7 @@ type NodeEntry = {
   parentId: string | null;
   depth: number;
   order: number;
+  isDeviceInvisible: boolean;
 };
 
 type EligibleEntry = NodeEntry & {
@@ -92,24 +101,38 @@ function compareSiblingEntries(left: NodeEntry, right: NodeEntry) {
   return compareSiblingNodes(left.node, right.node) || left.order - right.order;
 }
 
-function indexTree(root: UiNode) {
+export function layerRenderBounds(bounds: UiBounds | null, size: PixelSize, showOffscreen = false): ScreenRect | null {
+  if (!bounds) return null;
+  if (!showOffscreen) return clipBounds(bounds, size);
+  const { left, top, right, bottom } = bounds;
+  return [left, top, right, bottom].every(Number.isFinite) && right > left && bottom > top
+    ? { left, top, right, bottom } : null;
+}
+
+function indexTree(root: UiNode, showOffscreen = false) {
   const entries = new Map<string, NodeEntry>();
-  const stack: Array<{ node: UiNode; parentId: string | null; depth: number }> = [{ node: root, parentId: null, depth: 0 }];
+  const stack = [{ node: root, parentId: null as string | null, depth: 0, isDeviceInvisible: false }];
   let order = 0;
 
   while (stack.length > 0) {
     const current = stack.pop()!;
-    entries.set(current.node.id, { ...current, order: order++ });
+    const node = current.node, alpha = node.attributes?.["effective-alpha"] ?? node.attributes?.alpha;
+    const placement = node.layerCapturePlacement;
+    // A verified placement can be hidden only by ancestor clipping. Full-layout
+    // inspection reveals that geometry, while actual visibility/alpha still apply.
+    const isDeviceInvisible = current.isDeviceInvisible || !node.visibleToUser || (placement?.hidden === true && (!showOffscreen || placement.opacity === 0))
+      || alpha !== undefined && alpha.trim() !== "" && Number(alpha) === 0;
+    entries.set(node.id, { ...current, isDeviceInvisible, order: order++ });
     for (let index = current.node.children.length - 1; index >= 0; index -= 1) {
-      stack.push({ node: current.node.children[index], parentId: current.node.id, depth: current.depth + 1 });
+      stack.push({ node: current.node.children[index], parentId: current.node.id, depth: current.depth + 1, isDeviceInvisible });
     }
   }
 
   return entries;
 }
 
-export function layerPath(root: UiNode, targetId: string | null) {
-  const entries = indexTree(root);
+export function layerPath(root: UiNode, targetId: string | null, showOffscreen = false) {
+  const entries = indexTree(root, showOffscreen);
   const target = targetId && entries.has(targetId) ? targetId : root.id;
   const path: string[] = [];
   let current: string | null = target;
@@ -161,7 +184,7 @@ function shouldInclude(entry: NodeEntry, target: string, path: ReadonlySet<strin
 export function buildLayerLayout(root: UiNode, selectedNode: UiNode | null, size: PixelSize, options: LayerLayoutOptions = {}): LayerLayoutResult {
   if (!root || !size.width || !size.height) return { records: [], candidateCount: 0, truncated: false, omittedCount: 0 };
 
-  const { entries, target, path } = layerPath(root, selectedNode?.id ?? root.id);
+  const { entries, target, path } = layerPath(root, selectedNode?.id ?? root.id, options.showOffscreen);
   const selectedEntry = entries.get(target);
   if (!selectedEntry) return { records: [], candidateCount: 0, truncated: false, omittedCount: 0 };
 
@@ -212,8 +235,8 @@ export function buildLayerLayout(root: UiNode, selectedNode: UiNode | null, size
 
   const records = limited
     .map((entry): LayerRecord | null => {
-      const clipped = entry.node.bounds ? clipBounds(entry.node.bounds, size) : null;
-      if (!clipped || !entry.node.visibleToUser) return null;
+      const clipped = layerRenderBounds(entry.node.bounds, size, options.showOffscreen);
+      if (!clipped || entry.isDeviceInvisible && !options.showInvisible) return null;
       return {
         id: entry.node.id,
         parentId: entry.parentId,
@@ -230,6 +253,7 @@ export function buildLayerLayout(root: UiNode, selectedNode: UiNode | null, size
         isCollapsed: false,
         isVirtual: hasVirtualClass(entry.node),
         hitTestable: true,
+        isDeviceInvisible: entry.isDeviceInvisible,
       };
     })
     .filter((record): record is LayerRecord => record !== null);
@@ -259,12 +283,14 @@ export function buildLayerRecords(root: UiNode, selectedNode: UiNode | null, siz
  * Selection changes only the highlight; it never changes the Z stack.
  */
 export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, size: PixelSize, options: LayerOverviewOptions = {}): LayerOverviewResult {
-  if (!root || !root.visibleToUser || !size.width || !size.height) return { parent: null, parentId: null, records: [], candidateCount: 0, truncated: false, omittedCount: 0 };
+  if (!root || !size.width || !size.height) return { parent: null, parentId: null, records: [], candidateCount: 0, truncated: false, omittedCount: 0 };
 
-  const { entries, target, path } = layerPath(root, selectedNode?.id ?? root.id);
+  const { entries, target, path } = layerPath(root, selectedNode?.id ?? root.id, options.showOffscreen);
+  if (options.ancestorInvisible) for (const entry of entries.values()) entry.isDeviceInvisible = true;
   const rootEntry = entries.get(root.id);
   const selectedEntry = entries.get(target);
   if (!rootEntry || !selectedEntry) return { parent: null, parentId: null, records: [], candidateCount: 0, truncated: false, omittedCount: 0 };
+  if (rootEntry.isDeviceInvisible && !options.showInvisible) return { parent: null, parentId: null, records: [], candidateCount: 0, truncated: false, omittedCount: 0 };
 
   const selectedPath = new Set(path);
   const selectedDescendants = new Set(descendantsOf(entries, target, Number.MAX_SAFE_INTEGER).map((entry) => entry.node.id));
@@ -279,8 +305,8 @@ export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, si
 
   while (stack.length > 0) {
     const { entry, emitOnly } = stack.pop()!;
-    if (!entry.node.visibleToUser) continue;
-    const clipped = entry.node.bounds ? clipBounds(entry.node.bounds, size) : null;
+    if (entry.isDeviceInvisible && !options.showInvisible) continue;
+    const clipped = layerRenderBounds(entry.node.bounds, size, options.showOffscreen);
     const children = emitOnly || (options.expandedIds && !options.expandedIds.has(entry.node.id)) ? [] : entry.node.children
       .map((child) => entries.get(child.id))
       .filter((child): child is NodeEntry => Boolean(child))
@@ -292,45 +318,53 @@ export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, si
       stack.push({ entry, emitOnly: true });
       for (let index = behind.length - 1; index >= 0; index--) stack.push({ entry: behind[index] });
     } else {
-      if (clipped) candidates.push(entry);
+      if (clipped && !options.hiddenIds?.has(entry.node.id)) candidates.push(entry);
       for (let index = children.length - 1; index >= 0; index--) stack.push({ entry: children[index] });
     }
   }
 
   const maxLayers = clampInteger(options.maxLayers, 512, 1, 1024);
-  const limited = candidates.slice(0, maxLayers);
+  // Preloaded adjacent pages must not consume the cap before the current screen
+  // gets a chance to render. Restore draw order after choosing the working set.
+  const inScreen = (entry: NodeEntry) => Boolean(entry.node.bounds && clipBounds(entry.node.bounds, size));
+  const prioritized = options.showOffscreen && candidates.length > maxLayers
+    ? [...candidates.filter(inScreen), ...candidates.filter(entry => !inScreen(entry))] : candidates;
+  const limited = prioritized.slice(0, maxLayers);
   if (candidates.includes(selectedEntry) && !limited.includes(selectedEntry)) {
     limited[limited.length - 1] = selectedEntry;
-    const order = new Map(candidates.map((entry, index) => [entry, index]));
-    limited.sort((a, b) => order.get(a)! - order.get(b)!);
   }
+  const order = new Map(candidates.map((entry, index) => [entry, index]));
+  limited.sort((a, b) => order.get(a)! - order.get(b)!);
   const layerGap = clampNumber(options.layerGap, 64, 16, 240);
   const records: LayerRecord[] = [];
-  const emptyBounds = new Set<string>();
   let frontDepth = 0;
   for (const entry of limited) {
-    const renderBounds = clipBounds(entry.node.bounds!, size)!;
+    const renderBounds = layerRenderBounds(entry.node.bounds, size, options.showOffscreen)!;
     const zOrder = zOrderFor(entry);
     const isCollapsed = Boolean(entry.node.children.length && options.expandedIds && !options.expandedIds.has(entry.node.id));
-    // Only confirmed empty/skip-draw nodes are compacted. Missing or failed
-    // captures, real backgrounds and collapsed composites keep full spacing.
-    const isEmpty = !isCollapsed && (entry.node.layerImageEmpty === true || (!entry.node.layerImageDataUrl && entry.node.layerImageStatus !== "failed" && entry.node.attributes?.["skip-draw"] === "true"));
-    const boundsKey = `${renderBounds.left},${renderBounds.top},${renderBounds.right},${renderBounds.bottom}`;
-    const isCompact = isEmpty && emptyBounds.has(boundsKey);
-    if (isEmpty) emptyBounds.add(boundsKey);
-    // Keep repeated empty wrappers quieter, but leave enough separation to pick
-    // their edges without turning the whole stack into a solid wire bundle.
-    const step = layerGap * (isCompact ? 0.28 : 1);
+    // A node's tree depth and its presentation depth are different. Only
+    // confirmed empty/skip-draw nodes or diagnostic invisible boundaries attach
+    // to an existing slot. Missing captures and folded composites keep a slot.
+    const imageState = nodePresentationStatus(entry.node).ownImage.code;
+    const isEmpty = !isCollapsed && (imageState === "empty" || imageState === "structural");
+    const isCompact = options.compactStructure !== false && (entry.isDeviceInvisible || isEmpty);
+    const step = isCompact ? 0 : layerGap;
     let depth = step;
     // Only overlapping regions need another plane. Disjoint controls share
     // depth without losing their individual images, outlines or hit targets.
     // ponytail: bounded O(n²) packing (at most 1024 records); use a spatial index only if this rendering cap grows.
     for (const previous of records) {
+      // An empty wrapper must not push later content out or bridge two otherwise
+      // disjoint regions into one tall stack.
+      if (previous.isCompact) continue;
       const b = previous.renderBounds;
       if (renderBounds.left < b.right && renderBounds.right > b.left && renderBounds.top < b.bottom && renderBounds.bottom > b.top) {
         depth = Math.max(depth, previous.z + step);
       }
     }
+    // Preserve a deterministic paint order for attached boundaries without a
+    // visible gap. This is bounded to 0.01 screen px for the entire working set.
+    if (isCompact) depth += .01 * (records.length + 1) / (limited.length + 1);
     frontDepth = Math.max(frontDepth, depth);
     records.push({
       id: entry.node.id,
@@ -349,13 +383,16 @@ export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, si
       isCompact,
       isVirtual: hasVirtualClass(entry.node),
       hitTestable: true,
+      isDeviceInvisible: entry.isDeviceInvisible,
     });
   }
-  // Keep the requested content spacing even in deep trees. The camera fits
-  // the full stack; more nodes must not silently squeeze every existing gap.
+  // Keep the overlap-derived levels. Unrelated branches must not be pushed
+  // forward merely because their ancestors look like the same component.
+  frontDepth = Math.max(0, ...records.map(record => record.z));
+  // Keep the requested spacing between actual content planes in deep trees.
   for (const record of records) record.z -= frontDepth;
-  const rootBounds = rootEntry.node.bounds ? clipBounds(rootEntry.node.bounds, size) : null;
-  const parent = rootBounds && rootEntry.node.visibleToUser
+  const rootBounds = layerRenderBounds(rootEntry.node.bounds, size, options.showOffscreen);
+  const parent = rootBounds && !options.hiddenIds?.has(root.id) && (!rootEntry.isDeviceInvisible || options.showInvisible)
     ? {
         id: rootEntry.node.id,
         parentId: null,
@@ -371,7 +408,8 @@ export function buildLayerOverview(root: UiNode, selectedNode: UiNode | null, si
         isDescendant: false,
         isCollapsed: Boolean(rootEntry.node.children.length && options.expandedIds && !options.expandedIds.has(rootEntry.node.id)),
         isVirtual: hasVirtualClass(rootEntry.node),
-        hitTestable: Boolean(rootEntry.node.children.length && options.expandedIds && !options.expandedIds.has(rootEntry.node.id)),
+        hitTestable: rootEntry.isDeviceInvisible || Boolean(rootEntry.node.children.length && options.expandedIds && !options.expandedIds.has(rootEntry.node.id)),
+        isDeviceInvisible: rootEntry.isDeviceInvisible,
       }
     : null;
 

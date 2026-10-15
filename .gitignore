@@ -11,14 +11,14 @@ node_modules
 dist
 dist-electron
 .benchmarks
-release
+/release/
 dist-ssr
 *.local
 
 # Accidental root-level Electron bundle. The build chain writes to dist-electron/.
 /main.cjs
 
-# Legacy Tauri build output is intentionally outside the Electron build chain.
+# Ignore local caches left by the retired Tauri prototype after its source removal.
 src-tauri/target/
 src-tauri/gen/schemas/
 

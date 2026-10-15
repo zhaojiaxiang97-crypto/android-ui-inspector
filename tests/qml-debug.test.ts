@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
-import { GEOMETRY_EXPRESSION, geometryFrom, qmlGrabExpression, type QmlDebugNode } from "../electron/qml-debug";
-import { qmlGroupNodeMatches, qmlUiTree } from "../electron/adb";
+import { GEOMETRY_EXPRESSION, geometryFrom, qmlGrabExpression, type QmlDebugNode } from "../electron/capture/qml-debug";
+import { qmlGroupNodeMatches, qmlUiTree } from "../electron/capture/qt";
 import { qmlStyleFrom, qmlStyleSvg } from "../shared/qml-style";
 import { buildLayerOverview } from "../shared/layer-layout";
 

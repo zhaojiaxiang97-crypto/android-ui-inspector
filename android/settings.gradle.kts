@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "android-ui-inspector-sdk"
-include(":inspector-sdk", ":sample-app")
+include(":inspector-sdk", ":sample-app", ":sdk-free-sample", ":legacy-window-sample", ":recognition-sample")

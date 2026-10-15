@@ -14,11 +14,28 @@ export type AdbProbeResult = {
   error: string | null;
 };
 
+export type WindowMode = "home" | "workspace";
+
 export type AppMenuAction =
   | { type: "device"; serial: string }
-  | { type: "capture" | "cancel" | "refresh" | "home" | "search" | "expand-all" | "collapse-all" | "save" | "mcp-share" | "mcp-stop" | "mcp-config" | "debug-start" };
+  | { type: "double-click"; action: TreeDoubleClickAction }
+  | { type: "capture" | "cancel" | "refresh" | "home" | "search" | "expand-all" | "collapse-all" | "save" | "history" | "open-snapshot" | "export-snapshot" | "export-json" | "export-xml" | "export-png" | "preferences" | "mcp-share" | "mcp-stop" | "mcp-config" | "debug-start" | "test-report" | "focus-branch" | "focus-layer" | "exit-focus" | "expand-selected" | "collapse-selected" | "hide-selected" | "restore-layers" };
 
-export type LayerMenuAction = "hide" | "restore" | "focus" | "exit-focus" | null;
+export type TreeDoubleClickAction = "toggle" | "focus-branch" | "expand";
+export type LayerFocus = { node: UiNode; kind: "branch" | "layer" };
+export type LayerCopyAction = "copy-text" | "copy-resource-id" | "copy-class-name" | "copy-hierarchy-path";
+export type LayerLocalAction = "restore-selected" | "locate-hidden-ancestor" | "expand-branch" | "collapse-children";
+export type LayerImageAction = "preview-image-own" | "preview-image-branch" | "copy-image-own" | "copy-image-branch" | "save-image-own" | "save-image-branch";
+export type LayerImageScopeOption = { scope: "own" | "branch"; available: boolean; label: string; detail: string };
+export type LayerRefreshAction = "refresh-node" | "refresh-branch";
+export type LayerRefreshScopeOption = { scope: "node" | "branch"; available: boolean; detail: string };
+export type LayerMenuMode = "flat" | "layers3d";
+export type LayerMenuAction = "hide" | "restore" | "focus" | "focus-branch" | "exit-focus" | "expand" | "collapse" | LayerLocalAction | LayerCopyAction | LayerImageAction | LayerRefreshAction | null;
+export type LayerMenuOptions = {
+  canFocus: boolean; expandable: boolean; expanded: boolean; copyActions?: LayerCopyAction[];
+  canRestoreSelected?: boolean; hasChildren?: boolean; hiddenAncestorLabel?: string; imageScopes?: LayerImageScopeOption[];
+  mode?: LayerMenuMode; refreshScopes?: LayerRefreshScopeOption[];
+};
 
 export type AppMenuState = {
   devices: Array<Pick<DeviceInfo, "serial" | "model" | "state">>;
@@ -28,10 +45,59 @@ export type AppMenuState = {
   inspecting: boolean;
   hasSnapshot: boolean;
   filtered: boolean;
+  canCapture?: boolean;
+  canSelectDevice?: boolean;
+  hasRawXml?: boolean;
+  hasScreenshot?: boolean;
+  historyLoading?: boolean;
+  openingSnapshot?: boolean;
   mcpSharing?: boolean;
+  canFocus?: boolean;
+  canHideLayer?: boolean;
+  hasHiddenLayers?: boolean;
+  hasLayerFocus?: boolean;
+  selectedExpandable?: boolean;
+  selectedExpanded?: boolean;
+  doubleClickAction?: TreeDoubleClickAction;
 };
 
 export type McpShareResult = { shared: boolean; snapshotId: string | null; error: string | null };
+
+export const mcpStopReasons = {
+  explicit: "界面请求停止自动调试",
+  "snapshot-change": "工作台切换快照，停止自动调试",
+  history: "查看历史快照，停止自动调试",
+  home: "返回设备列表，停止自动调试",
+  "device-change": "切换设备，停止自动调试",
+} as const;
+export type McpStopSource = keyof typeof mcpStopReasons;
+
+export type DebugInputEvidence = {
+  classification: "accepted" | "permission-denied" | "device-unavailable" | "invalid-command" | "command-failed"
+    | "unexpected-output" | "cancelled" | "timeout" | "output-limit" | "spawn-failed" | "unconfirmed-exit";
+  spawned: boolean;
+  closed: boolean;
+  exitCode: number | null;
+  signal: string | null;
+  errorCode?: string;
+  durationMs: number;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+};
+
+export type DebugInputAction =
+  | { kind: "tap"; x: number; y: number }
+  | { kind: "swipe"; fromX: number; fromY: number; toX: number; toY: number; durationMs: number }
+  | { kind: "back" };
+
+export type DebugStepError = {
+  category: string;
+  code: string;
+  phase: "capture" | "locate" | "input" | "verify" | "recording";
+  message: string;
+};
 
 export type DebugStep = {
   id: number;
@@ -43,6 +109,12 @@ export type DebugStep = {
   beforeId?: string;
   afterId?: string;
   dispatchState?: "not_sent" | "unknown" | "sent";
+  inputEvidence?: DebugInputEvidence;
+  resolvedInput?: { action: DebugInputAction; frame: DisplayFrame; targetNodeId?: string; anchorNodeId?: string };
+  error?: DebugStepError;
+  recordingErrors?: DebugStepError[];
+  verified?: boolean | null;
+  taskCheck?: import("./debug-task").DebugTaskCheckResult;
 };
 export type DebugSessionState = {
   id: string;
@@ -53,7 +125,15 @@ export type DebugSessionState = {
   expiresAt: string;
   steps: DebugStep[];
   evidencePath: string | null;
+  reportPath?: string | null;
+  task?: import("./debug-task").DebugTaskRecord | null;
+  stopReason?: string | null;
+  startedAt?: string;
+  revision?: number;
+  androidLogsEnabled?: boolean;
+  progress?: import("./debug-progress").DebugSessionProgressState;
 };
+export type DebugSessionStartOptions = { androidLogs?: boolean };
 export type DebugSessionEvent = {
   state: DebugSessionState;
   snapshot?: UiSnapshot;
@@ -70,9 +150,11 @@ export type UiBounds = {
 
 export type PixelSize = { width: number; height: number };
 export type QmlGroupImage = { dataUrl: string; size: PixelSize; capturedAt: string };
+export type SnapshotGroupImage = { nodeId: string; image: QmlGroupImage };
 export type DisplayRotation = 0 | 1 | 2 | 3;
 export type HierarchyDumpMode = "full" | "compressed";
-export type InspectionSource = "uiautomator" | "debug-view" | "debug-qml" | "debug-hybrid";
+export type FastCaptureBackend = "uiautomator" | "accessibility-helper";
+export type InspectionSource = FastCaptureBackend | "debug-view" | "debug-qml" | "debug-hybrid";
 export type DisplayFrame = PixelSize & { rotation: DisplayRotation };
 export type CaptureGeometry = {
   hierarchyRotation: DisplayRotation | null;
@@ -100,16 +182,69 @@ export type UiNode = {
   // Native transparent bitmap, or self-contained SVG rebuilt from measured QML style.
   layerImageDataUrl?: string;
   layerImageSize?: PixelSize;
+  // Verified view-local image placement; never used for folded subtree composition.
+  layerCapturePlacement?: import("./capture-transform").LayerCapturePlacement;
   // Only set after checking the full bitmap; absent means not measured.
   layerImageEmpty?: boolean;
   layerImageStatus?: "captured" | "style" | "unavailable" | "ambiguous" | "hidden" | "failed";
+  // Explicit values from the SDK; absent means no registered business information.
+  debugMetadata?: import("./debug-metadata").DebugMetadata;
   // Source-specific attributes not promoted to typed properties.
   attributes?: Record<string, string>;
   children: UiNode[];
 };
 
-export type ViewRefreshResult = { nodes: UiNode[]; failures: { id: string; message: string }[]; branch?: UiNode };
+export type ViewRefreshResult = { nodes: UiNode[]; failures: { id: string; message: string }[]; branch?: UiNode; timings?: Record<string, number> };
 export type ViewStyleResult = { ref: string; capturedAtMillis: number; backgroundType: string | null; backgroundColor: string | null; textColor: string | null; textSizePx: number | null };
+
+export type FocusUnavailableReason = "null-focus" | "non-primary-display" | "missing-primary-display" | "missing-focus-field" | "ambiguous-focus-field" | "unrecognized-focus-format";
+
+export type ReadinessObservation = {
+  kind: "foreground" | "focus-candidate" | "focus-confirm-before" | "focus-confirm-after" | "poll-wait" | "budget-stop";
+  result: "returned" | "match" | "changed" | "unavailable" | "error" | "waited" | "insufficient-budget";
+  startedMs: number;
+  endedMs: number;
+  remainingMs: number;
+  component: string | null;
+  windowId: string | null;
+  // Optional for older diagnostics; never raw system output or exception text.
+  focusReason?: FocusUnavailableReason;
+};
+
+export type CaptureReadiness = {
+  budgetMs: number;
+  elapsedMs: number;
+  phase: "foreground" | "debug-check" | "focus-before" | "tree" | "focus-after" | "ready";
+  // First completed strict permission/Activity/focus confirmation, not window creation time.
+  firstFocusedWindowMs: number | null;
+  focus: { component: string; activityRecordId: string | null; windowId: string } | null;
+  treeReadCount: number;
+  treeReads: { startedMs: number; endedMs: number }[];
+  rejection: string | null;
+  // Optional for old snapshots. First observation + newest 63; gaps are explicit.
+  observations?: { totalCount: number; droppedCount: number; entries: ReadinessObservation[] };
+};
+
+export type CaptureAttempt = {
+  attempt: number;
+  startedMs: number;
+  durationMs: number;
+  error: string | null;
+  warning: string | null;
+  processId: string | null;
+  timings: Record<string, number>;
+  sdkFailure: Record<string, string>;
+  sdkTasks?: Record<string, string>;
+  sdkGeometry?: Record<string, string>;
+  viewHierarchy?: Record<string, string>;
+  readiness?: CaptureReadiness;
+};
+export type CaptureRequestDiagnostics = {
+  totalDurationMs: number;
+  totalAttempts: number;
+  droppedAttempts: number;
+  attempts: CaptureAttempt[];
+};
 
 export type UiSnapshot = {
   serial: string;
@@ -128,13 +263,21 @@ export type UiSnapshot = {
   captureGeometry?: CaptureGeometry;
   captureTimings?: Record<string, number>;
   captureDurationMs?: number;
+  // Bounded request-level diagnostics; never authorizes images or automation.
+  captureRequestDiagnostics?: CaptureRequestDiagnostics;
+  captureReadiness?: CaptureReadiness;
   // Fast automation observes accessibility semantics, not independent render layers.
   captureMode?: "fast" | "deep";
+  // Already captured native subtree images; opening a saved snapshot never fetches them.
+  layerGroupImages?: SnapshotGroupImage[];
 };
 
 export type InspectionProgress = { requestId: string; stage: string; elapsedMs: number };
-export type LayerImageUpdate = Pick<UiNode, "id" | "layerImageDataUrl" | "layerImageSize" | "layerImageEmpty" | "layerImageStatus"> & {
+export type LayerImageUpdate = Pick<UiNode, "id" | "layerImageDataUrl" | "layerImageSize" | "layerImageEmpty" | "layerImageStatus" | "layerCapturePlacement"> & {
+  // Baseline geometry detects atomic branch replacements; changed geometry needs a full tree preview.
+  bounds?: UiNode["bounds"];
   imageSource?: string;
+  imageCaptureSource?: string;
   imageCaptureError?: string;
   skipDraw?: string;
 };
@@ -143,7 +286,7 @@ export type InspectionPreview = { requestId: string } & (
   | { phase: "layers"; updates: LayerImageUpdate[] }
 );
 
-export type ExportFormat = "json" | "xml" | "png";
+export type ExportFormat = "snapshot" | "json" | "xml" | "png";
 
 export type ExportSnapshotRequest = {
   format: ExportFormat;
@@ -155,6 +298,13 @@ export type ExportSnapshotResult = {
   canceled: boolean;
   filePath: string | null;
   error: string | null;
+};
+
+export type NodeImageOutputRequest = {
+  action: "save" | "copy";
+  dataUrl: string;
+  size: PixelSize | null;
+  defaultFileName: string;
 };
 
 export type StoredSnapshot = {

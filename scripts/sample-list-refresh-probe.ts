@@ -17,6 +17,8 @@ const serialArgument = process.argv.find((value) => value.startsWith("--serial="
 const requireDevice = process.argv.includes("--require-device");
 const appArgument = process.argv.find((value) => value.startsWith("--app="))?.slice("--app=".length) ?? "com.androiduiinspector.sample";
 const warmMs = Number(process.argv.find((value) => value.startsWith("--warm-ms="))?.slice("--warm-ms=".length) ?? 8000);
+const mode = process.argv.find((value) => value.startsWith("--mode="))?.slice("--mode=".length) ?? "list";
+if (mode !== "list" && mode !== "list-replace") throw new Error("--mode 只支持 list 或 list-replace");
 
 const serial = serialArgument ?? execFileSync("adb", ["get-serialno"], { encoding: "utf8" }).trim();
 const devices = execFileSync("adb", ["devices"], { encoding: "utf8" })
@@ -35,10 +37,10 @@ async function runProbe(): Promise<void> {
   console.log(`Sample list refresh probe output: ${output}`);
   const adb = (...args: string[]) => execFileSync("adb", ["-s", serial, ...args]);
 
-  console.log("restarting sample app (mode=list) ...");
+  console.log(`restarting sample app (mode=${mode}) ...`);
   adb("shell", "svc", "power", "stayon", "usb");
   adb("shell", "am", "force-stop", appArgument);
-  adb("shell", "am", "start", "-n", `${appArgument}/.MainActivity`, "--es", "mode", "list");
+  adb("shell", "am", "start", "-n", `${appArgument}/.MainActivity`, "--es", "mode", mode);
   await delay(warmMs);
 
   const { child, endpoint } = spawnProbeElectron({ project, userDataDir: join(output, "profile"), logDir: output });
@@ -151,7 +153,13 @@ async function runProbe(): Promise<void> {
     console.log(`[sample-list] 不可见条目刷新后：out-of-viewport=${invisibleMarked}，visible=${invisibleAfter.visible}`);
     assert.ok(invisibleMarked, "不可见条目未按设计标注 out-of-viewport（屏外不串图语义）");
     record("invisible", { ref: invisibleRef, marked: invisibleMarked, visibleAfter: invisibleAfter.visible });
-    assert.deepEqual(missing, [], `原条目身份丢失：${missing.slice(0, 3).join(",")}`);
+    if (mode === "list-replace") {
+      assert.deepEqual(new Set(missing), new Set(oldRefs.slice(0, 2)), "旧条目实例替换范围不符");
+      for (const index of [0, 1]) {
+        const replaced = addedNodes.find((item) => textsOf(item.node).includes(`条目 ${index}`));
+        assert.ok(replaced && subtreeOf(replaced.node).some((node) => node.layerImageStatus === "captured" && node.attributes?.["image-refreshed-at"]), `替换后的条目 ${index} 未取得新画面`);
+      }
+    } else assert.deepEqual(missing, [], `原条目身份丢失：${missing.slice(0, 3).join(",")}`);
     assert.equal(result.failures.length, 0, `刷新失败项：${result.failures.map((item) => item.message).join("；")}`);
     console.log("[pass] 样例列表 scope=\"list\" 分批刷新验证通过。");
 

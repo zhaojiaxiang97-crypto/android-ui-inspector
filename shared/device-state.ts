@@ -11,6 +11,7 @@ export type HomeState =
   | "error"
   | "no-device"
   | "unauthorized"
+  | "offline"
   | "connected";
 
 type ResolveHomeStateInput = {
@@ -27,9 +28,10 @@ export function resolveHomeState({ loading, runtimeError, probe, selectedDevice 
   if (!probe.adbPath) return "adb-missing";
   if (probe.error) return "error";
   if (selectedDevice?.state === "device") return "connected";
-  if (selectedDevice) return "unauthorized";
+  if (selectedDevice) return selectedDevice.state === "unauthorized" ? "unauthorized" : "offline";
   if (probe.devices.some((device) => device.state === "device")) return "connected";
-  if (probe.devices.length > 0) return "unauthorized";
+  if (probe.devices.some(device => device.state === "unauthorized")) return "unauthorized";
+  if (probe.devices.length > 0) return "offline";
   return "no-device";
 }
 

@@ -1,165 +1,340 @@
 # Lookin 对齐计划
 
-更新时间：2026-10-02
+更新：2026-10-15。U1–U6c已交付，原U系列后续暂停；Lookin交互、路径导航、前三项功能迁移及展开/状态/二维测距完善已完成源码及整合验证。能力看[状态](PROJECT_STATUS.md)，版本和已验范围看[验收](CORE_ACCEPTANCE.md)，验证入口看[测试计划](TEST_PLAN.md)。
 
-本文件只保留当前方案、下一步和必要证据，替代此前多轮重复计划。已实现能力以 [项目状态](PROJECT_STATUS.md) 为准；接入方法见 [Android SDK 说明](../android/README.md)。第 1 步的已知圆角裁切已覆盖展开和折叠；业务页没有合适控件，复杂业务画面对照仍待验。第 2 步已完成有界分段预览，并在业务页完成首轮验证。
+<a id="下一步"></a>
 
-## 当前能力
+## 当前安排
 
-- 保留 Electron / React / WebGL、现有树、属性栏、CLI/MCP，不重写客户端。
-- 原生 View 使用 Debug View + 可选 Debug SDK。接入 SDK 且至少 200 节点的页面默认尝试 `capture-visible`；小页面、旧 SDK 或失败时保留 DDMS/JDWP 路线，Surface/Texture 继续专门补采。
-- SDK 属性与图片分别校验：整树不匹配时拒绝合并过期属性，严格匹配的独立图仍可保留；不因少数层变化丢弃整批。
-- 树/整屏先展示；新版 Debug SDK 可在单次 `capture-visible` 写入期间，分三次预览已校验的独立图，最终仍核对整包摘要。旧 SDK 保持整包兼容；当前选中 View 优先，其次屏内小面积 View，屏外保持树顺序；桌面补图预览只发送变化节点。
-- 在线 SDK 混合快照、Qt 快照收起父层时可按需取真实整组图；展开恢复各层自身图。普通业务父层和样例圆角/半透明已验证；业务 `like_button` 已完成折叠→分支刷新→展开，结构恢复正常；业务页复杂裁剪仍待验。
-- 原生 View 与 SDK 混合快照均支持单控件及最多 64 个可见控件的小分支刷新；分支内新增、删除、重排会按对象身份重读并替换，分支外或窗口身份变化则拒绝。
-- 已有显式调试名、继承链、LayoutParams/margin、部分 gravity/weight、RelativeLayout/ConstraintLayout 常用规则和交互标志；未提供的值不猜测。约束读取已随当前 AAR 更新到业务 Debug 包，本轮未专门回归约束字段。
-- Qt/QML 保留独立通道：叶子图、自身已知样式、按需整组图可用；任意自绘父项自身像素、Compose/Flutter/WebView 内部树未通用支持。
+2026-10-15：[SDK 可选化](SDK_OPTIONAL_ENHANCEMENT_PLAN.md)已在源码实现：默认标准采集，无需接入SDK；增强在“偏好设置 → 采集”显式开启并保存在本机。忙碌中不能切换，切换保留快照并要求重新采集；CLI/MCP不能通过单次请求开启增强。用法见[模式说明](FIRST_USE.md#sdk-enhancement)。新安装版、完全无SDK样例及开关往返的真机验证仍待完成，不自动恢复已暂停的专项实验。
 
-## 下一步
+2026-10-15：[R0–R8 架构重构](ARCHITECTURE_REFACTOR_PLAN.md#architecture-closeout)已完成并验收，没有剩余实施批次。当前代码归属见[开发目录](DEVELOPMENT_STRUCTURE.md)，本页的 UI、自动化和设备后置项仍按各自范围保留。
 
-执行顺序：**已知裁切正确性已覆盖 → 集中做独立图边采边显示 → 分支结构刷新 → 选中控件属性。**
+测距之后补充[快捷点选折叠内部、不可见控件边界](LOOKIN_MIGRATION_PLAN.md#lookin-inspection-tools)：直接 Command / Ctrl＋点击打开已有候选；3D 设置可显示不可见控件的虚线布局边界。沿用已有快照、树导航和原测距，不增加手机读取；最新范围见[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#lookin-inspection-tools-acceptance)。
 
-### 1. 补完父子画面正确性
+测距最新调整已完成：[选中 A、悬停 B、右侧控件图片与蓝/橙边缘距离](FIRST_USE.md#pinned-measurement)。支持 Option / Alt 临时模式、保持模式及固定配对；主画布测距标签、线和端点保持关闭。参考固定提交的[测距控制](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Measure/LKMeasureController.m)和[结果区](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Measure/LKMeasureResultView.m)，本项目自行实现，未引入上游代码或依赖。验收见[新面板](archive/ACCEPTANCE_HISTORY_2026-10-15.md#lookin-measurement-panel-acceptance)；安装包未替换。
 
-**进度：** Android 14 样例验证圆角父层、重叠半透明子层和普通矩形父层。`View.draw` 抓整组图会漏掉圆角裁剪，因此非完整矩形轮廓拒绝实时整组图；可读轮廓由独立图在本机裁剪合成，未知轮廓不伪造画面。2026-10-01 修复了展开态遗漏：每个子层仍只用自己的位图，但会按原始屏幕坐标套用自身及祖先已知的 `clipToOutline` 圆角遮罩。嵌套圆角和折叠合成均通过浏览器逐像素回归；Android `visual` 样例的 3D/WebGL 真机冒烟通过（18 节点、12 张纹理、无渲染错误）。当前已知轮廓裁切实现完成；业务 App 当前页面仅有半径为 0 的 `DecorView` 与无子项控件，仍无法做业务圆角父层对照。普通背景圆角和未知自定义路径不等同于 SDK `clipToOutline`，不宣称已覆盖；其他设备和业务页像素对照待出现合适页面时补验。
+测试脚本、benchmark和文档已整理完成：合并重复入口，保留独有断言、失败证据与必要门禁；常用文档只维护当前结论，逐轮记录进入[验收沿革](archive/CORE_ACCEPTANCE_2026-10-09.md#ui复刻收口u1u6c2026-10-11)。本轮结果见[整理验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#本轮整理2026-10-11)。控件识别两轮评估已完成，完整树门槛未通过；[可选Helper只读后端](#helper-readonly)已完成固定样例同页、真实响应体取消、原生候选窗口和30分钟持续验证，默认UIAutomator不变。Mac arm64本机交付与实际升级/回退已完成，见[交付说明](DELIVERY.md)及[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#local-delivery-acceptance)。原U系列后续和其他手机任务继续暂停。
 
-复用 `android/sample-app`、现有 own/group 抓图和合成测试，不新造采集通道。
+首次使用方向已完成：固定完整源码、独立依赖构建、空配置真实采集及保存重开，同一快照CLI/MCP只读查询和停止共享通过；[一页上手说明](FIRST_USE.md)含真实2D/3D截图。范围见[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#first-use-acceptance)，不扩大为干净系统安装或正式发布。按用户最新安排，新增稳定性验证和另一台干净Mac的首次安装验证暂时后置；[Artemis架构借鉴](#artemis-architecture-reference)的步骤证据及固定任务验收已完成自有样例完整流程和独立候选验证，入口见[上手第7步](FIRST_USE.md#7-可选完成一次固定样例任务)。薄任务运行层仍后置。
 
-- 样例覆盖父背景、自绘装饰、透明文字、圆角与越界裁剪、半透明父子及兄弟；再抽查稳定业务页面。
-- 明确 alpha 是否已进入图片，防止重复变暗；画面、边框、命中共用几何，缩放/旋转/滚动只应用一次。
-- 检查展开 → 收起 → 再展开、隐藏子层、刷新子项、快速切快照；祖先 group 缓存必须失效，迟到图片不得复活。
-- 含 Surface/Texture 的分支继续使用现有回退，不把普通 group 图声称为完整视频画面。
+2026-10-12的[Artemis下一轮计划](#artemis-next-plan)四项已接入新源码：统一诊断、失败步骤日志、2D实时预览、任务进度展示。三个子代理在独立工作树开发并统一整合；安装版未更新，稳定性等暂停任务继续后置。
 
-**验收：** 父 own 不含子像素且不丢自身装饰；透明文字无借来的底色；收起只显示一份子内容，半透明不叠加两次。静态样例做像素/alpha 对照，业务页留画面证据；不通过就先修根因，不扩大功能。
+随后按用户要求，三个子代理在新的独立工作树完成[步骤差异、桌面任务模板与证据导出](#artemis-evidence-plan)，全量1201项、构建及实际桌面组合验证通过，见[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#artemis-evidence-acceptance)。有限步骤自动执行放第二批，沿用现有授权与 Checker。
 
-### 2. 独立图边采边显示（主线）
+最新三个子代理完成[模板共享与片段复用、匹配诊断及跨次运行对比](#artemis-reuse-plan)，全量1249项、构建及实际桌面组合通过，见[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#artemis-reuse-acceptance)。原目录既有成果和暂存区保留；安装版未更新。
 
-原瓶颈在 `HierarchyProvider.captureVisible` 与 `electron/adb.ts` 的 `captureSdkVisibleLayers`：设备生成完整文件后，桌面才读取。Lookin 的可借鉴点是优先当前展示层、按预算分包、逐批更新，不是多发小请求。[对应源码](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Static/LKStaticAsyncUpdateManager.m#L134)
+[Lookin功能源码复核](#lookin-feature-reference)后的五项已接入新源码：完整快照文件、分组业务信息、默认折叠、颜色预览与别名、可见图层优先与按需补图。[第二轮UI与功能候选](#lookin-ui-next)的四项也已完成源码：普通轮廓开关与选中强调、固定测距结果、控件图片输出、属性分组显隐。安装版尚未更新；新增稳定性及其他手机任务继续后置。
 
-**已做：** 单次 Provider 请求仍照常采全量；桌面有界读取正在写入的私有文件，只预览请求标识、对象/尺寸、图片 CRC 与当前进程/窗口均匹配的完整记录，最多三次。最终文件仍做 SHA-256 与整批校验；取消后丢弃迟到图片。旧 SDK 无协议标识时不轮询。Android 14 样例同页 436 节点/409 图三轮：改前首图中位约 21.0 秒、完成约 23.2 秒；改后首图约 7.5 秒、完成约 21.7 秒，均 0 失败。业务 Debug App 保留数据升级 SDK 后，真机一轮 1180 节点：树约 4.1 秒，首批 40 张图约 12.8 秒，最终 195 张图约 38.4 秒、1 张补图失败。随后连续两轮分别遇到 Debug View 连接提前关闭和 App 页面未就绪/图像阶段超时；没有测得稳定全量提速，也未测桌面 GPU 纹理到可见像素的延迟。
+[剩余功能迁移计划](LOOKIN_MIGRATION_PLAN.md)前三项已通过独立worktree并行开发并统一合入新源码：折叠分支内快速选择、布局关系定位、分层业务信息。事件处理信息继续后置；其他候选、上游依据与完成边界保留在计划中。
 
-1. **先查连续采集稳定性，再补端到端基线。** 新版业务 App 首轮及重启后首轮可分段预览，但紧接的重复采集曾让 SDK 读树、DDMS 连接或截图变慢/超时；一次回退约 175.5 秒且 0 独立图。已为预览截图、稳态独立图和最终截图补等待上限；截图超时不再丢弃已读取的树，树预览也不再依赖截图成功。同机业务首页随后连续三轮均成功，1227 节点、250–251 张图、33.5–35.0 秒，未复现旧故障；这只证明本次状态可用，不能把限时当成底层卡顿已修复。2026-10-01 又做三轮首页采集，均返回约 1289 节点及 SDK 独立画面；两轮完整真机冒烟 22 项通过。另修复 Node 20 冒烟启动参数、测试窗口进程组残留和一处布局等待竞态。旧连接关闭/阶段超时的根因仍未定，下一步继续测冷启动、业务页忙碌与设备/ADB 负载，再测首图延迟、卡顿和内存。
-2. **完善优先级（首版已完成）。** 保持单次 Provider 请求和全量图集：当前选中 View 优先，其次屏幕内可见面积较小的 View，屏幕外层保持原树遍历顺序。Android 14 样例把原本较深的 `TextView` 提到首批独立图，首批即包含该选中节点；真机冒烟通过。不能按视口裁掉其他图层，也不恢复已测更慢的逐批 `content call`。
-3. **每批独立验收。** 携带请求、进程实例、窗口/根、对象、own/group、序号、尺寸及完整性信息；限制节点、单图和累计字节。单层失败保留其他有效图，重复、乱序、过期批次拒绝。
-4. **缩小桌面更新成本。** 已消除最终截图替换时 WebGL 场景重建、独立纹理重复上传。首次预览仍传完整树，后续批次只传画面/状态变化的节点；树身份变化则退回完整预览，最终快照仍完整校验。界面回归确认补图保留选中、属性和 3D 模式。Apple M4 Pro 的 Electron/WebGL 合成基准：512 层、初始 32 张图，连续三批各补 40 张 256×256 图；树合并 0.1–0.7ms、React 提交 3.1–7.5ms、到 GPU 完成绘制 40–55ms，每批恰好上传 40 张，GPU 纹理约 30MiB。这不是实际手机画面到显示器的延迟。另对已保存的 267 图快照，桌面透明度复核耗时约 134ms、进程 RSS 峰值增加约 233MiB；暂不为合成基准继续重写布局，先关注真实采集内存峰值。
-5. **取消能停止后续工作。** 单任务有界队列，图像编码/传输不阻塞主线程，不与旧 JDWP 同时抓同一 App。已进入的自定义绘制不能承诺强制中断；取消、断线、切 App 后丢弃迟到结果并释放资源。旧 SDK 仍走兼容路径。
+最新补充的[继承类型图标、场景提示、已采集图片预览](LOOKIN_MIGRATION_PLAN.md#lookin-next-usability)已用三个独立worktree并行开发并统一接入源码，见[使用](FIRST_USE.md#lookin-discovery)及[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#lookin-discovery-acceptance)。水平旋转、轻量快照分享和事件处理信息继续后置；安装版未更新。
 
-**验收：** 同条件首批独立图明显提前，全部完成中位数不显著变慢，覆盖和正确性不下降；已验收的批次到桌面后以 500ms 内可见为同机目标。分别报告首图收益与全量收益，不能把两次阶段更新或减少采图称为提速。若新增传输方案得不偿失，保留当前默认路线。
+## 已完成方向
 
-**编码与首图实测（2026-10-01）：** 业务页旧 PNG 路径一次采集 216 张图，设备端编码约 14.48 秒。随后在同一 Android 14 样例压力页（436 节点、409 张图）比较三轮：PNG 的全采集中位 21.47 秒、编码 3.22 秒；无损 WebP 的全采集中位 20.36 秒、编码 2.69 秒，分别约快 5% 和 17%。WebP 仅启用于 Android 11/API 30+，旧系统保留 PNG；图片仍逐张校验，最终文件仍校验 SHA-256。WebP 首次接入时桌面只允许流版本 1 触发增量预览，版本 2 因此等到整包；修正后同一 436 节点样例真机冒烟 22 项通过，4 批显示全部 409 张图，树预览 1.35 秒、首图 5.99 秒、完成 19.91 秒。编码 A/B 仅在样例完成，不能推断业务页提速；本轮主要改善首图可见时间。无损 WebP 的系统支持和质量参数见 [Android Bitmap.CompressFormat](https://developer.android.com/reference/android/graphics/Bitmap.CompressFormat?authuser=0000)。
+- U1–U2：紧凑工作台、底部搜索、贴边属性卡片；搜索高亮/折叠恢复、键盘浏览、双击设置和分支聚焦。
+- U3–U5：画布手势/适应、属性卡片密度/复制/搜索恢复、统一菜单/快捷键、首页与偏好。
+- U6a–U6b：固定候选、包内组合回归、备份交付及真实历史工作台查看。
+- U6c：首页历史下拉/AI文字、报告关闭重开/迟到隔离、权限等待提示；旧报告实际导入/截图/取消/错误保留/退出已复核。
 
-**优先首批与 WebGL 观察（2026-10-01）：** Android 样例 436 节点/409 图仍单次全量采集；选中的末段 `TextView` 进入首批（34 项），总 4 批、完成约 20.23 秒。首批后切 3D，151 张纹理对应 `gl.finish()` 为 14.86 秒；间隔含模式切换、解码和上传，不是纯 GPU 或上屏耗时。
+此前等待来自用户尚未点击权限确认，原“卡住”判断已撤回；没有证据确认某个系统权限机制或事件循环根因。推测性读取线程、超时和调度改动不在最终版本中。
 
-**业务 Debug App 验证（2026-10-01）：** 首次只重建业务 APK 时误用了旧 AAR，Provider 仍报告流版本 1、输出 PNG；重建当前 SDK AAR 后再打包并以同签名 `adb install -r` 更新，数据保留。小米 Android 14 上 Provider 报告版本 2、树 1233 节点；独立探针 200 张均为 WebP（设备渲染 23.15 秒、编码 7.15 秒、总计 31.14 秒，单轮不作提速对照）。排序探针确认指定 `CheckedTextView` 成为首张，首图为 WebP。桌面端收到 1234 节点/212 张预览图，树预览 2.94 秒、首图 7.87 秒、采集完成 26.52 秒；3D 首批 66 张纹理的 `gl.finish()` 为 15.51 秒，渲染错误为 0。后续三次直接调用同页 Provider 均成功：224 张 WebP、7362 万像素，设备总耗时 7.589/7.592/7.628 秒（绘制 2.810–2.945 秒，编码 4.167–4.342 秒）；图像摘要不同，页面不是像素静态，不能用作逐帧一致性结论。fixture 中面板拖拽通过；业务桌面 smoke 曾复现属性栏未移动且画布收到旋转手势，之后四轮则在检查 3D 状态时 DevTools 断开，未走到面板测试。尝试将大图透明边界精确扫描限制在每张图最多 256K 像素（且不超过纹理预算），超限图保留完整 View bounds、不裁像素；单测和构建通过，但真机 smoke 仍断连，尚不能认定该扫描是根因或优化已解决断连。开启 Electron 日志只看到 `ResizeObserver loop completed with undelivered notifications` 警告，未捕获明确 GPU 错误。下一步定位 renderer/DevTools 断连原因，再继续桌面端到端、面板真机命中和内存峰值检查。
+## 候选后续（暂停）
 
-2026-09-30 同机业务首页又测得 1227 节点、252 张独立图、完整采集约 37.8 秒；树约 3.5 秒，三次补图预览约 11.4/21.7/24.7 秒，设备端 PNG 编码约 11.5 秒、特殊控件补图约 10.3 秒。单轮时序不足以证明稳定提速；当前主要等待在设备采图与编码，不把合成 WebGL 帧耗时当成全链路瓶颈。
-
-同页随后重复两轮：1227 节点、250/251 张图，完整采集 37.2/34.5 秒；设备 PNG 编码 11.4/11.1 秒，JDWP 特殊补图 10.4/10.2 秒。第二轮 251 张 PNG 压缩后约 9.6 MiB，展开像素约 278 MiB；补图候选 116 个，实际请求 32 个。独立 Bun 采集进程 RSS 约从 31/32 MiB 升至 290/269 MiB。已运行的桌面程序另一次实采中，主进程 RSS 约 177→316 MiB，界面进程 130→214 MiB，GPU 进程 79→107 MiB；切到 3D 后界面进程约 359 MiB。以上是不同运行的样本，不相加、不当作内存泄漏；目标 App 的系统 PSS 随业务页面波动，尚不能归因 SDK。
-
-**透明图试验（2026-09-30）：** 已保存的业务快照有 267 张独立图：45 张全透明（约 2575 万像素，PNG 仅约 105 KB）、25 张全不透明、197 张混合；所有 PNG 均为 RGBA，不能只按通道格式跳过复核。Android 14 样例增加 20 张约 226 万像素的透明层后，设备 PNG 编码三轮中位 5.46 秒，基础页 9 张图约 0.57 秒；同尺寸不透明层约 4.89 秒。试验性透明 PNG 缓存把该人工重复场景的完整抓图中位从约 6.0 降至 2.4 秒，但本机返回的是硬件位图，判透明必须先复制像素；不透明场景扫描增加约 0.7–0.8 秒，中位完整耗时略变慢。业务快照可复用的透明像素仅约 1270 万，远少于人工样例，因此**不接入默认采集**，试验代码已撤回。
-
-**真实业务页逐图诊断：** 新增只读脚本 `bun scripts/sdk-visible-profile.ts SERIAL com.smile.gifmaker`，在 SDK 写文件时采样长度，结束后核对请求标识、文件摘要和记录数量；只输出汇总，清理临时画面。稳定的另一业务页 217 张图、约 6337 万像素，SDK 直接调用两轮约 19.0/19.2 秒，设备编码约 14.0/14.1 秒；轮询诊断三轮约 19.8/19.4/19.3 秒、编码约 14.6/14.3/14.4 秒，首轮冷态 31–36 秒不并入稳态对照。19 张超过百万像素且 PNG 小于 20 KB 的图中，11 张经 PNG alpha 校验全透明，8 张仍含内容；这些单张写入间隔常约 0.37–0.59 秒，但间隔包含绘制、编码、轮询误差，**不是单张编码精确耗时**。全页约 1743 万像素属于可复用的重复大透明图。压缩大小、控件类名和尺寸都不能安全判定“可跳过”；本轮未改默认采集。
-
-**大图定向复用真机 A/B（2026-09-30）：** 仅对重复尺寸、至少 100 万像素的图逐像素确认全透明后，才复用同尺寸已编码 PNG。样例 20 张透明大图，同 APK 三轮中位从 8.95 秒降到 3.73 秒；20 张不透明大图反而从 8.75 秒升到 10.10 秒。业务 Debug App 同一静态页 193 张图交替三轮：基线 12.11/12.00/12.05 秒，试验 11.31/11.45/11.20 秒，中位仅快约 0.74 秒；两组每轮的逐图 PNG 摘要、图数与总字节均相同。真实收益不足以抵消普通页面的扫描回退风险，因此已撤回试验代码，**不启用默认采集**；未因放弃方案而追加内存试验。
-
-**特殊补图定位（2026-09-30）：** 旧业务页 96/97 个候选中有 80 个最终被判定为纯布局、无需画面。新版 SDK 在同次可见层抓取中有界返回纯布局对象身份，桌面只跳过这些已确认对象的 JDWP 复查；旧 SDK、自绘、覆盖层及 Surface/Texture 仍走原路径。样例同页 15 节点、9 张图，3 个纯布局候选从复查中排除；一次原路径约 6.84 秒、两次新版约 6.34/6.33 秒，仅作方向性结果。业务 App 更新后一次 1208 节点采集得到 144 个纯布局提示，但随后连续采集又遇控件树超时，页面节点数也不同，**尚无有效的业务页速度 A/B**。
-
-### 3. 升级为真正的分支刷新
-
-Lookin 会先重读目标的子树，再补该分支图片。[对应源码](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Static/LKStaticAsyncUpdateManager.m#L418)
-
-**已做：** 复用现有 DDMS/JDWP 抓图，小分支刷新先读新结构，再按新对象补图；SDK 混合快照同时重读 SDK 属性。窗口、进程、分支外结构/可见性及目标祖先几何稳定时才替换分支；无关兄弟的动画位移不阻断局部刷新，其旧位置留到整页重采再同步。原有选中、展开和隐藏状态按对象身份迁移，删除项回到仍存在的祖先，折叠整组图缓存失效。Android 14 样例新增、删除、重排子层再次通过；父控件变大后刷新父分支成功，单刷子项因祖先移动被拒绝。业务 Debug App 同机 6 节点分支在其他区域持续位移时约 6.3 秒刷新成功、0 补图失败。样例 421 个可见控件的分支明确提示超过 64 个上限；建立 JDWP 转发后取消约 0.47 秒结束，端口无残留。刷新中切到另一 App 约 4.7 秒安全拒绝，端口无残留。业务页真实增删/重排分支与更多机型尚未验证。
-
-**快速变化补图修正：** 真机立即新增子层时，JDWP 对 `java.lang.Class` 返回两个同名类；旧代码要求恰好一个，连续 4/4 次补图失败。现按类加载器唯一选取系统类，歧义仍拒绝；相同操作连续 4/4 次成功，0 补图失败、转发无残留。业务 App 随后 1306 节点快照中的 6 节点分支刷新约 7.3 秒成功，0 补图失败。更多 Android 版本仍待验。
-
-**分支刷新物理断线（2026-09-30）：** Android 14 真机、样例 436 节点中的 21 节点分支连续刷新；第 6 次刷新期间拔线，约 1.9 秒后报连接失败，未返回新分支，设备离线且 JDWP 转发无残留。接回后重采 436 节点约 19.8 秒，同一分支约 6.6 秒刷新成功、0 补图失败。已切回原业务 App。此结果只覆盖当前设备、该分支和拔线时点。
-
-**真实列表与局部失败（2026-09-30）：** 业务 App 打开评论后，整树约 1304→2045 节点，评论容器约 1→742 节点；“展开回复”所在列表也有约 614 节点。当前 64 层的小分支刷新安全拒绝，未把不完整新树替换到旧画面；不直接抬高上限，列表需要另设计按可见项分批刷新。样例新增 `partial-failure`：2109×2109 的单层超出 400 万像素预算。修正前它使 SDK 整批回退；现在仅跳过该层，完整采集明确标为失败，另外三层各自有图；刷新父分支约 4.9 秒，1 层补图失败、其余 3 层成功。该用例未证明业务列表可局部刷新。
-- **阶段 1/2 完成状态（2026-10-02 收口，三轮执行细节见 [项目状态](PROJECT_STATUS.md)）：** 阶段 1（业务小分支真实增删验证）以「特性可用 + 安全语义矩阵完整 + 场景不可行性实证」收口——目标分支=暂停图标父容器 `TouchDelegateFrameLayout`（2 节点）；稳态刷新两次成功（可见控件独立画面全部刷新、0 失败）；祖先可见性翻转（暂停交互层 playing→paused）、恢复后「缓冲谷」无可见控件、uiautomator 回退快照「已失效」三类安全拒绝全部实证正确；三个增删候选（暂停图标=祖先可见性翻转、展开回复=列表级条目替换、表情面板=独立窗口）全部违反 context 门，业务 App 无合规真实增删场景（真实增删合并已由样例 App 覆盖）；`scripts/branch-refresh-probe.ts` 留作回归工具。随阶段 1 落地的桌面加固（125 项单测全绿）：`isTransientTreeReadError` 瞬态读树有界重读（3 次尝试，身份/层级变化绝不重试）、merged 快照 SDK 同源 adopt（修复 D2/D3 提速后快照来自 SDK 树而活树读 dumpsys 的两源路径错位）、整页采集空树守卫、`describeBranchContextMismatch` 身份差异诊断。
-- **阶段 2 实现状态（方案 A 可见项分批，2026-10-02 实现与单测完成，仅差真机验收）：** 决策理由：真实交互即条目级、单条目分支刷新已可用、分批把每轮 ~5–9s 固定流水线成本摊到整屏可见条目；B 分页切片侵入更大暂缓，C 已被阶段 1 证实不成立。`captureListViewItems`（`scope="list"`，与分支刷新共用新抽取的 `buildReadCurrent`）：以条目为最小单位装箱（每批可见控件 ≤64、单条超限按 partial-failure 跳过）、列表容器并入首批、逐批补图后二读做整列表稳定性校验与逐条目边界校验、屏外条目按 ref 保留旧画面并标注 `out-of-viewport`、超限条目标注 `list-item-skipped`、失败条目沿用 partial-failure、不放宽任何身份校验、转发 finally 清理；属性面板对列表类节点（RecyclerView/ListView/GridView/ViewPager 或 ≥12 子层）新增「刷新可见项（分批）」按钮。`scripts/list-refresh-probe.ts` 就绪。
-- **设备敌对状态档案（当前验收唯一阻塞项，判定健康窗口用）：** 业务 Debug App 无交互即占 271–444% CPU（RSS 1.5–2.3GB），整页采集随之退化至 50–93s，90/18s 护栏连续拒绝；强启 2–3 分钟后复发，沉降 8 分钟仅短暂恢复；暂停态 SDK 独立画面 capture 挂起 24.8–60s（App/设备侧——content CLI 4.3s 即回错，桌面侧已穷尽加固面）；短视频自动翻页使条目对象复用到屏外（ref 不变但不可见）。
-- **下一步 1（先做，当前唯一不依赖设备健康度的计划内工作）——会话通道空闲自动关闭（原附带小项）：** 现状：桌面 `providerSessions` 缓存 `openProviderSession` 打开的本地会话（LocalServerSocket + adb forward + 常驻 socket），仅单请求超时/中止时关闭该会话、App 退出时 `closeProviderSessions` 全量关闭；长时不采集时通道与转发常驻（App 侧守护线程与监听 fd 随 App 退出/断开自愈）。方案：**桌面侧空闲回收**，不动 SDK/AAR/业务包（App 侧 SO_TIMEOUT 需重编重装且收益不明，不采用）。设计：`ProviderSession` 增加 `lastUsedAt`，`sessionRequest` 每次调用刷新；全局 `setInterval(30s).unref()` 扫描已就绪会话，空闲超过阈值即调用现有 `closeProviderSession`（清缓存、拒绝 pending、destroy socket、`adb forward --remove`——与超时关闭完全同语义，不新增退出/断开语义）；默认阈值 300s，环境变量 `INSPECTOR_SESSION_IDLE_MS` 覆盖（≤0 禁用，供验证用短阈值）；阈值远大于最大单请求超时（60s），在飞请求不会被回收；空闲关闭后新请求经现有 `openProviderSession` 自愈重建。验证：以短阈值环境变量启动桌面 → CDP 驱动一次采集（会话打开）→ 空闲等待 → 断言 `adb forward --list` 无该转发残留、再次采集成功（自愈）→ 全量单测与真机冒烟仍绿；不依赖业务 App 健康态（通道层在慢态也正常）。验收：空闲超阈值后无转发残留、再次采集无感重建、现有退出/断开语义零回归。
-- **下一步 1 状态（2026-10-02 晚）——实现完成（126 项单测全绿）、验证部分达成：** 已实装 `ProviderSession.lastUsedAt`（创建/请求/回包三处刷新）+ 全局扫描器（间隔 `min(30s, 阈值/3)`、unref）+ 回收判定纯函数 `shouldReclaimSession`（6 例单测：在飞请求保护、阈值边界、禁用），阈值由 `INSPECTOR_SESSION_IDLE_MS` 覆盖（≤0 禁用）。真机实证（业务 App 刷新路径、短阈值 20s）：会话转发在操作期间出现、失败调用按既有语义即时关闭、空闲期间无转发残留、二次刷新自愈重建新会话；**空闲扫描器已干净隔离验证**（样例 App 重编后补测：操作期会话出现 → 空闲 15s 按扫描粒度回收 → 下次操作自愈重建且成功）。样例 APK 已用当前 SDK 重编（获得 `open-session` 支持，替代原「旧构建不支持会话」结论）。
-- **下一步 2——设备健康窗口 + 双探针验收（阶段 2 收口 + 阶段 1 回归）：** 前置（2026-10-02 晚间已执行，见下方执行记录）：**整机重启手机**——唯一未试过的恢复手段（系统级状态：system_server 累计 CPU 873 分钟、audioserver 590 分钟、3 个 zombie 进程、swap 1.4GB，force-stop 清不掉）；重启后若停在锁屏态，USB 调试需手动解锁后恢复。健康检查（约 2 分钟）：单次整页采集 <15s 视为健康，否则继续沉降或改日再试，不带病硬跑。阶段 2 验收：`bun scripts/list-refresh-probe.ts --serial=<serial> --require-device`——742 节点评论列表「展开回复」后 `scope="list"` 分批刷新成功：新增回复条目按对象身份进入、原条目保持、每批 ≤64、屏外条目标注 `out-of-viewport` 且不串图、failures 为 0、转发无残留；记录总耗时与内存对照整页重采基线（~9–14s/次）。阶段 1 回归：`bun scripts/branch-refresh-probe.ts --serial=<serial> --require-device` 完整通过一次（新增/删除/稳态/切卡安全拒绝/转发清理全链）。结果回写本文档与 PROJECT_STATUS。
-- **下一步 2 执行记录（2026-10-02 晚，整机重启后）：** 健康检查：首采被 90s 护栏拒、25s 重试 19.6s 过（1431 节点 debug-hybrid，边缘态）。标准探针 3 次失败：①首页 115s 过、面板采集后无展开控件（场景缺口已修——评论区换视频重试 ≤4 已进探针）；②三视频均被 90/18s 护栏拒；③force-stop 沉降 8 分钟（0 zombie、772% 空闲）后首页 61s 过、面板采集被「18 秒未就绪」+「冷启动 55s」双拒。轻量路径（uiautomator 定位入口、跳过首页采集）被 App 直接 ANR（「快手没有响应」对话框）阻断。结论：**手机重启与沉降均未恢复 App 敌对态**（启动窗口内首采可通过、其后采集必被护栏拒的渐进模式），阶段 2 真机验收仍待健康窗口；设备直测 `open-session` 1.17s 正常，确认瓶颈在采集负载而非会话通道。**21:15–21:25 复测**（App 停摆约 2 小时后）：单发复检曾读到 13.0s、1492 节点（健康）的瞬时窗口，但验收探针全程仍败——首页 63s、面板采集被「独立画面 90s」+「冷启动 55s」护栏双拒；**单发采集可偶然通过、连续采集必败**，验收继续待窗口。健康门控工具已转正：`bun scripts/device-health-check.ts --serial=… --require-device`（退出码 0 健康 / 1 不健康 / 2 运行失败，验收前先跑）。
-- **样例替代验证（2026-10-02 晚，业务敌对态期间的迂回，全部通过）：** 样例 APK 以当前 SDK 重编（MainActivity 新增「list」模式：24 条目 × 4 控件、点击「条目 0」顶部插入 2 条目、1 个 INVISIBLE 条目；工具 `scripts/sample-list-refresh-probe.ts`）。① 会话空闲回收干净隔离验证：操作期会话出现 → 空闲 15s 按扫描粒度回收 → 自愈重建并成功；② `captureListViewItems` 真机三轮——单批（26 项/1 批、104 节点全补图）、多批（26 项/2 批、104 全补图）、屏外标注（25 项/2 批、`out-of-viewport` 4 节点、INVISIBLE 条目保留旧图）——新增条目均按对象身份合并、missing=0、failures=0、转发无残留。**结论：列表刷新核心路径（条目装箱 ≤64、跨批补图合并、身份合并、屏外标注）已在真机端到端可用**；业务 742 节点验收仍待健康窗口，剩余差异仅 RecyclerView 回收语义与业务慢态。
-- **探针工装升级（2026-10-02 晚）：** 新增 `scripts/lib/probe-harness.ts`（Electron 启动/端点解析、CDP 连接与就绪等待、身份化求值、树/转发辅助），branch/list/sample-list 三探针全部迁移（消除约 150 行重复）；**顺带修复既有缺陷**——`Browser.close` 在该 Electron 上不回包，旧代码悬挂 300s，导致 `[pass]` 后的转发核对与 summary 落盘从未真正执行；现以 socket 关闭拒绝 + `shutdownProbeElectron`（Browser.close → ≤8s → SIGTERM 兜底 → ≤8s）收尾，四探针实测完整收尾。新增常驻工具 `scripts/session-idle-probe.ts`（会话空闲回收验证；样例默认 stress-large、业务 App 可参数化）；样例列表探针增加点击生效校验（uiautomator 验证 + 幂等监听 + ≤3 重试）。
-- **下一步 3——提交检查点（2026-10-02 晚已落盘）：** 已按单笔提交落盘：本地分支 `lookin-alignment`、commit `eadb454`（21 个修改文件 + 7 个新文件、3036 行插入，**未推送**，main 未动）。原「分三批」方案作废——采集提速、阶段 1 加固与阶段 2 特性在 `electron/adb.ts` 等文件内同函数交织，拆分会使中间提交无法编译，故改单笔综合提交；后续新工作可按计划步骤逐笔提交。
-- **下一步 4（可选打磨，验收后再排）：** SDK 侧 capture 有界等待（HierarchyProvider 对挂起的独立画面 capture 约 10s 内快速失败，替代 24.8–60s×2；需重编 AAR + 重装业务包 + 回归）；app-smoke 增加小列表 `scope="list"` 冒烟检查（样例 App 走通代码路径；专用探针已先行覆盖）；业务复杂圆角父层像素对照（待合适页面）；uiautomator 回退项已核实**无需改动**（`inspect-device` 管道内不存在静默回退——uiautomator 仅出现在显式轻量调试模式与夹具两条路径，探针的来源校验已覆盖该风险面）。
-- **文档编辑规程（固化教训）：** 对本文件的批量编辑禁用「锚点字符串 + 尾部切片」式脚本替换，统一行号定位或逐条精确替换，写后立即 `git diff --stat` 核对改动范围。
-
-**验收：** 样例新增/删除/重排子项后无需整页重采，其他分支和相机不变；重复 ID、列表复用、Activity 重建、取消/断线及局部失败均不串图。大列表分批方案已定为可见项分批（方案 A），其真机验收见上文「下一步 2」。
-
-### 4. 补选中控件的真实样式属性
-
-- **已做（2026-10-01）：** 实测业务首页 `CheckedTextView(首页)` 的 SDK 屏幕坐标与桌面快照最多差 8px，尺寸和对象身份不变；实时样式接口能返回文字色和字号。根因是混合采集本来容忍最多 8px 的位置漂移，而样式解析器要求坐标完全相同。样式读取现复用同一位置容差，尺寸、对象、根和进程校验仍严格；超过容差继续拒绝。新增 `--require-live-style` 真机冒烟检查，在隔离桌面配置的 1275 节点业务快照中选中该控件，属性卡正确显示 `#FF909090` 和 `47.81px`；整套真机冒烟通过。
-- **布局规则真机端到端验收（2026-09-30）：** 使用新 SDK AAR 构建并保留数据覆盖安装 `com.smile.gifmaker` Debug 包。正式整页入口实采 1211 个独立 Debug View 节点并按对象身份、类名、尺寸和坐标合并 SDK 树，得到 `debug-hybrid` 快照；358 个规则节点（251 个 ConstraintLayout、107 个 RelativeLayout）全部通过白名单解析。新版桌面端在独立临时用户配置中完成 1209 节点真机采集；属性栏截图确认 ConstraintLayout 的目标锚点/偏置，以及 RelativeLayout 的相对/父容器对齐规则均能显示。ConstraintLayout 实例为 `like_count_view`（左右锚点到父容器、顶部锚点到 `like_icon`、双轴偏置 50%）；RelativeLayout 实例为 `profile_photos_layout`（位于状态栏占位下方、对齐父容器右侧）。完整采集约 25 秒，1 个独立图补采失败，不影响规则读取。原有旧桌面窗口与其数据未动。当前页面没有带子节点的圆角父控件，裁剪效果仍待合适页面验证。样式仍只读白名单，不遍历任意业务对象或调用全部自定义 getter；渐变、自绘、tint 与合成透明度不能据纯色源色推断最终像素；未提供的值不填 0，Qt 不套 Android 属性。
-
-**验收：** 样例和业务 Debug App 逐项对照运行时值；旧 SDK/旧快照兼容，选中时补属性不拖慢初次采集。本阶段只读，不包含属性写回。业务 SDK 与桌面属性卡端到端均已验证；复杂父子圆角画面仍按上文待验。
-
-## 不变的边界
-
-- **Debug 与接入：** 目标 App 必须可调试；SDK 需 Debug 专用依赖并重新构建，不会自动注入已安装 APK。Release 的依赖、Manifest、DEX 和资源均须排除 SDK 及绕过库；不重签第三方 APK。
-- **权限：** 现有 Provider 保留 `DUMP`、shell UID 和 Debug 检查，文件仅在 App 私有目录。新传输不能削弱鉴权；只有现有方式确实不足时才评估本机 ADB 转发方案及独立会话鉴权，不对局域网开放。
-- **身份与预算：** 包、进程实例、窗口、对象、尺寸和内容完整性逐次校验；重复/歧义对象拒绝。已有长度、像素、超时、保存/共享及 MCP 载荷限制保留，旧字段缺失不伪称有新能力。
-- **画面：** 展开用 own，收起用 group；父背景归父层，不自动分给子层。group 缺失、隐藏部分子层或不支持时使用标明来源的本地合成，绝不从整屏裁图补成 own。
-- **不侵入：** 允许已获同意的 Debug 专用非公开接口，但不改设备全局隐藏 API 策略，不临时隐藏/移除业务子控件，不冻结整页，不绕过 DRM。
-- **时间与自动化：** 树、截图和逐层图并非同一帧；实时 group 标注新时刻，历史快照离线回放。进行中或上下文未验收的结果不能保存、共享或进入 CLI/MCP 操作链，已有操作授权不扩大为对象写回。
-- **几何与状态：** 爆炸展开距离不是设备真实 Z/测距；内容小不代表 bounds 小。真实透明、纯结构、失败、预算不足和不支持分别标注，几何未知不猜点击坐标。
-- **暂缓：** WebGL 重写、任意属性/代码执行、多窗口、通用 Hook、Qt 任意父项自身图及 Compose/Flutter/DOM 专项。更多 Android/OEM、Qt 快速切页、跨平台安装/DPI 和长期内存验证保留在 [测试计划](TEST_PLAN.md)，未测不写支持。
-
-## 验证基线
-
-以下为截至 2026-09-29 的已有记录，不是本次重新测速。主要来自同一小米 Android 14；不同节点数、页面状态和采集方式之间不能拼成速度 A/B。详细阶段数据保留在 [项目状态](PROJECT_STATUS.md) 与 [采集排查记录](INSPECTION_RELIABILITY.md)。
-
-### 采集性能
-
-| 已有对照 | 结果与结论 |
+| 方向 | 恢复时的完成条件 |
 | --- | --- |
-| 1170 节点，树/整屏先展示 | 中位 2.06 秒可操作；首批独立图 22.98 秒，全部 35.75 秒。后续同页复测全部 36.49 秒，主要等待 DDMS 首包；不是全量提速。 |
-| SDK 多次小批调用实验 | 1173 节点、209 张图：原路径 66.43 秒，实验 110.52 秒；只一组对照，未证明全部像素一致。不接默认采集，避免重走此路。 |
-| SDK 单次 `capture-visible` | 同页 1198 节点，三轮中位 45.95 → 29.58 秒；199–203 → 237 张图，均有一个相同失败层。静态父层 369886 个像素与旧路径一致。 |
-| 后续稳定业务页 | 1184 节点三轮 28.39 / 25.51 / 25.90 秒，220 / 221 / 221 张图、0 失败；另一次 group 补验完整采集约 25.8 秒。 |
-| 最新两次冷启动 | 37.48 秒/209 张、36.79 秒/202 张；整树变化所以拒绝 SDK 属性，但保留匹配图片。第二轮有一个补图失败；不足以证明连续冷启动稳定。 |
-| 绘制与编码 | 上述冷启动绘制 5.74 / 17.59 秒、PNG 编码 11.99 / 9.36 秒；波动明显，不能只归因 USB 或 WebGL。 |
+| U6d新版手机单页 | 固定设备/App/稳定页及单次只读范围，实际属性和2D/3D独立留证，不继承旧A3结果 |
+| 自动化与取消/恢复 | 先限定设备操作和故障范围，再按[原A–E计划](archive/LOOKIN_AUTOMATION_PLAN_2026-10-10.md)选择必要项目 |
 
-已修：单层空位图不再废弃整批；属性匹配失败不再丢掉严格匹配的图；冷启动有界等待同一前台 App，拒绝不完整树或空白“成功”。旧轮曾有 59–82 秒、超时及整批回退，不再当当前基线，但保留冷启动、切 App、取消和旧 SDK 回退用例。
+上述方向均不进入当前执行队列。其他缺口见[状态](PROJECT_STATUS.md#保留缺口)。
 
-内存对照：一次 27 秒采集中 App RSS 为 1.14–1.32 GB，随后 26 秒不采集时为 1.16–1.33 GB，历史峰值未增加；不能据此归因 SDK 净增量。业务 App 曾有 ANR/网络异常崩溃，尚无证据归因 SDK，也不能据此免除稳定性验收。
+<a id="lookin-feature-reference"></a>
 
-### 父子画面
+## Lookin功能借鉴（源码复核）
 
-- Android 样例父 own 不含红色文字及不透明绿色子项，保留自己的黄色装饰；子文字角落透明，越界子项裁剪与动态尺寸已验证。普通反射曾失败，后改为 Debug 内定向调用非公开接口；未修改系统全局策略。
-- 在线混合快照已接 `capture-group`：样例 731×506 约 4.6 秒；业务点赞、评论、文案父 own 均透明，group 分别含 109、109、16079 个子层可见像素。
-- 业务底部栏 group 为 1080×137、8293 个可见像素，own 为 0，约 5.3 秒。只允许父层内部子项最多 8px 小幅位移，目标父层位置/尺寸、对象、结构与窗口仍严格校验；不能将此规则扩大到独立图片匹配。
-- 含 Surface/Texture 的 group 安全回退。几乎在屏幕外的 `TextureViewProxy` 全透明缓冲继续标为取图失败，不冒充透明成功。新增 Android 14 样例：父圆角 own 角落透明，红/绿子层 own 各只含自身颜色；直接 `View.draw` 整组图角落错误地出现红色，因此现在拒绝这类失真整组图。本机像素回归验证圆角、父 alpha 一次叠加及重叠半透明子层；业务 App 旧 SDK 无轮廓字段，需更新后再验。
+2026-10-11对照客户端[Lookin](https://github.com/hughkli/Lookin/tree/95e30fdcc8151092678387c5262bce790a0d9530)提交`95e30fdcc8151092678387c5262bce790a0d9530`，以及端侧[LookinServer](https://github.com/QMUI/LookinServer/tree/ae396132ce6494477457cf450116dc760518d8ad)提交`ae396132ce6494477457cf450116dc760518d8ad`。源码复核后，按用户逐项授权落实五项；手机、稳定性及其他UI方向沿用既有安排。
 
-### 局部刷新
+本项目已有2D/3D、测距、分支聚焦、局部刷新、渐进显示及历史对比；SDK也已有[DebugNames](../android/README.md)业务显示名。数字资源ID已改为优先显示真实类型，原ID仍可搜索。下列建议补具体缺口，均沿用Electron/React/WebGL与Android采集链路。
 
-- 样例文字单控件刷新 10/10 成功，2.02–2.31 秒；文字变化后读到新图。动态业务页 10 次中 6 次成功，4 次因采集中移动安全拒绝。
-- 旧版样例父子分支刷新 10/10 成功，1.55–1.91 秒；当时新增子项会拒绝，混合模式未开放分支刷新。新版已支持小分支结构变化；432 个可见控件的大分支仍明确超限。
-- 同校验口径 SDK 单张路径约 4.50 秒，原按对象路径约 1.73 秒，故单控件刷新仍用后者；不以底层命令耗时冒充产品收益。
-- 动态尺寸、独立 Surface/Texture、重复刷新防重、取消重试与切 App 已测。单控件、小分支刷新和完整采集均完成当前 Android 14 设备的物理拔线/重连验证；断线时不交付新结果，转发无残留。
-- 取消外部 DDMS 请求不能终止设备内已开始的抓图；旧轮立即重采曾多等约 20 秒，不能宣称设备侧取消已经解决。
+| 顺序 | Lookin参考功能 | 本项目缺口及融入方式 | 工作量 |
+| --- | --- | --- | --- |
+| 1 | [完整快照保存](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Export/LKExportManager.m)和[离线打开](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Export/LookinDocument.m) | 新源码已完成：原树JSON导出保留，新增完整文件导出/打开，包含整屏、独立节点图、已取得的原生分支图与采集信息。复用[历史存储](../electron/desktop/snapshot-store.ts)、UiSnapshot和工作台；查看与保存均不临时补采 | 已完成源码，安装版未更新 |
+| 2 | [分组业务调试信息](https://github.com/QMUI/LookinServer/blob/ae396132ce6494477457cf450116dc760518d8ad/Src/Main/Server/Others/LKS_CustomAttrGroupsMaker.m) | 在已有DebugNames之外，由Debug SDK显式登记组件名、归属和加载状态等有类型的只读值，属性栏按组展示并保留来源。用于自有App；未接SDK的App仍按实际采集字段展示 | 已完成源码，安装版与手机SDK未更新 |
+| 3 | [按类型默认折叠](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Hierarchy/LKHierarchyDataSource.m) | 新源码已完成：偏好可按精确类名及层级默认收起，默认仍全部展开。完整树保留；手动状态跨渐进采集及局部刷新，搜索临时显示路径，定位可展开原路径。不默认收起全部ReactViewGroup | 已完成源码，安装版未更新 |
+| 4 | [颜色预览与别名](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Dashboard/AttributeView/LKDashboardAttributeColorView.m) | 新源码已完成：Android 实时背景/文字源色、QML 已采集背景/边框源色显示透明色块，原值/CSS Hex/RGBA复制；本机别名精确匹配颜色及透明度，搜索可找到。保留原ARGB，非8位透明度的Hex标近似，未知不补猜 | 已完成源码，安装版未更新 |
+| 5 | [可见图层优先与按需补图](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Static/LKStaticAsyncUpdateManager.m) | 新源码已完成：展示时选中优先、视口内补图，移入视口自动加载；整组请求及独立图解码各自串行去重，同次采集复用分支图。新树/刷新清旧，own/group身份分开，完整深度采集和离线零补采保留 | 已完成源码，安装版未更新 |
 
-### Qt 与稳定性
+**首项源码已完成：完整快照导出与离线打开。** 使用见[离线文件说明](FIRST_USE.md#offline-snapshot-files)，结果见[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#snapshot-files-acceptance)。范围：
 
-- ReClipMac 是 Qt 下载器，不是原生 View SDK 的验收对象，也没有实际视频播放页。动态页三轮 1601/1606/1611 节点，均 7 张叶子 PNG、118 个自身样式；990×630 父整组图及取消后重抓已通过。
-- Qt 静态样例验证裁剪及 group 的 alpha 语义；任意带子项自绘父层仍没有通用自身取图方案，保留已知样式/边框，不隐藏子项伪造。
-- 最近已有结果：114 项单测、构建与树 UI 回归通过；桌面真机 smoke 覆盖采集、WebGL、属性栏、滚轮及回放。妙控板双指、更多系统/设备仍待验。
+- 文件[格式](../shared/snapshot-file.ts)保存完整UiSnapshot；普通标量保持v1，新版分层/null业务信息使用v2，新端兼容两版；分支图由[工作台](../src/features/inspection/useInspectionWorkspace.ts)按当前树身份收集，随文件和历史保存。新树/局部刷新使旧图失效，迟到图不进入新快照；已有分支图的采集时间保留。
+- 离线文件沿用树搜索、选中、属性和2D/3D；恢复已保存的原生分支图，展开/再次折叠仍可用。本地重建与缺图说明保留。旧四字段树JSON只恢复实际内容，明确未包含整屏截图，不猜采集来源。
+- [主进程读取器](../electron/desktop/snapshot-file.ts)校验版本、100MiB文件限制、20,000节点/200深度、唯一节点/分支引用及真实图像解码；单图16M、总128M像素。图片只接受内嵌PNG/WebP/JPEG及受限QML样式SVG，拒绝外部引用。历史保存继续按50MiB单份/30份限制。
+- 文件选择取消、坏文件和超限保留当前页面；重复打开互斥，返回首页/新采集/关闭后的迟到结果不恢复旧页面。打开、保存和导出不触发手机补采、刷新或共享。单元测试及现有树/原生菜单工装承载检查，未新增重复benchmark入口。
 
-## 验收与维护
+**第二项源码已完成：分组业务信息。** [接入示例](../android/README.md#business-debug-metadata)及[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#business-debug-metadata-acceptance)。[DebugMetadata](../android/inspector-sdk/src/main/java/com/androiduiinspector/sdk/DebugMetadata.java)只接受显式登记的有限文字、数字和布尔值；主线程登记、按组替换/删除、复用时清除，不保留全局View引用。采集仅读取已保存值，不执行业务回调或反射业务对象。每控件4组、每组16项、16KiB；整树业务值256KiB，超出明确标记未保存，不损失原树。桌面严格校验协议/类型/额度，刷新以新登记替换旧值；属性卡按组搜索、折叠、复制，并随完整快照、历史及调试报告保存。旧SDK和未接SDK的App不猜业务信息，Debug/Release样例依赖分开。
 
-- 实施后至少运行 `bun test tests`、`bun run build`、`bun run test:tree-ui`；改几何再跑 coordinates/DPI，改 SDK 再构建 Debug/Release 并检查隔离。
-- 性能每组至少三轮同条件对照，保留失败轮；记录请求到画面可见的时间，不只测 SDK 内部调用。冷启动与稳态分开，不能靠少采图、放宽身份校验或掩盖 ANR 达标。
-- 回归覆盖父子隔离、增删节点、取消/断线/切 App、旧轮次、历史快照、部分失败、资源清理；特殊缓冲单独验收。真机图片仅放忽略目录，不提交业务数据。
-- 每阶段通过后更新 [项目状态](PROJECT_STATUS.md) 和本文件的完成状态；只保留关键对照与失败结论，不再追加整段重复过程日志。提交、推送、安装和重启按当次授权另行处理。
+**第三项源码已完成：按类型和层级默认折叠。** 使用见[折叠设置](FIRST_USE.md#initial-tree-collapse)，结果见[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#initial-tree-collapse-acceptance)。规则只控制展示，不裁剪原树或导出内容；根为第1层，类名区分大小写，支持完整名或短名，不支持通配符或继承匹配。保存只作用于新采集/打开的快照；显式应用到当前树会重设展开状态并保留选中路径。采集期间冻结该轮规则，新到分支按规则展开，已有分支按View身份保留手动开/关。筛选不会改真实场景，退出聚焦恢复原状态；仍为展开看自身、折叠看分支。沿用现有工装，未增加重复benchmark入口或手机采集。
 
-## 源码依据
+**第四项源码已完成：颜色预览与别名。** 使用见[颜色说明](FIRST_USE.md#color-preview-aliases)，结果见[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#color-preview-aliases-acceptance)。借鉴色块、格式复制和用户别名功能，沿用本项目属性栏与偏好设置。仅使用带来源的实际颜色属性，别名精确匹配RGBA（含透明度）并保存在本机；原始快照与业务值不改写。复用现有属性、偏好和采集生命周期工装，未增加benchmark入口或手机采集。
 
-本次对照版本：Lookin `95e30fdc`、LookinServer `ae396132`；不等同于用户安装版本。只借鉴设计，不复制 UIKit/CALayer 实现；需要复制代码时另查具体文件许可证。
+**第五项源码已完成：可见图层优先与按需补图。** 使用见[图层加载说明](FIRST_USE.md#layer-demand)，结果见[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#layer-demand-acceptance)。统一按选中、投影视口生成展示需求；相机平移/旋转和视口变化能直接补图。进行中的整组请求和纹理解码不因展开/折叠重启；同次采集缓存跨2D/3D重挂载复用，刷新后重新取得。自身图、原生整组图和本地重建图使用不同身份，内容/布局变化使重建纹理失效，隐藏后排除包含隐藏子层的整组图。保持原纹理额度、完整深度采集及离线文件只用已保存像素；借鉴加载策略，未引入上游代码、依赖或benchmark入口。
 
-- [Lookin 分批、优先级、局部刷新](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Static/LKStaticAsyncUpdateManager.m)
-- [LookinServer 分包处理与属性去重](https://github.com/QMUI/LookinServer/blob/ae396132ce6494477457cf450116dc760518d8ad/Src/Main/Server/Connection/RequestHandler/LKS_HierarchyDetailsHandler.m)
-- [自身图与整组图](https://github.com/QMUI/LookinServer/blob/ae396132ce6494477457cf450116dc760518d8ad/Src/Main/Server/Category/CALayer%2BLookinServer.m)
-- [原理与性能说明](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/Docs/Lookin%E5%8E%9F%E7%90%86%E5%8F%8A5%E4%B8%AA%E5%BC%80%E5%8F%91%E9%9A%BE%E7%82%B9.md)
+Lookin的fast mode是图像加载策略，与本项目UIAutomator的fast语义树采集不同。
+
+<a id="lookin-ui-next"></a>
+
+### 第二轮UI与功能候选（四项源码完成）
+
+2026-10-11再次核对客户端源码及现有工作台；远端HEAD仍为上述`95e30fdcc8151092678387c5262bce790a0d9530`。优先补画布辨识、测距和属性查看的小缺口。
+
+| 顺序 | Lookin已有功能与源码 | 本项目现状 | 建议与完成条件 |
+| --- | --- | --- | --- |
+| 1 | [普通轮廓显隐、选中/悬停覆盖层的三级强调](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Static/Preview/LKDisplayItemNode.m) | 新源码已完成：[3D绘制](../src/features/layers/webgl-renderer.ts)支持普通轮廓开关和三级选中/悬停强调 | 设置在现有3D弹层并保存到本机；默认轮廓开启、轻档仅边框。缺图及缺图分支轮廓保留，只改显示，不改原图、层级或命中。见[使用](FIRST_USE.md#layer-appearance)与[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#layer-appearance-acceptance)；安装版未更新 |
+| 2 | [测距模式保持，松开快捷键后可继续测量](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Measure/LKMeasureController.m) | 新源码已完成：[固定控件对](../src/features/layers/useLayerMeasurement.ts)，沿用原测距和相机绘制 | M或工具栏固定两个控件；移开、改选、旋转、平移和缩放后保留。Esc先解除固定；换快照、隐藏/折叠/聚焦排除、View替换或外框变化时清除。见[使用](FIRST_USE.md#pinned-measurement)及[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#pinned-measurement-acceptance)。Lookin锁定的是测距模式，固定控件对为本项目延伸；安装版未更新 |
+| 3 | [导出选中控件的分支截图](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Export/LKExportManager.m) | 新源码已完成：[控件图片输出](../src/components/NodeImageActions.tsx)，属性栏“画面”可选自身图/分支图并导出PNG或复制 | 保留尺寸和透明度，分支优先已有原生整组图，否则用已保存独立位图本地重建；来源、采集时间和缺图明确提示，不新增手机请求。真实解码校验、取消及迟到隔离通过，见[使用](FIRST_USE.md#node-image-export)与[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#node-image-export-acceptance)。Lookin导出groupScreenshot为TIFF，PNG/复制为本项目延伸；安装版未更新 |
+| 4 | [属性分组的添加、移除](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Dashboard/LKDashboardSectionView.m)及[本机保存](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Manager/LKPreferenceManager.m) | 新源码已完成：[七组显隐设置](../src/components/InspectorGroupPreferences.tsx)，沿用属性栏搜索和偏好设置 | 即时应用、本机保存及恢复默认；搜索临时显示隐藏匹配项，清除或Esc后恢复显隐和手动折叠。全部隐藏仍可设置或搜索；不存在的业务/交互组不计可见项。完整数据保留，存储失败诚实反馈。见[使用](FIRST_USE.md#inspector-groups)与[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#inspector-groups-acceptance)；安装版未更新 |
+
+四项源码已完成，沿用现有工作台、偏好和验证入口，无需手机安装或新增重复benchmark。本轮按用户要求启动三个独立managed worktree，分别负责设置模型、界面接入、回归与文档；使用含此前成果的共同基线，整合后验证。开发约定见[目录说明](DEVELOPMENT_STRUCTURE.md#worktree-development)及[AGENTS.md](../AGENTS.md)。
+
+远程修改属性、运行时方法控制台、iOS变量追踪、AutoLayout和专有源码跳转暂不列入首批；自定义虚拟节点也不冒充真实Android View。客户端许可证为[GPL-3.0](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LICENSE)，Server为[MIT](https://github.com/QMUI/LookinServer/blob/ae396132ce6494477457cf450116dc760518d8ad/LICENSE)；本轮借鉴功能设计，未引入上游代码或运行依赖。
+
+<a id="lookin-interactions"></a>
+
+### 第三轮交互优化（四项源码完成）
+
+继续参考同一固定提交，按用户要求在独立worktree与分支中并行实现，再合入`codex/lookin-interaction-integration`。使用见[上手说明](FIRST_USE.md#lookin-interactions)，验证见[交互验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#lookin-interaction-acceptance)。
+
+| 优先级 | Lookin参考 | 本项目落实 |
+| --- | --- | --- |
+| 1 | [树悬停与父子引导](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Hierarchy/LKHierarchyView.m) | 树/2D/3D双向高亮，直接父子引导；来源和会话隔离。搜索临时显示的折叠子层回退到物理父层，保持选择、键盘、虚拟树和画布测距 |
+| 2 | [预览深度与维度过渡](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Static/Preview/LKPreviewView.m) | 220ms展开/收起及反向接续，父图就绪后交接；短视图切换和可中断的相机重置。保留own/group语义、纹理额度和减少动态效果 |
+| 3 | [搜索结果定位属性](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Dashboard/Search/LKDashboardSearchPropView.m) | 真实属性行结果、所属分组、点击/Enter定位及短高亮；完整值、隐藏/折叠恢复、有限结果与迟到隔离 |
+| 4 | [父子层级导航](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Hierarchy/LKHierarchyDataSource%2BKeyDown.m) | 本项目扩展为属性栏的完整父级路径：点击祖先选中并在树中定位，深层路径收起中间项，展开列表有高度上限；筛选/聚焦下明确定位，保留隐藏状态并隔离旧会话。见[使用](FIRST_USE.md#node-navigation)与[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#node-navigation-acceptance) |
+
+三项分别由`lookin-hover`、`lookin-motion`、`lookin-property-search`开发，整合代理连接画布并验证组合。沿用既有树和坐标入口；不引入上游实现或依赖。安装版和手机沿用原版本，稳定性等暂停任务不恢复。
+
+第4项在前三项整合成果上继续开发，复用整合工作树的独立分支`codex/lookin-node-navigation`，完成后合回整合分支并精确同步到原目录。路径按钮为本项目扩展，没有复制Lookin实现；验证仍沿用现有树入口。
+
+<a id="artemis参考未接入"></a>
+<a id="artemis-architecture-reference"></a>
+
+## Artemis参考与源码落地
+
+2026-10-11固定对照`google/artemis`提交`351ca8422f7b5b54e80a9c1ce03a222e02415b6b`的主链路及29个相关源码/说明文件，并由subagent核对本项目已有能力。架构对照轮只读；随后完成步骤证据、失败分类、现有报告接入及确定性任务验收。源码及离线窗口验证分别见[逐步报告](archive/ACCEPTANCE_HISTORY_2026-10-15.md#debug-report-acceptance)、[任务验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#debug-task-acceptance)；后续独立候选的自有样例真机、停止和报告重开见[完整流程](archive/ACCEPTANCE_HISTORY_2026-10-15.md#task-sample-flow-acceptance)。尚未更新安装版，此前Helper实测另见下节。
+
+**架构上值得学的是职责分开。** Artemis的Pro主链路把Planner规划、Operator决策、Validator动作校验/执行及Checker目标验收分开，外围由运行时管理任务、驱动访问设备、数据层保存证据，见[任务图](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/artemis/graph/graph.py)。本项目已分出device/capture/automation/desktop/shared，沿用[现有边界](DEVELOPMENT_STRUCTURE.md)，需要补的是任务证据和验收职责；无需整体迁入Python、LangGraph或新建一套设备控制层。
+
+| Artemis模块/功能 | 本项目已有基础与缺口 | 借鉴顺序 |
+| --- | --- | --- |
+| [步骤、图片与工具记录](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/artemis/data_engine/models.py)及[结构化失败](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/artemis/agents/validator/incidents.py) | [会话](../electron/automation/debug-session.ts)已保存限量逐步树/图、实际目标/坐标和派发回执，错误区分阶段；[存储](../electron/automation/debug-evidence.ts)负责额度、去重和旧证据淘汰 | 首项源码完成，沿用已有采集和输入边界 |
+| [只读Checker](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/artemis/agents/checker/checker.py) | 新源码固定原始目标、有序阶段和最终条件；[独立判定](../shared/debug-task-checker.ts)核两次新树，CLI/MCP显式调用，报告导入重新验树 | 第二项源码完成；只验声明的页面条件，结果分通过/失败/证据不足，未接模型 |
+| [步骤检索、截图与动作标记](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/mcp_server/tools/inspect_trace.py) | [现有报告](../src/features/reports/TestReportPanel.tsx)已接入本轮调试记录、前后图、控件属性、步骤搜索和实际输入标记 | 随首项完成；历史查看只读，旧e2e仍按原始文件独立校验 |
+| [任务运行与状态查询](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/mcp_server/README.md) | 当前授权会话已有过期、取消和单操作互斥，但不代表业务任务的完成/进度/验收 | 有多步执行需求时再补薄任务层；继续调用现有CLI/MCP，不把实验runner编进桌面产品 |
+| [统一环境诊断](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/mcp_server/tools/diagnose.py)与日志关联 | 设备状态与专项SDK日志已有基础，业务报告的日志附件尚未展开 | 后续补只读检查结果及按任务时间段、App限定的有限日志，帮助区分环境/动作/验收失败 |
+| [统一驱动](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/artemis/drivers/base.py)、[历史压缩](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/artemis/memory/context_policy.py)、[轻量远程客户端](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/packages/artemis-client/DESIGN.md) | 设备/采集已隔离，当前以本地单设备、有限会话为主 | 保留参考；出现远程设备、多进程竞争或长任务模型上下文需求时再做。客户端文档的第二阶段版本化API是设计目标，不能当成已完成能力 |
+
+**首项已完成：步骤证据与失败分类接入现有报告。** 当前范围：
+
+- 保留最近100步，最多200份快照、100张独立PNG，报告及附件合计32MiB；关联会话、步骤、采集来源、前后树/图、实际动作及回执。容量不足优先丢旧证据；缺失与旧观察如实标注，不填成动作后的结果。
+- 区分采集、定位、输入、验收和写盘阶段的错误；派发状态与验收结果分开，取消/超时保留原始回执，未知派发不自动重试。
+- 初始调试格式v1由独立读取器核身份、时间、引用及附件摘要；任务加入后新写`inspector-debug-report-2`，继续兼容v1。复用[报告显示](../src/features/reports/TestReportPanel.tsx)，旧e2e校验保持。停止后仍可查看；专用入口直接加载本轮记录。
+- 离线覆盖成功、失败、停止、缺图、容量、不同截图淘汰及旧报告兼容，真实main/preload/renderer的合成窗口通过；随后独立候选补验自有样例真机及原生报告重开。尚未更新安装版或引入模型；记录不包含3D独立图层位图，使用见[MCP记录](MCP.md#记录和数据范围)。
+
+**第二项已完成：确定性目标验收。** 首次输入前固定本会话唯一目标、最多5阶段/20条件；按序检查，复验清除后续旧结果，最终须前置有效通过。检查只读，固定两次新观察；导入依据实际树重新判定，缺证据不能保持通过。报告显示目标、阶段、逐条件结果及当时观察，整会话仍为已记录。接口见[MCP](MCP.md#固定任务验收新源码尚未安装)与[CLI](CLI.md#固定任务验收新源码尚未安装)。
+
+固定样例的完整流程及独立候选验收已完成：成功轮4步/6次观察/1次点击，阶段与最终条件通过，停止后原生查看、正常退出重开和真实选择器导入通过；先前被系统丢弃输入的失败轮仍显示失败，原树/图/回执保留。未加自动重试或改手机安全设置。后续再考虑薄任务运行层、模型及有限任务日志，稳定性暂停继续保留。
+
+不照搬无限循环、burst跳过复核、自动坐标兜底或自动环境修复。Checker源码允许`inconclusive`放行执行，`assert`失败也不阻断放行；本项目要保留“通过/失败/证据不足”的验收结果，不能把允许继续执行当成测试通过。Flash/Pro是任务策略，不对应本项目fast/deep采集模式。UIAutomator2及Helper沿用下节已有判断，本轮不重复建设。
+
+<a id="artemis-next-plan"></a>
+
+### 下一轮：诊断、日志与动态观察（新源码已实现）
+
+本轮按2026-10-12列出的四项计划开发，参考提交为`351ca8422f7b5b54e80a9c1ce03a222e02415b6b`。新源码已接入共用连接诊断、步骤日志、低帧率预览和会话进度，复用已有动作复核、步骤证据、任务验收和报告入口。使用见[新增工具](FIRST_USE.md#artemis-tools)，验证范围见[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#artemis-tools-acceptance)。
+
+| 顺序 | 任务 | 主要收益 |
+| --- | --- | --- |
+| 1 | 统一连接与采集诊断 | 解释“已连接却不能采集”的具体原因 |
+| 2 | 失败步骤关联日志 | 在同一步查看截图、动作、回执及错误信息 |
+| 3 | 可暂停的2D实时预览 | 观察页面切换、短暂弹层和动画 |
+| 4 | 轻量任务进度展示 | 说明当前步骤、等待原因和停止结果 |
+
+**1. 统一连接与采集诊断。** 参考[mobile_diagnose](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/mcp_server/tools/diagnose.py)的检查汇总和处理提示。
+
+- 范围：复用现有设备、目标窗口和采集能力检查，汇总授权、锁屏、目标App前台状态、Helper及CLI/MCP连接状态。标准模式跳过SDK声明探测并说明增强未启用，增强模式才检查可选SDK；缺少可选Helper不阻断UIAutomator。桌面、CLI/MCP共用结果结构，显示检查时间和设备/App身份；独立CLI/MCP诊断默认标准模式，提供只读诊断及对应处理提示。
+- 验收：覆盖正常、未授权、锁屏、App不在前台、Helper未启用、SDK不可用及连接失败；无法检查的项目显示未知。超时、取消和切换设备后，迟到结果不能覆盖当前状态；诊断不改变手机设置。
+
+**2. 失败步骤关联日志。** 参考[失败任务与有限错误日志](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/mcp_server/tools/diagnose.py#L746)，扩展现有[步骤证据](../electron/automation/debug-evidence.ts)和[报告](../src/features/reports/TestReportPanel.tsx)。
+
+- 范围：首版关联本程序的会话/步骤错误日志，再加入显式开启、限定目标App和任务时间段的Android日志。报告按步骤展示，支持查看与随报告保存；日志行数和附件大小有界，计入现有32MiB总预算，去除敏感配置。
+- 验收：覆盖无日志、截断、采集失败、取消及导入重开；无法确认时间或App归属时标明缺证据。缺日志不改变已有动作回执或任务判定，旧报告继续可读，停止后释放本次日志采集资源。
+
+**3. 可暂停的2D实时预览。** 参考[按观看者启停的屏幕采集](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/apps/admin_console/services/device_stream_service.py)，沿用现有截屏入口。
+
+- 范围：用户显式开启，首版低帧率刷新截图，支持暂停、继续和关闭；3D层级仍由显式采集更新。分别显示预览与控件树的更新时间，暂停后可重新采集层级；预览帧不作为节点操作或任务验收依据。
+- 验收：页面变化可见；关闭、断线、切换设备或退出后停止采集，不采用旧设备的迟到帧。验证与正常采集/调试共存时的资源占用和响应，避免并发堆积；实时截图不自动替换现有树、选中状态或3D纹理。
+
+**4. 轻量任务进度展示。** 参考[任务状态、耗时、进度和停止控制](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/mcp_server/tools/task_manager.py)，在现有[调试会话](../electron/automation/debug-session.ts)和固定任务上补状态视图。
+
+- 范围：展示当前步骤、耗时、采集/执行/等待页面条件等状态及停止原因。等待手机确认只在有明确请求时显示；复用现有停止和CLI/MCP查询入口，首次范围限于现有会话及声明的任务。
+- 验收：覆盖等待、执行、失败、取消、到期与重开历史；状态事件绑定会话/任务，旧事件不能覆盖新任务。授权会话、操作完成与验收结果分别显示，任务通过仍由已有Checker判定。
+
+本轮三个子代理从包含当前未提交成果的共同快照出发，在独立管理工作树开发；诊断、日志与进度、预览分别分工，统一整合。Helper运行响应和SDK实际采集未由只读诊断验证时，明确说明范围。Android日志需显式开启，不能确认归属时标记缺证据。实时预览默认关闭，每2秒刷新，繁忙时让出采集；帧不进入树或任务证据。当前完成源码及离线/桌面验证，暂停的稳定性验证、其他手机实测及长任务模型接入保持暂停，安装版未更新。
+
+<a id="artemis-evidence-plan"></a>
+
+## 步骤差异、任务模板与证据导出
+
+本轮先落实此前建议的前三项，由三个子代理从当前源码共同快照 `07a5bef9b909` 分别开发，统一整合到 `codex/artemis-integration`。原目录的分支、暂存区和既有成果保留；这些是本项目的扩展，不是新增上游依赖。
+
+| 顺序 | 功能 | 完成范围 |
+| --- | --- | --- |
+| 1 | 步骤前后差异 | 比较可信加载的同设备、App、页面实例与窗口观察，按唯一资源 ID 匹配逻辑控件；展示新增、消失、文字、位置及状态变化，重复或缺身份节点保持未知 |
+| 2 | 固定任务模板与桌面编辑 | 选中控件生成精确条件，编辑目标、有序阶段和最终条件；本机保存、读取、更新、删除模板，显式固定到现有授权会话并只读验收 |
+| 3 | 一键导出调试证据 | 选择当前或全部步骤以及树、截图、日志；保存独立证据文件夹并用原报告入口重新导入，缺少验收证据时副本保持证据不足 |
+
+差异只供历史查看；模板不隐式开启授权，验收仍由原 Checker 核两次新树。导出只读取主进程已载入并绑定摘要的报告，取消不留半包，原记录保持。使用见[桌面入口](FIRST_USE.md#artemis-evidence-tools)，验证见[本轮验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#artemis-evidence-acceptance)。有限步骤任务执行、手机实测及安装版更新不在本轮范围。
+
+<a id="artemis-reuse-plan"></a>
+
+## 模板共享、运行对比与匹配诊断
+
+按后续建议的第2、3、5项并行开发，三个子代理从包含当前全部未提交源码的共同快照 `c7f5304ff8a9` 出发。模板共享与片段复用、跨次运行对比、控件匹配诊断分别使用独立管理工作树，统一整合到 `codex/artemis-integration`。
+
+| 功能 | 范围 |
+| --- | --- |
+| 模板共享与片段复用 | 导入/导出本地模板JSON；保存单个条件或完整阶段并插入草稿。插入重新生成唯一编号，同名导入保留本机内容，超限或坏文件整批拒绝 |
+| 跨次运行对比 | 选择第二份本地调试报告；同App及完整规范化任务定义一致时，对齐阶段、最终条件、有效验收结论和可证明耗时。定义变化或缺证据明确显示 |
+| 控件匹配诊断 | 展示当前快照的精确候选、重复原因和可参考的不匹配字段；显式定位唯一候选后在原工作台查看树与画布高亮 |
+
+第二份报告只读载入，保留主报告的证据导出来源；结果仍由已有报告加载器重新验读。匹配诊断不改变条件、手机页面或验收结果，近似候选只供查看。复用既有依赖、授权和Checker；有限步骤自动执行与离线HTML报告继续留后续批次。操作见[新增入口](FIRST_USE.md#artemis-reuse-tools)，验证见[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#artemis-reuse-acceptance)。
+
+<a id="recognition-comparison"></a>
+
+### 控件识别采集方式（两轮评估完成）
+
+当前`fast`已通过UIAutomator读取Android无障碍语义树，见[采集分工](MCP.md#采集分工)。UIAutomator2与Artemis的Accessibility Helper主要改变访问方式和可返回的语义信息。
+
+| 方式 | 引入判断 | 收益与成本 |
+| --- | --- | --- |
+| [UIAutomator2](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/third_party/mobile_use/clients/ui_automator_client.py) | 当前不引入，优先级低 | 连接复用、控件选择/等待/输入更方便；需维护手机端自动化服务和工具兼容，识别仍依赖无障碍信息 |
+| [Accessibility Helper](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/packages/artemis-accessibility-helper/app/src/main/java/com/artemis/helper/HierarchyDumper.java) | 两轮评估、固定样例产品路径及30分钟验证完成，已本机交付 | 布局标记补回样例容器，提示/错误/状态描述有效；系统栏节点和空输入框表示仍有差异，多设备/多日未验 |
+
+- 评估仅用少量固定页面，在同设备/App版本下对比现有`fast`与Helper的耗时、可见节点/目标覆盖和连续成功率，保留空树、超时、窗口错配等失败。
+- 实测收益明确后才接入；沿用现有授权、窗口和坐标校验，后端切换生成新快照并使旧节点失效。两者均不替代真实View层级、独立位图或3D采集；缺少无障碍信息的自绘控件仍可能无法定位。
+- 已提供[只读对比入口](../scripts/recognition-comparison.ts)及[离线验证](../tests/recognition-comparison.test.ts)。使用现有Debug/焦点/几何校验、XML解析和PNG采集，转发复用现有资源归属校验；只请求Helper的`GET /dump?fields=xml`，不自动安装、启用、配对、输入、导航或修复服务。
+
+将下列配置保存到本机忽略目录，例如`.benchmarks/recognition-comparison/sample-config.json`，替换序列号，先打开固定页面，再执行`bun scripts/recognition-comparison.ts .benchmarks/recognition-comparison/sample-config.json`：
+
+```json
+{
+  "serial": "设备序列号",
+  "packageName": "com.androiduiinspector.sample",
+  "component": "com.androiduiinspector.sample/.MainActivity",
+  "runs": 3,
+  "targets": [{ "name": "样例文本", "text": "RED CHILD" }]
+}
+```
+
+Helper已安装、启用且配对后，在配置中增加`helperTokenFile`，值为现有令牌文件的绝对路径；文件≤1KiB且仅当前用户可读写。令牌不写入报告。每轮1–5次、最多20个明确目标，只认唯一可见且有屏幕交集的匹配；Helper须返回目标App的唯一焦点窗口，空树、截断、错窗口、目标缺失/歧义、页面变化、超时均保留为失败。XML/PNG、每次结果及汇总写入新的`.benchmarks/recognition-comparison/run-*`目录；缺少Helper时仅生成fast基线，`comparable=false`并返回非零，不能当比较通过。
+
+耗时包含身份校验、读树、同一路径PNG截图、几何校验和分析，不含转发建立及证据写盘；失败进入总耗时和成功率，不删首采，轮次交替先采Helper/fast。UIAutomator可能短暂抑制无障碍服务；Helper源码内部也有读根重试，协议未提供次数，不能把一个HTTP请求称为一次端侧尝试。两者均不保证树与截图同帧；节点数和指定目标命中不代表整页真实控件覆盖率。
+
+2026-10-11同设备样例`MainActivity`、App版本`0.1`/code `1`、1080×2400竖屏，交替顺序比较3轮：
+
+| 方式 | 成功 | 每次耗时（ms） | 中位耗时（ms） | 目标App可见且可定位节点 |
+| --- | --- | --- | --- | --- |
+| fast | 3/3 | 4358 / 4095 / 4784 | 4358 | 12 |
+| Helper 1.2.0 | 3/3 | 1382 / 1154 / 1106 | 1154 | 4 |
+
+两边均唯一命中`RED CHILD`，App版本、页面实例、焦点窗口和方向保持一致，各自树指纹稳定。Helper返回的4个App节点均能在fast中找到相同核心属性与边界；fast额外保留8个布局/背景节点。Helper总共返回4个窗口，统计只取目标App的唯一焦点窗口。本地XML/PNG、全部尝试及节点核对证据位于`.benchmarks/recognition-comparison/run-LTow0O/`（`report.json`、`node-comparison.json`）；之前fast单独基线保留在`run-N7LcMB/`，不混入本次耗时。
+
+本页流程中位耗时缩短约74%，但这不是纯读树耗时，也不是整页覆盖率或长期稳定性结论。默认Helper树省略不重要的无障碍节点，[服务配置](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/packages/artemis-accessibility-helper/app/src/main/java/com/artemis/helper/ArtemisAccessibilityService.java)明确关闭`FLAG_INCLUDE_NOT_IMPORTANT_VIEWS`；当前fast保留更多布局层级，不能直接替换。本轮未测输入框提示/错误/状态描述、冷启动、长期后台或UIAutomator2，也没有复现服务抑制失败。
+
+固定版本[安装包及摘要清单](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/packages/artemis-accessibility-helper/helper_manifest.json)的Git blob、SHA-256和手机已安装APK均核对一致。首次安装被拒绝（`INSTALL_FAILED_USER_RESTRICTED`），经用户授权第二次安装成功；用户手动开启服务后配对并完成比较。测后已卸载Helper，确认包、进程和服务条目均已移除，删除本机临时令牌；用户另行开启的无障碍菜单保留，自有转发已收回，其他转发未改。原始失败和收尾记录保存在`.benchmarks/maintenance/run-20261011-mthajkh8/`。
+
+后续顺序：独立样例先核布局节点、提示/错误/状态描述及冷启动、后台场景，结果见下节；处理与fast的差异后，再决定可选后端、来源标识和切换时旧节点失效。UIAutomator2继续保持低优先级。
+
+#### 布局与语义验证（评估完成，完整树未通过）
+
+[准备入口](../scripts/prepare-recognition-helper.ts)只下载上述固定提交的Helper源码及Apache-2.0许可证，逐文件核Git blob；补丁同时启用声明和运行时的`FLAG_INCLUDE_NOT_IMPORTANT_VIEWS`，使用独立包`com.androiduiinspector.a11yhelper`、名称`Inspector Layout Helper`、版本`1.2.0-inspector-layout`。构建沿用本仓库Gradle插件，编译SDK 36；旧Manifest的SDK参数保留在Gradle中。上游安装脚本、APK和签名密钥不下载，源码/产物只在忽略目录。
+
+配置含义见[Android官方布局标记](https://developer.android.com/reference/android/accessibilityservice/AccessibilityServiceInfo#FLAG_INCLUDE_NOT_IMPORTANT_VIEWS)和[语义字段](https://developer.android.com/reference/android/view/accessibility/AccessibilityNodeInfo)。[独立样例](../android/recognition-sample/src/main/java/com/androiduiinspector/recognition/MainActivity.java)包含两层非语义布局、输入提示/错误、状态描述及按钮；包名`com.androiduiinspector.recognition`，最低API 30，无SDK/绕过库或网络权限。样例私有`files/recognition-fixture.json`核实际框架属性，不替代Helper远程结果。
+
+先设置本机`ANDROID_HOME`及Java 17的`JAVA_HOME`，再准备与构建：
+
+```sh
+bun scripts/prepare-recognition-helper.ts
+gradle -p <上条输出的output> :app:assembleDebug --console=plain
+gradle -p android :recognition-sample:assembleDebug :recognition-sample:assembleRelease --console=plain
+```
+
+真机仍手动启用Helper，临时安装、同页比较、样例冷启动和短时后台恢复分别留证，结束移除两个临时包。`recognition-comparison.ts`保持只读，不管理这些步骤。扩展配置示例：
+
+```json
+{
+  "serial": "设备序列号",
+  "packageName": "com.androiduiinspector.recognition",
+  "component": "com.androiduiinspector.recognition/.MainActivity",
+  "runs": 3,
+  "helperTokenFile": "/本机私有目录/helper-session.token",
+  "requireLayoutParity": true,
+  "targets": [
+    { "name": "外层布局", "resourceId": "com.androiduiinspector.recognition:id/layout_stage" },
+    { "name": "内层布局", "resourceId": "com.androiduiinspector.recognition:id/nested_layout" },
+    { "name": "输入框", "resourceId": "com.androiduiinspector.recognition:id/account_input", "helperAttributes": { "hint": "Account name", "error": "Account is required" } },
+    { "name": "状态", "resourceId": "com.androiduiinspector.recognition:id/capture_state", "helperAttributes": { "state-description": "Paused" } },
+    { "name": "按钮", "resourceId": "com.androiduiinspector.recognition:id/sample_action" }
+  ]
+}
+```
+
+`helperAttributes`只核唯一目标上的指定字段，fast缺这些字段仅如实记录；缺失或错误字段记Helper失败。报告版本2新增`layoutParity`，逐轮核目标App全部节点的父子结构、核心属性与数值边界，忽略后端ID和新增语义字段。`requireLayoutParity=true`时即使两边采集都成功，布局不一致仍使整轮比较失败；这只证明与当前fast语义树一致，不证明真实View全覆盖。
+
+2026-10-11同台Android 14设备、独立样例版本`0.1`/code `1`、1080×2400竖屏已完成同页、样例进程冷启动后、后台340.863秒返回后的各3轮比较。两边共18次采集均唯一命中两个布局、输入框、状态和按钮；Helper准确返回`Account name`、`Account is required`和`Paused`，样例框架自检也通过。每个场景分别核同一页面实例、焦点窗口、版本和几何。冷启动仅停止独立样例，确认样例PID更换；后台前后两个进程均保持，Helper全程使用原配对。
+
+| 场景 | fast / Helper成功 | fast / Helper中位耗时（ms） | 节点与完整布局门槛 | 本机报告 |
+| --- | --- | --- | --- | --- |
+| 初始同页 | 3/3 / 3/3 | 3880 / 1336 | 12 / 10；3轮均不一致 | `.benchmarks/recognition-comparison/run-pVNRI7/` |
+| 样例冷启动后 | 3/3 / 3/3 | 3816 / 1171 | 12 / 10；3轮均不一致 | `.benchmarks/recognition-comparison/run-DWxdEv/` |
+| 后台340.863秒再返回 | 3/3 / 3/3 | 3978 / 1401 | 12 / 10；3轮均不一致 | `.benchmarks/recognition-comparison/run-DitFOy/` |
+
+全部9轮差异相同：Helper缺少`android:id/statusBarBackground`和`android:id/navigationBarBackground`；共享10个节点的父子路径、核心布尔属性和边界一致，仅空输入框的`text`不同。fast把提示写为`text="Account name"`；Helper上游在`isShowingHintText()`时清空text并单独返回hint，见[源码](https://github.com/google/artemis/blob/351ca8422f7b5b54e80a9c1ce03a222e02415b6b/packages/artemis-accessibility-helper/app/src/main/java/com/artemis/helper/HierarchyDumper.java)。没有过滤背景节点或把hint改写为text来放行，报告保留`layout-coverage`和`comparable=false`。额外两节点缺失原因尚未确认。后台恢复首次Helper耗时3419ms，后两次1401/1203ms；首采保留，不能只用中位数描述恢复表现。
+
+当前判断：布局标记能补回样例容器，扩展语义有收益；完整树与fast仍有差异，不能直接替换。新增可选后端保留text/hint各自含义，明确系统装饰节点覆盖边界。上述耗时沿用包含PNG和校验的整段流程，不能称为纯读树速度或长期稳定性通过。
+
+相关41项/5文件、全量811项/117文件0失败，完整构建及样例Debug/Release、Helper Debug构建通过。首次源码校验/Helper构建失败、样例安装被拒及后续修复/经用户准备后重试均保留；安装后APK与已核验产物摘要一致。测后两个临时包、进程和服务已移除，自有转发收回，令牌删除；其他服务按用户手动启用后的状态保留，没有改系统设置。原样例仍在，桌面安装进程未重启，历史/旧报告/安装包5份摘要未变。收尾脚本曾误判包缺失的返回码，独立包列表/进程/服务复核已确认移除，原失败仍留证。维护记录：`.benchmarks/maintenance/recognition-layout-20261011-7wl7z5_b/`；各场景保留完整XML/PNG、尝试及`layout-parity-analysis.json`。
+
+<a id="helper-readonly"></a>
+
+### 可选只读后端（固定样例产品路径已验）
+
+CLI/MCP的`capture_ui`新增显式`backend="accessibility-helper"`，仅用于fast树和整屏截图，默认仍为UIAutomator。复用既有授权/窗口/几何、限额和转发归属，切换来源或模式先撤销旧共享；失败不换源。提示、错误、状态描述独立返回并在属性栏展示；不补系统栏节点、不把hint改成text、不降低比较门槛。Helper输入及等待验证暂不开放，操作前须显式采集UIAutomator并重新定位。使用见[MCP](MCP.md#可选-helper源码已接入仅只读)，验证与本机证据见[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#helper-readonly-acceptance)。
+
+固定样例已验同页语义、旧ID、401、HTTP等待响应及真实响应体的API/CLI/MCP取消和显式恢复；独立签名候选的真实授权窗口、属性显示、立即停止及30分钟/6轮双来源采集（含5分钟后台）也通过。12/10节点差异保留，临时包已移除。范围与全部失败见[补验](archive/ACCEPTANCE_HISTORY_2026-10-15.md#helper-body-window-stability-acceptance)；该阶段保留原安装版，后续Mac arm64本机升级/回退见[交付验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#local-delivery-acceptance)。
+
+本次限定范围已完成。扩大使用范围时再安排多设备、多日与端侧任务/资源验证；不由单轮30分钟推定长期性能。UIAutomator2、Helper动作接口和自动恢复仍不在本步。
+
+<a id="执行边界"></a>
+
+## 设计与执行边界
+
+Lookin参考固定在`95e30fdcc8151092678387c5262bce790a0d9530`：[工作台布局](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Static/LKStaticViewController.m)、[画布交互](https://github.com/hughkli/Lookin/blob/95e30fdcc8151092678387c5262bce790a0d9530/LookinClient/Static/Preview/LKPreviewController.m)。沿用Electron/React/WebGL及现有采集链路；Android数据按真实含义展示。
+
+- 仅Debug App；展开看自身、折叠看分支，不裁整屏冒充独立图，不猜缺图透明。
+- 身份、窗口、几何、裁剪、DRM、取消、迟到和授权保护不放宽；保留立即停止，不盲重试。
+- 手机采集/输入/更新、模型/上传及正式发布须有当前任务范围；旧记录不延续授权。
+- 稳定页3次≤15秒、首图→GPU≤500ms仍是待验目标，不因UI交付或文档整理标为完成。
+
+<a id="1-统一快照与几何语义先做"></a>
+<a id="1-补完父子画面正确性"></a>
+<a id="父子画面"></a>
+<a id="2-独立图边采边显示主线"></a>
+<a id="采集性能"></a>
+<a id="2026-10-03-慢采集定位"></a>
+<a id="局部刷新"></a>
+<a id="3-升级为真正的分支刷新"></a>
+<a id="qt-与稳定性"></a>
+<a id="4-补选中控件的真实样式属性"></a>
+
+旧锚点仅兼容链接，原任务见[归档](archive/README.md)。

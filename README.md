@@ -1,210 +1,117 @@
 # Android UI Inspector
 
-一个本地优先、仅支持 **Debug App** 的 Android UI 层级检查工具。通过 ADB 读取真实控件树、独立 View 位图和屏幕截图，使用 WebGL 展示可展开、可选中的 3D 层级。
+一个本地优先、仅支持 **Debug App** 的 Android UI 层级检查工具。通过ADB读取真实控件树、独立View位图和屏幕截图，用WebGL展示可展开、可选中的3D层级。
 
-当前进度和真实验证结果见 [项目当前状态](docs/PROJECT_STATUS.md)；完整文档索引见 [docs/README.md](docs/README.md)。
+当前桌面使用Electron + React + TypeScript + Vite，面向Windows、macOS和Linux；不需要后端账号，设备数据与快照默认保存在本机。Mac arm64安装候选的版本、安装和Helper配置统一见[交付说明](docs/DELIVERY.md)；当前源码能力和保留缺口见[项目状态](docs/PROJECT_STATUS.md)。
 
-当前默认桌面技术栈是 Electron + React + TypeScript + Vite，目标是 Windows、macOS、Linux 桌面端。项目不需要后端账号，设备数据和快照历史默认只保存在本机。
+2026-10-15：**R0–R8 架构重构已完成并验收**，源码已同步。职责边界与八轮结果见[架构收尾](docs/ARCHITECTURE_REFACTOR_PLAN.md#architecture-closeout)；桌面安装候选保持原版本，UI、跨平台发布和专项设备缺口按各自记录保留。
 
-## 当前能力
+[第一次使用](docs/FIRST_USE.md) · [项目状态](docs/PROJECT_STATUS.md) · [当前安排](docs/LOOKIN_ALIGNMENT_PLAN.md#下一步) · [最近验收](docs/CORE_ACCEPTANCE.md#architecture-round8-acceptance) · [文档索引](docs/README.md)
 
-- 发现 Android SDK、PATH 和 Windows winget 位置中的 ADB，并展示设备授权状态、序列号、型号和产品信息。
-- 原生 View 使用 Debug hierarchy + DDMS；Qt/QML 使用 QML Debug 对象树。Release App 直接拒绝，不回退到 UIAutomator。
-- 展示可展开的真实控件树、来源属性、bounds、独立 View 位图和设备截图；UIAutomator 解析仅保留用于历史快照和测试。
-- 图层状态区分已采集、未返回位图、匹配有歧义、不可见和采集失败；缺少位图不等于控件透明。
-- SurfaceView / GLSurfaceView、TextureView 及其自定义子类按真实继承关系识别，补采自己的缓冲区；全透明占位图不算视频采集成功，受保护或无法读取的内容仍显示边框。
-- 选择节点时在截图上高亮 bounds；点击截图可反查节点，并自动清理筛选、展开祖先和滚动到目标。
-- 为节点生成 XPath、UiSelector、ADB 点击命令和 JSON；支持复制及通过系统保存对话框导出 JSON/XML/PNG。
-- 按文本、resource-id、class 搜索，并按可操作、有标识等条件过滤。
-- 本地保存 UI 快照，重启后可查看历史记录、节点变化摘要和截图方向元数据。
-- 大树使用记忆化节点与虚拟列表，支持全部展开/折叠、选中定位和 Home/End 键盘导航。
-- 截图等比缩放、半开边界命中、越界 bounds 裁剪，并在采集方向或尺寸冲突时暂停截图定位。
-- 采集后默认展开全部分支；左侧折叠同步收起右侧子层，父层合成该分支的独立位图。展开后每层只使用自己的位图，原生 View 不裁切整屏截图补图。
-- WebGL 3D 支持左键/右键拖动旋转、鼠标经过蓝色高亮、点击选中、层间距调整；直接滚轮缩放，空格/Shift/中键拖动平移。
-- 3D 画布使用精准十字光标，悬停时显示控件类名和标识；蓝色表示指向、绿色表示已选中。移动超过 4px 才开始拖动，旋转时使用方向光标，仅平移时使用抓手；拖动不改变选中节点，松手后重新识别鼠标下的控件。
-- 3D 中点击固定基准层，再悬停另一层即可测距；分离时显示水平/垂直边距，包含时显示四边内距，重叠或相接时明确提示。数值使用原始控件外框的 px，不是 3D 展开层距；旋转、缩放不改变数值，点击另一层会更换基准，移到空白处清除标注。
-- 3D 画布右键单击图层可“隐藏此图层”，右键空白处或顶部“恢复图层”可全部恢复；也支持工作区 `Shift+F10` 菜单。只隐藏该层自身，展开的子层保留，折叠合成也排除已隐藏的图片。隐藏仅在本次查看生效，不修改手机 App、2D 原截图或保存的快照。
-- 属性以半透明悬浮 Tab 展示，可拖动、收起或关闭，顶部属性按钮可重新打开；常用信息直接显示，完整属性、复制和导出保留在“更多属性”中。图层纹理仅加载当前展示的层，使用像素预算限制显存占用，超出层数上限时明确提示并保留选中节点。
-- 采集显示当前阶段和用时，可取消；返回、切换设备时取消旧请求，旧结果不会覆盖新页面。
-- 选中控件后显示 Debug 来源属性、screen px 几何尺寸、父级内偏移和 CSS 风格盒模型；padding 显示实际读取值，未暴露的属性不伪造为 0。
-- 采用深色极简工作台布局：Toolbar 集中设备与采集操作，左侧保留 hierarchy 树，右侧统一承载 2D/3D 画布、缩放控制和节点属性；顶部搜索可用 `Ctrl/⌘+K` 快速聚焦。
-- 首页采用参考图风格的单一居中状态容器，覆盖加载、ADB 缺失、无设备、待授权和已连接状态；设备采集动作只保留在顶部 Toolbar，首页“切换设备”使用轻量设备选择层。
-- 提供树逻辑、真实 DOM、坐标、启动和实体设备冒烟测试，以及 Windows electron-builder 打包链路。
+## 主要能力
 
-## 重要边界
+- 默认使用标准采集，无需接入SDK：原生View通过Debug hierarchy及DDMS/JDWP读取，Qt/QML保留专项通道。可按需开启SDK增强，读取额外属性、独立图和业务信息。
+- 左侧真实控件树与2D/3D同步选择、折叠、搜索和键盘浏览；大树虚拟化，最多展示512个子层并明确提示截断。
+- 展开看控件自身图、折叠看分支合成；悬停/选中、隐藏/恢复、分支聚焦、单层查看及测距。
+- 旋转/平移/缩放，2D/3D适应避开属性栏；属性默认贴边，可收起、关闭或切为浮窗。
+- 属性搜索、完整值复制与按需详情；本地历史/对比，JSON/XML/PNG通过系统保存框导出。
+- 渐进采集、取消和迟到隔离；首页离线历史、菜单/偏好及本地报告步骤/截图查看。
+- CLI/MCP只读共享与授权调试；固定App的单次只读诊断，不自动输入、导航或重试。
 
-- 必须是允许 `run-as` 的可调试 App，不仅是包名或文件名带有 debug。
-- 当前支持原生 View 和带 QML Debug 插件的 Qt/QML App；尚不支持 Compose、Flutter、WebView 内部控件树。
-- 原生 View 的位图先校验窗口根身份，再按名称和精确屏幕矩形唯一匹配。DDMS 的多数位图记录不带控件 ID，同名同位置的歧义记录不会强行贴图。
-- 原生 View 缺少独立位图时只显示边框。SurfaceView/OpenGL 外部缓冲是否能返回真实画面取决于 Android 版本、厂商和保护标记；不绕过 DRM，也不把窗口截图裁切成独立图层。同一 OpenGL 画面只对应所属 View，不解析内部绘制指令。
-- QML Rectangle/Window 的真实背景色、圆角、边框和基础线性渐变会重建为独立样式图层；Qt 文字、图片等无可视子项的控件可通过 QML Debug 取得独立 PNG。展开只显示各控件自身画面，折叠合成本分支；缺图时保留边框，不裁剪整屏截图冒充控件画面。带子项的复杂自绘、渐变预设尚不支持逐项独立截图。
-- 合成支持已暴露的 sibling Z、矩形裁剪、padding 裁剪和分组透明度；未暴露的圆角裁剪、任意变换矩阵、自定义绘制顺序仍不能保证与手机逐像素一致。
-- 采集不是冻结的同一帧。会检查前台 Activity 和屏幕几何变化；视频、动画及同一 Activity 内的布局变化仍可能产生时间差。
+## 使用边界
+
+- App必须允许`run-as`且确实可调试；Release拒绝。桌面深度采集读取Debug View/QML，不回退到UIAutomator；CLI/MCP的fast采集默认UIAutomator，可显式选择只读Helper。
+- Compose、Flutter、WebView内部树及任意自绘尚未完整支持；Surface/Texture能否读取真实画面取决于系统、厂商和保护标记，不绕过DRM。
+- 位图须通过窗口身份和唯一匹配；缺图、歧义、失败与已测透明分别显示，不裁整屏冒充独立图。
+- 合成支持已暴露的Z、矩形/padding裁剪和组透明度；未暴露的圆角、任意变换、绘制顺序不保证逐像素一致。采集不是冻结同一帧。
+- QML可重建基础背景/圆角/边框/线性渐变，部分无可视子项控件可取独立PNG；复杂自绘和带子项画面仍有边界，首次调试连接可能重启目标App。
 
 ## 快速开始
 
-### 环境
-
-- Windows 10/11、macOS 12+ 或主流 Linux 发行版
-- [Bun](https://bun.sh/)
-- Node.js 22+（启动辅助脚本和自动化验收使用）
-- Android SDK Platform-Tools（提供 `adb`）
-- 对应平台的 Electron/electron-builder 构建环境
-
-### 安装依赖
+需要Bun、Node.js 22+、Android SDK Platform-Tools及对应平台的Electron构建环境。桌面环境为Windows 10/11、macOS 12+或主流Linux。
 
 ```powershell
 bun install
-```
-
-### 连接手机
-
-1. 在 Android 手机上开启开发者选项和 USB 调试。
-2. 使用 USB 连接手机，在 RSA 授权弹窗中允许这台电脑。
-3. 确认 ADB 状态：
-
-```powershell
 adb devices -l
-```
-
-只有显示为 `device` 且已授权的设备可以执行检查。先在手机上打开 Debug App，再在顶部选择设备并点击“采集截图”。原生 View 采集不要求修改业务代码：使用 V2 属性导出和 DDMS 批量位图，再通过调试连接补齐缺失的自身画面与视频缓冲，排除子控件内容。Qt/QML 首次建立调试连接会重启目标 App。取消会断开调试连接并清理本次端口转发。
-
-检查工作台采用双栏布局：左侧是可搜索、可筛选和可键盘操作的 hierarchy 树，右侧是完整画布，节点属性浮在画布上方，不再预留底部空间。拖动属性标题可移动面板，聚焦标题后可用方向键微调、Home 复位，Escape 关闭；收起、关闭和重新打开都不会改变相机视口。点击左侧节点会在截图上按真实 `bounds` 高亮，点击截图也会反向定位到左侧树节点；快照历史收纳在顶部的“快照与历史”按钮中。
-
-顶部工具栏可以切换 2D 与 3D。3D 按真实父子关系展开，同级优先采用实测 Z，再参考绘制顺序和索引；展开距离是检查工具的可视化间距，不是手机的物理深度。单次最多展示 512 个子层，其他节点仍可在树中选择或通过折叠分支查看。
-
-### 启动开发环境
-
-```powershell
 bun run dev
 ```
 
-该命令会同时启动 Vite renderer、Electron main/preload 监听构建和桌面窗口。Windows 下启动前会准备本项目 Electron 运行时所需的沙箱读取/执行权限。
+手机开启USB调试并完成RSA授权，ADB状态须为`device`。先打开Debug App，再在首页选设备并点击“采集当前画面”；工作台顶部可再次采集。标准采集无需修改App或安装SDK。
 
-如果只想运行最近一次生产构建：
+新源码可在 **偏好设置 → 采集 → 启用 SDK 增强** 中开启额外能力，默认关闭；已接入SDK也不会自动启用。切换保留快照，需要重新采集后才能继续实时操作。忙碌时不能切换，设置保存在本机；增强仍不保证所有App都有精确图层。详见[模式说明](docs/FIRST_USE.md#sdk-enhancement)及[SDK接入](android/README.md)，桌面安装版尚未更新。
+
+生产构建启动：
 
 ```powershell
 bun run build
 bun run start
 ```
 
-修改源码后需要重新执行 `bun run build`；`start` 不依赖 Vite 开发服务器。
+修改源码后重新构建。开发模式会监听renderer、main/preload和MCP；Windows启动前准备Electron沙箱读取/执行权限，不关闭sandbox。
+
+工作台左树、右画布，属性覆盖画布。点击树节点或截图可互相定位；底部搜索只临时显示命中路径，清除恢复原折叠。双击可设为展开/收起、聚焦分支或仅展开；退出聚焦恢复原视图，隐藏状态保留。新源码的[默认折叠](docs/FIRST_USE.md#initial-tree-collapse)可按类型/层级设置，保留完整树和手动状态。历史从首页或顶部打开，离线也可查看。
+
+3D拖动旋转，空格/Shift/中键拖动平移，滚轮缩放。点击基准层再悬停另一层可测距，单位是原始外框px。右键或`Shift+F10`提供隐藏/聚焦；隐藏只影响当前查看，不修改手机或快照。浮窗标题可拖动、方向键微调、Home复位、Escape关闭。
+
+属性搜索临时展开详情，清除恢复折叠；类名/ID复制完整值，未知值显示“—”，与实测0分开。菜单、顶部与右键共用动作和偏好。
+
+新源码的[颜色预览与别名](docs/FIRST_USE.md#color-preview-aliases)支持真实源色的透明色块、原值/CSS Hex/RGBA复制；“偏好设置 → 颜色别名”可保存精确颜色名称，搜索可找到。保留原ARGB及透明度，安装版尚未更新。
+
+新源码的[按需图层加载](docs/FIRST_USE.md#layer-demand)先处理选中和视口内图层，移动视口自动补图；同次采集的分支图可复用，刷新后失效旧图。完整深度采集与离线文件查看保留，安装版尚未更新。
+
+| 操作 | macOS | Windows/Linux |
+| --- | --- | --- |
+| 采集 / 刷新 | ⌘R / ⌘⇧R | Ctrl+R / Ctrl+Shift+R |
+| 搜索 / 保存 | ⌘K / ⌘S | Ctrl+K / Ctrl+S |
 
 ## 常用命令
 
-命令行调试：`bun run cli --help`。提供连接诊断、设备列表、层级树、控件搜索、属性、图片导出、测距及自动调试操作；默认输出 JSON，复用桌面的共享和授权，不需要 MCP 客户端。详见 [CLI 使用说明](docs/CLI.md)。
+| 命令 | 用途 |
+| --- | --- |
+| `bun run dev` / `bun run build` / `bun run start` | 开发、构建、生产启动 |
+| `bun run test` | 单元与解析回归 |
+| `bun run test:tree-ui` | 实际树/场景、取消与迟到回归 |
+| `bun run test:coordinates` / `bun run test:dpi` | 坐标/图层像素与DPR代理 |
+| `bun run test:diagnosis-handoff` | 实际工作台、报告生命周期和首页检查 |
+| `bun run benchmark:tree` / `bun run benchmark:layers` / `bun run benchmark:render` | 合成性能基准，方法见[树性能](docs/TREE_PERFORMANCE.md) |
+| `bun run visual:baseline` / `bun run visual:home` / `bun run visual:home:states` | 固定fixture的工作台/首页/状态截图 |
+| `bun run diagnose:startup software` | 启动诊断，见[Windows说明](docs/WINDOWS_STARTUP.md) |
+| `bun run cli --help` | [CLI](docs/CLI.md)；[MCP接入](docs/MCP.md)默认关闭 |
 
-本地 AI 接入：支持 MCP 只读快照和自动 UI 调试。授权指定 Debug App 后，AI 可实时采集、精确筛选并点击控件、滚动指定列表、返回上一页、验证预期结果；失败保留前后证据，操作结果未知时不盲目重试，随时可停止。默认关闭。macOS 从 **文件 → MCP** 操作，其他平台使用 **自动调试** 入口。详见 [MCP 使用说明](docs/MCP.md)。
+完整参数和按改动选择的回归见[测试计划](docs/TEST_PLAN.md)。源码、隔离工装、安装窗口与手机分别记录；DPR代理不等于物理DPI/多显示器，合成性能不等于真机速度。
 
-| 命令 | 用途 | 输出 |
-| --- | --- | --- |
-| `bun run dev` | 开发模式启动 Electron | 监听 `dist-electron/`，Vite 使用 `1420` 端口 |
-| `bun run build` | 类型检查并生成生产构建 | `dist/`、`dist-electron/` |
-| `bun run start` | 启动本地生产构建 | 读取 `dist/` 和 `dist-electron/` |
-| `bun test` | 单元测试和解析回归 | 终端结果 |
-| `bun run test:tree-ui` | 真实 DOM 树交互、采集取消和过期请求回归 | `.benchmarks/tree-behavior.json` |
-| `bun run test:coordinates` | 截图坐标、缩放反查、Canvas/WebGL 图层像素回归 | `.benchmarks/screen-coordinates.json` |
-| `bun run test:dpi` | Electron 100%/125%/150% device-scale-factor 代理矩阵 | `.benchmarks/dpi-checks/` |
-| `bun run visual:baseline` | 固定脱敏 hierarchy 在 1264×816/1440×900/1587×1000 生成视觉基线 | `.benchmarks/visual-baseline/` |
-| `bun run visual:home` | 首页极简布局在 1264×816/1440×900/1587×1000 生成视觉基线 | `.benchmarks/home-visual-baseline/` |
-| `bun run visual:home:states` | 首页 connected/loading/unauthorized/empty/adb-missing 五状态视觉基线 | `.benchmarks/home-state-visual-baseline/` |
-| `bun run smoke:fixture-dpi` | 固定 fixture 的 100%/125%/150% 完整应用与窗口外拖动回归 | `.benchmarks/fixture-dpi-smoke/` |
-| `bun run benchmark:tree` | 纯逻辑大树基准 | `.benchmarks/tree-*.json` |
-| `bun run benchmark:layers` | 3D LayerRecord 大树布局基准 | `.benchmarks/layer-layout.json` |
-| `bun run benchmark:render` | 真实 DOM/虚拟树基准 | `.benchmarks/tree-virtual.json` |
-| `bun run prepare:windows` | 准备 Windows Electron 沙箱权限 | 本机运行时目录 |
-| `bun run diagnose:startup software` | 诊断开发构建启动链路 | `.benchmarks/startup/` |
-| `bun run smoke:app --require-device` | 开发构建真实窗口/真机冒烟 | `.benchmarks/app-smoke/` |
-| `bun run package:win` | 构建 Windows NSIS 安装包 | `release/` |
+## 测试与打包
 
-## 测试与验收
-
-提交前建议至少运行：
+常规改动先跑相关测试，再按[测试计划](docs/TEST_PLAN.md#按改动选择回归)完成必要检查：
 
 ```powershell
-bun x tsc --noEmit
-bun test
-bun run test:tree-ui
-bun run test:coordinates
-bun run test:dpi
+bun run test
+bun run build
 ```
 
-单元测试包含窗口身份校验、位图歧义、取消连接、Z 顺序和选中节点保留。`test:coordinates` 除坐标回归外，还在真实 Canvas/WebGL 中检查分组透明度、裁剪、padding、隐藏分支、缺失位图、折叠纹理释放和透明混合。`test:tree-ui` 额外验证取消、切换设备、返回首页和卸载时的过期请求处理。测试通过不等于完成所有机型的真机验证；最新运行结果见 [改良记录](docs/INSPECTION_RELIABILITY.md)。历史性能方法见 [树性能报告](docs/TREE_PERFORMANCE.md)。
-
-连接授权手机后，运行完整 Windows 冒烟：
+桌面合成冒烟使用独立配置，不连接手机：
 
 ```powershell
-bun run smoke:app --require-device
+node --experimental-websocket scripts/app-smoke.mjs --fixture --reduced-motion
 ```
 
-验证打包版时先执行 `bun run package:win`，再运行：
+真机冒烟会采集当前页面，须在当前任务明确设备/App和范围后使用`bun run smoke:app --require-device`；打包版用`node scripts/app-smoke.mjs --packaged --require-device`。截图、XML和日志仅写入忽略的`.benchmarks/`，不要发布私人页面。
 
 ```powershell
-node scripts/app-smoke.mjs --packaged --require-device
-```
-
-冒烟测试使用独立用户数据目录，覆盖沙箱、preload、设备刷新、完整 hierarchy、节点选择、3D 层级展开、layer 高亮、layer 快速切换、viewport 边缘拖动、缩放/适应、原始属性、截图反查、搜索、键盘导航和快照历史；通过后还会保存 `layers3d.png` 供人工检查。追加 `--reduced-motion` 可验证无障碍动态偏好下动画被关闭，追加 `--expect-landscape` 可验收横屏设备。报告、日志、页面截图和真实手机 XML 只写入被忽略的 `.benchmarks/`，不要把含私人页面的文件直接发布。
-
-`bun run test:dpi` 会用独立 Electron 进程依次注入 `force-device-scale-factor=1/1.25/1.5`，复用生产 `ScreenshotPreview` 坐标 harness，并断言 `devicePixelRatio`、布局框和反查矩阵。它是可重复的 DPI 代理，不等价于 Windows 设置里的系统缩放、多显示器 Per-Monitor DPI 或实体设备显示输出。
-
-完整的测试分层、覆盖矩阵、执行顺序、真实设备边界、证据格式和发布门槛见 [测试总计划](docs/TEST_PLAN.md)。
-
-本轮首页设计稿：[main-interface-redesign-v2.png](docs/design/main-interface-redesign-v2.png)。它是视觉参考资产；实际布局由 `src/components/DeviceHomeView.tsx`、`src/components/AppHeader.tsx`、`src/styles/tokens.css` 和 `src/App.css` 实现。
-
-## 打包
-
-```powershell
-# 当前操作系统
 bun run package
-
-# 指定目标
 bun run package:win
 bun run package:mac
 bun run package:linux
 ```
 
-跨平台发布应在对应操作系统上构建，或使用对应平台的 CI runner。Windows x64 打包会为 `release/win-unpacked` 准备 Electron 沙箱运行时权限；NSIS 安装时也会在实际安装目录追加读取/执行权限，同时保留既有权限，不会关闭 renderer sandbox。
+在对应操作系统或CI runner构建。Windows打包和NSIS安装保留既有权限并追加Electron所需读取/执行权限，renderer sandbox保持开启。打包不会自动发布到GitHub。
 
-`.github/workflows/static-render.yml` 已加入 Ubuntu、macOS、Windows 三平台的静态 renderer 矩阵：单测、树 UI、坐标、DPI 代理和生产构建会在对应 runner 执行；Linux Electron 检查通过 `xvfb-run` 提供无头显示环境。真实 Android 设备冒烟仍只在接入设备的 Windows/macOS/Linux runner 上执行。
+`.github/workflows/static-render.yml`运行三平台静态检查；`native-electron.yml`覆盖fixture冒烟、原生包构建和启动。最终CI状态看Actions记录。正式签名、公证、干净系统安装/升级/卸载仍待完成；本机临时签名不属于正式发布验收。
 
-`.github/workflows/native-electron.yml` 还会在三平台运行固定 fixture 的 Electron 应用冒烟、构建对应原生包、启动打包应用并上传 release artifact。打包命令不会自动发布到 GitHub；三平台 CI 的最终结果以 GitHub Actions 运行记录为准。
+## 目录与贡献
 
-仓库未配置正式签名或公证凭据，CI 包可能显示未知发布者；本地打包可能自动使用本机已有的开发证书。安装、升级、卸载和干净系统发布验证仍应在目标平台继续完成。
+`electron/`负责桌面/ADB/IPC/持久化，`src/`负责界面，`shared/`负责共享类型和纯算法，`tests/`放脱敏回归，`benchmarks/`放合成工装，`scripts/`放编排，`docs/`放说明。`dist*/release/`与`.benchmarks/`是本机产物，不手动回写源码、不提交。
 
-## 目录与开发边界
+详细入口和新文件位置见[开发目录](docs/DEVELOPMENT_STRUCTURE.md)。renderer仅通过preload白名单访问桌面能力；主进程校验IPC，产品不依赖诊断脚本。新增解析边界须配脱敏fixture和必要提示，运行对应回归；ADB输出、个人快照、业务截图与APK不得入库。
 
-```text
-electron/       主进程、ADB、截图、IPC、快照持久化
-src/            React renderer 和界面组件
-shared/         跨进程共享类型、树算法、坐标算法、3D layer 纯函数布局
-tests/          单元/DOM 回归与脱敏 UIAutomator fixture
-benchmarks/     合成树、坐标页、真实 DOM 基准入口
-scripts/        启动、诊断、冒烟、树与 3D layer 基准编排
-build/          打包 hook 和 NSIS 扩展
-docs/           当前状态、使用说明、验收记录与历史专项方案
-public/         Vite 静态资源
-src-tauri/      历史 Tauri 原型，不参与默认 Electron 构建
-dist*/release/  构建生成目录，不手动编辑、不提交
-.benchmarks/    本机报告/截图/临时数据，不提交
-```
-
-更详细的职责、依赖方向和新文件放置规则见 [开发目录约定](docs/DEVELOPMENT_STRUCTURE.md)。核心原则是：renderer 只能通过 preload 白名单访问桌面能力；主进程校验 IPC 输入；共享算法保持纯 TypeScript；测试 fixture 必须脱敏；生成产物不得回写源码目录。
-
-本轮主要视觉和采集改造已完成；固定脱敏 fixture、Windows OS DPI、多显示器以及 macOS/Linux 原生打包等环境验收项仍待真实环境补齐。当前以 [项目当前状态](docs/PROJECT_STATUS.md) 为准，UI 历史方案见 [UI 设计稿对齐改造计划](docs/UI_REDESIGN_REFACTOR_PLAN.md)。
-
-## 贡献流程
-
-1. 先判断改动属于 `src/`、`electron/`、`shared/`、测试还是脚本，按 [开发目录约定](docs/DEVELOPMENT_STRUCTURE.md) 放置。
-2. 新增解析边界时，同时补充脱敏 fixture、单元断言和必要的 UI 提示。
-3. 不要把 ADB 输出、真实页面截图、个人快照或 `.benchmarks/` 内容提交到仓库。
-4. 运行类型检查、单元测试和与改动相关的 UI/坐标回归。
-5. 涉及 Windows 启动、权限、打包或验收时，更新对应的 [Windows 启动记录](docs/WINDOWS_STARTUP.md) 或测试报告。
-
-## 后续方向
-
-- 在更多 Android 版本、厂商、分辨率、系统 DPI、折叠屏和多显示器环境继续验证坐标映射。
-- 收集脱敏的 Debug View/QML 数据，补充自绘控件、圆角裁剪、变换和跨帧变化的真机回归。
-- 在干净 Windows 环境完成安装/升级/卸载测试；确认修复后的三平台 CI 结果，再补齐 macOS/Linux 打包启动和真实设备验证。所有 `package:*` 只生成本地包，不自动发布 GitHub Release。
-- 继续评估超大树筛选、差异计算、原始属性展示和屏幕阅读器体验。
-
-当前阶段性实施记录以 [项目当前状态](docs/PROJECT_STATUS.md) 和 [采集与图层稳定性改良](docs/INSPECTION_RELIABILITY.md) 为准。
+已完成架构批次统一看[收尾总表](docs/ARCHITECTURE_REFACTOR_PLAN.md#architecture-closeout)。历史UI方案、独有失败及旧验收见[归档索引](docs/archive/README.md)；后续产品方向在[Lookin计划](docs/LOOKIN_ALIGNMENT_PLAN.md#下一步)维护，旧记录不自动恢复执行。

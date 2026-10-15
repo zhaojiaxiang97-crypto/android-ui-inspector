@@ -5,9 +5,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createTree, makeNode } from "../benchmarks/fixtures";
-import { publishMcpSnapshot, revokeMcpSnapshot } from "../electron/mcp-snapshot";
-import { DebugSession } from "../electron/debug-session";
-import { openLiveBridge } from "../electron/mcp-live";
+import { publishMcpSnapshot, revokeMcpSnapshot } from "../electron/automation/mcp-snapshot";
+import { DebugSession } from "../electron/automation/debug-session";
+import { openLiveBridge } from "../electron/automation/mcp-live";
 import type { UiSnapshot } from "../shared/types";
 
 const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS1EAAAAASUVORK5CYII=";
@@ -34,7 +34,7 @@ function fixture(text = "打开设置"): UiSnapshot {
 test("CLI binary: shared tree/search/attributes/images/measurement, validation, live actions and revocation", { timeout: 60_000 }, async () => {
   const directory = mkdtempSync(join(tmpdir(), "android-ui-cli-"));
   const path = join(directory, "current.json"), entry = join(directory, "android-ui.cjs");
-  execFileSync("bun", ["build", resolve("scripts/cli.ts"), "--outfile", entry, "--target", "node", "--format", "cjs"], { stdio: "pipe" });
+  execFileSync("bun", ["build", resolve("electron/automation/cli.ts"), "--outfile", entry, "--target", "node", "--format", "cjs"], { stdio: "pipe" });
   const run = (...args: string[]) => new Promise<{ code: number; stdout: string; stderr: string }>(resolve => {
     execFile("node", [entry, ...args], { env: { ...process.env, ANDROID_UI_INSPECTOR_MCP_SNAPSHOT: path }, timeout: 15_000, maxBuffer: 8 * 1024 * 1024 },
       (error, stdout, stderr) => resolve({ code: error ? typeof error.code === "number" ? error.code : -1 : 0, stdout, stderr }));
@@ -117,17 +117,29 @@ test("CLI binary: shared tree/search/attributes/images/measurement, validation, 
     writeFileSync(path, "{}"); await fails("snapshot");
     revokeMcpSnapshot(path);
 
-    let label = "打开设置", taps = 0, scrolls = 0, backs = 0, failAfterTap = false, holdCapture = false, cancelled = false;
+    let label = "打开设置", taps = 0, scrolls = 0, backs = 0, failAfterTap = false, holdCapture = false, cancelled = false, parentMode = false;
     let captureStarted: () => void = () => {};
     const target = { packageName, activityName: ".Main", component: `${packageName}/.Main`, windowId: "abcd" };
     session = new DebugSession({ serial: "cli-fixture", packageName, snapshotPath: path, directory, onEvent: () => {},
-      observe: async (_serial, _package, mode, signal) => {
+      observe: async (_serial, _package, mode, signal, backend = "uiautomator") => {
         if (failAfterTap && taps > 1) throw new Error("模拟输入已发送，但截图失败");
         if (holdCapture) await new Promise<void>((_resolve, reject) => {
           signal!.addEventListener("abort", () => { cancelled = true; reject(signal!.reason); }, { once: true });
           captureStarted();
         });
-        return { snapshot: { ...fixture(label), captureMode: mode }, target };
+        const current = fixture(label);
+        if (backend === "accessibility-helper") {
+          current.root!.children[0].text = null;
+          current.root!.children[0].attributes = { hint: "Account name", error: "Account is required", "state-description": "Paused" };
+        }
+        if (parentMode) {
+          const button = current.root!.children[0], anchor = makeNode("0/0/0", 1);
+          anchor.package = packageName; anchor.resourceId = `${packageName}:id/item_title`;
+          anchor.text = "播放设置"; anchor.contentDesc = null; anchor.clickable = anchor.scrollable = false;
+          anchor.bounds = { ...button.bounds! }; button.children = [anchor];
+          button.text = button.resourceId = button.contentDesc = null; current.nodeCount++;
+        }
+        return { snapshot: { ...current, captureMode: mode, inspectionSource: mode === "fast" ? backend : "debug-view" }, target };
       },
       input: async (_serial, _target, action) => {
         if (action.kind === "tap") { taps++; label = "设置"; }
@@ -144,6 +156,17 @@ test("CLI binary: shared tree/search/attributes/images/measurement, validation, 
     await fails("capture", ...auth, "--mode", "unknown");
     const deep = await json("capture", ...auth, "--mode", "deep");
     assert.equal((await fails("tap", ...auth, "--snapshot", deep.snapshotId, "--node", "0/0")).dispatchState, "not_sent");
+    await fails("capture", ...auth, "--backend", "unknown");
+    await fails("capture", ...auth, "--mode", "deep", "--backend", "accessibility-helper");
+    const helper = await json("capture", ...auth, "--backend", "accessibility-helper");
+    assert.equal(helper.source, "accessibility-helper"); assert.equal(helper.mode, "fast");
+    assert.equal((await json("snapshot")).source, "accessibility-helper");
+    const semantic = (await json("tree", "--snapshot", helper.snapshotId)).items.find((item: { id: string }) => item.id === "0/0");
+    assert.equal(semantic.text, null); assert.equal(semantic.hint, "Account name");
+    assert.equal(semantic.error, "Account is required"); assert.equal(semantic.stateDescription, "Paused");
+    assert.match((await fails("tap", ...auth, "--snapshot", helper.snapshotId, "--node", "0/0")).message, /Helper/);
+    assert.match((await fails("wait", ...auth, "--text", "设置")).message, /Helper/);
+    assert.equal(taps, 0);
     const first = await json("capture", ...auth);
     await fails("tap", ...auth, "--node", "0/0");
     assert.equal(taps, 0);
@@ -162,7 +185,17 @@ test("CLI binary: shared tree/search/attributes/images/measurement, validation, 
     failAfterTap = true;
     const failedAfterInput = await fails("tap", ...auth, "--snapshot", failed.snapshotId, "--node", "0/0");
     assert.equal(failedAfterInput.dispatchState, "sent"); assert.equal(taps, 2);
+    const resolved = (await json("attach")).steps.at(-1).resolvedInput;
+    assert.deepEqual(resolved.action, { kind: "tap", x: sent.x, y: sent.y });
+    assert.equal(resolved.targetNodeId, "0/0"); assert.equal(resolved.anchorNodeId, "0/0");
+    assert.deepEqual(resolved.frame, { width: 1080, height: 2400, rotation: 0 });
     failAfterTap = false;
+    parentMode = true;
+    const anchored = await json("capture", ...auth);
+    assert.equal((await fails("tap", ...auth, "--snapshot", anchored.snapshotId, "--node", "0/0/0", "--target", "guess")).isError, true);
+    const parentSent = await json("tap", ...auth, "--snapshot", anchored.snapshotId, "--node", "0/0/0", "--target", "clickable-parent");
+    assert.equal(parentSent.dispatchState, "sent"); assert.equal(parentSent.targetNodeId, "0/0"); assert.equal(parentSent.anchorNodeId, "0/0/0"); assert.equal(taps, 3);
+    parentMode = false;
     if (process.platform !== "win32") {
       holdCapture = true;
       const started = new Promise<void>(resolve => { captureStarted = resolve; });

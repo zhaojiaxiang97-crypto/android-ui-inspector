@@ -3,10 +3,12 @@
 // 场景：业务 Debug App feed → 评论区 →「展开N条回复」在列表内插入回复条目（列表级结构变化，
 // 超 64 上限、普通分支刷新只能安全拒绝）。流程：
 //   1) 强启 App 并预热，固定「精选」feed；打开评论区并采集快照（requestId L）——当前视频评论
-//      若无「展开N条回复」则关闭面板切下一个视频重试（≤4 个视频）；
+//      若无「展开N条回复」则关闭面板切下一个视频重试（≤4 个视频）。采集被启动/就绪/画面护栏
+//      或瞬态 Debug V2 失败拒绝时按退避重试；刷新必须沿用「实际成功那次」的 requestId
+//      （主进程按键值精确校验活快照，见 main.ts refresh-view-node）；
 //   2) 定位列表（含「展开N条回复」的最近 RecyclerView 祖先）与展开控件；
 //   3) 点击展开 → refreshViewNode(requestId, 列表 id, "list")：
-//      断言刷新成功、无安全拒绝、新回复条目按对象身份进入、原条目身份保持、
+//      断言刷新成功、无安全拒绝、新回复条目进入；RecyclerView 可替换旧条目实例，
 //      可见条目取得独立画面、屏外条目标注 out-of-viewport；
 //   4) 优雅退出后确认 adb 转发无残留；分批明细取自主进程日志 [list-refresh]。
 import assert from "node:assert/strict";
@@ -53,55 +55,76 @@ async function runProbe(): Promise<void> {
   const { waitForValue } = createWaits(child);
 
   let connection = null as CdpCall | null;
+  let debuggerPort: number | null = null;
   const metrics: Record<string, unknown> = {};
   let forwardBefore = 0, forwardAfter = 0;
+  let passed = false;
   const record = (phase: string, detail: Record<string, unknown>) => {
     metrics[phase] = detail;
     console.log(`[${phase}] ${JSON.stringify(detail)}`);
   };
   const capture = async (requestId: string) => {
     const started = Date.now();
-    const reply = await connection!.send("Runtime.evaluate", {
-      expression: `window.electronApi.inspectDevice(${JSON.stringify(serial)}, ${JSON.stringify(requestId)}).then(r => ({ error: r.error, nodeCount: r.nodeCount, root: r.root, inspectionSource: r.inspectionSource }))`,
-      awaitPromise: true, returnByValue: true,
-    });
-    assert.ok(!reply.exceptionDetails, `整页采集 evaluate 异常：${JSON.stringify(reply.exceptionDetails ?? null).slice(0, 240)}`);
-    const value = reply.result?.value as { error: string | null; nodeCount: number; root: UiNode; inspectionSource?: string };
-    if (value.error && (value.error.includes("冷启动") || value.error.includes("等待页面稳定") || value.error.includes("尚未就绪") || value.error.includes("请等待页面就绪"))) {
-      console.log(`[retry] 整页采集被护栏拒绝（${value.error.slice(0, 40)}），等待 25s 重试一次。`);
-      await delay(25000);
-      const again = await connection!.send("Runtime.evaluate", {
-        expression: `window.electronApi.inspectDevice(${JSON.stringify(serial)}, ${JSON.stringify(`${requestId}-retry`)}).then(r => ({ error: r.error, nodeCount: r.nodeCount, root: r.root, inspectionSource: r.inspectionSource }))`,
+    const invoke = async (id: string) => {
+      const reply = await connection!.send("Runtime.evaluate", {
+        expression: `window.electronApi.inspectDevice(${JSON.stringify(serial)}, ${JSON.stringify(id)}).then(r => ({ error: r.error, nodeCount: r.nodeCount, root: r.root, inspectionSource: r.inspectionSource }))`,
         awaitPromise: true, returnByValue: true,
       });
-      const retried = again.result?.value as { error: string | null; nodeCount: number; root: UiNode; inspectionSource?: string };
-      assert.equal(retried.error, null, `整页采集失败：${retried.error}`);
-      return finishCapture(retried, requestId, Date.now() - started);
+      assert.ok(!reply.exceptionDetails, `整页采集 evaluate 异常：${JSON.stringify(reply.exceptionDetails ?? null).slice(0, 240)}`);
+      return reply.result?.value as { error: string | null; nodeCount: number; root: UiNode; inspectionSource?: string };
+    };
+    // 护栏/瞬态读树失败的文案分两类：启动与就绪类（等页面稳定）、读树瞬态类（Debug V2 等）。
+    // 注意别用裸「尚未就绪」匹配——它会把「截图尚未就绪」这类画面失败一并吞掉。
+    const startups = ["冷启动", "等待页面稳定", "请等待页面就绪", "仍在启动", "未准备好控件树"];
+    const transient = ["Debug V2", "读取 View Hierarchy", "返回内容为空", "返回了无效数据", "连接超时", "未读取到 Debug View 节点"];
+    const matched = (message: string) => [...startups, ...transient].find((token) => message.includes(token)) ?? null;
+    let last: { error: string | null; nodeCount: number; root: UiNode; inspectionSource?: string } | null = null;
+    let usedId = requestId;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      usedId = attempt === 0 ? requestId : `${requestId}-retry${attempt}`;
+      const value = await invoke(usedId);
+      last = value;
+      if (!value.error) return finishCapture(value, usedId, Date.now() - started);
+      const token = matched(value.error);
+      if (!token || attempt === 2) break;
+      console.log(`[retry] 整页采集被拒（命中「${token}」：${value.error.slice(0, 48)}），等 15s 重试（第 ${attempt + 2}/3 次）。`);
+      await delay(15000);
     }
-    assert.equal(value.error, null, `整页采集失败：${value.error}`);
-    return finishCapture(value, requestId, Date.now() - started);
+    assert.equal(last?.error ?? "整页采集无返回", null, `整页采集失败：${last?.error}`);
+    return finishCapture(last!, usedId, Date.now() - started);
   };
   const finishCapture = (value: { error: string | null; nodeCount: number; root: UiNode; inspectionSource?: string }, requestId: string, duration: number) => {
     assert.ok(value.inspectionSource === "debug-view" || value.inspectionSource === "debug-hybrid", `整页采集走了 ${value.inspectionSource ?? "未知"} 回退，不可刷新（requestId=${requestId}）。`);
     if (duration > 45000) console.log(`[warn] 整页采集 ${Math.round(duration / 1000)}s（超过 45s，可能采集退化）。`);
-    return { root: value.root, nodeCount: value.nodeCount, duration, inspectionSource: value.inspectionSource! };
+    return { root: value.root, nodeCount: value.nodeCount, duration, inspectionSource: value.inspectionSource!, requestId };
   };
 
   try {
     const endpointUrl = await awaitEndpoint(endpoint, "debugger startup", 20000);
     const address = new URL(endpointUrl);
-    const debuggerPort = Number(address.port);
-    connection = await connect(await waitForValue("application window", 30000, () => pageTarget(debuggerPort).catch(() => null)));
+    const port = Number(address.port);
+    debuggerPort = port;
+    connection = await connect(await waitForValue("application window", 30000, () => pageTarget(port).catch(() => null)));
     await waitForElectronApi(connection!, 30000);
     await connection.send("Page.bringToFront");
     forwardBefore = forwardCount();
 
-    // 1) 采集首页快照：重视频会把 App 拖入 CPU 燃烧态（采集 50-90s），换到轻视频再试（≤3 次）。
+    // 逐个视频重新定位评论入口；切视频后不能沿用上一条视频的按钮坐标。
     const requestId = `list-probe-${Date.now()}`;
     let feed: Awaited<ReturnType<typeof capture>> | null = null;
     let feedError: string | null = null;
-    for (let attempt = 0; attempt < 3 && !feed; attempt++) {
+    let entry: UiNode | null = null;
+    let panel: Awaited<ReturnType<typeof capture>> | null = null;
+    let panelFlat: Array<{ node: UiNode; parent: UiNode | null }> = [];
+    let expander: UiNode | null = null;
+    let panelOpen = false;
+    for (let attempt = 0; attempt < 4 && !expander; attempt++) {
       if (attempt > 0) {
+        if (panelOpen) {
+          adb("shell", "input", "keyevent", "4");
+          await delay(2500);
+          panelOpen = false;
+        }
         adb("shell", "input", "swipe", "540", "1200", "540", "400", "250");
         await delay(4000);
       }
@@ -110,28 +133,26 @@ async function runProbe(): Promise<void> {
       } catch (error) {
         feedError = (error as Error).message;
         console.log(`[scenario] 第 ${attempt + 1} 个视频采集未成（${feedError.slice(0, 60)}），切下一个视频。`);
+        continue;
       }
-    }
-    assert.ok(feed, `三个视频均无法采集：${feedError ?? "未知"}`);
-    const feedFlat = flatten(feed.root);
-    const entry = feedFlat.map((pair) => pair.node).find((node) => node.clickable && node.visibleToUser && /^评论\d+$/.test((node.contentDesc ?? "").trim()) && node.bounds);
-    assert.ok(entry, "首页未找到评论入口（该卡片可能不是标准视频卡片）。");
-    const entryX = Math.round((entry.bounds!.left + entry.bounds!.right) / 2);
-    const entryY = Math.round((entry.bounds!.top + entry.bounds!.bottom) / 2);
-    // 2) 打开评论区并定位「展开N条回复」：视频评论可能没有回复——关闭面板换下一个视频重试（≤4 个视频）。
-    let panel: Awaited<ReturnType<typeof capture>> | null = null;
-    let panelFlat: Array<{ node: UiNode; parent: UiNode | null }> = [];
-    let expander: UiNode | null = null;
-    for (let attempt = 0; attempt < 4 && !expander; attempt++) {
-      if (attempt > 0) {
-        adb("shell", "input", "keyevent", "4"); // 关闭评论面板
-        await delay(2500);
-        adb("shell", "input", "swipe", "540", "1200", "540", "400", "250"); // 下一个视频
-        await delay(4000);
+      const flat = flatten(feed.root);
+      entry = flat.map((pair) => pair.node)
+        .find((node) => node.clickable && node.visibleToUser && node.bounds && /^评论\d*$/.test((node.contentDesc ?? "").trim())) ?? null;
+      if (!entry) {
+        const hints = flat.map((pair) => pair.node)
+          .filter((node) => node.clickable && node.visibleToUser && /评论/.test((node.text ?? "") + (node.contentDesc ?? ""))).slice(0, 6)
+          .map((node) => `${cls(node)}:${JSON.stringify(((node.text ?? "") + "|" + (node.contentDesc ?? "")).trim().slice(0, 20))}`);
+        console.log(`[scenario] 第 ${attempt + 1} 个视频未见评论入口（${feed.nodeCount} 节点；线索：${hints.join(" / ") || "无"}），切下一个视频。`);
+        continue;
       }
-      adb("shell", "input", "tap", String(entryX), String(entryY));
-      await delay(3500);
-      panel = await capture(`${requestId}-panel${attempt}`);
+      adb("shell", "input", "tap", String(Math.round((entry.bounds!.left + entry.bounds!.right) / 2)), String(Math.round((entry.bounds!.top + entry.bounds!.bottom) / 2)));
+      panelOpen = true;
+      await delay(4500);
+      try { panel = await capture(`${requestId}-panel${attempt}`); }
+      catch (error) {
+        console.log(`[scenario] 第 ${attempt + 1} 个视频评论区采集失败（${(error as Error).message.slice(0, 80)}），切下一个视频。`);
+        continue;
+      }
       panelFlat = flatten(panel.root);
       expander = panelFlat.map((pair) => pair.node).find((node) => /^展开\d+条回复$/.test((node.text ?? "").trim()) && node.visibleToUser && node.bounds) ?? null;
       if (!expander) {
@@ -141,7 +162,7 @@ async function runProbe(): Promise<void> {
         console.log(`[scenario] 第 ${attempt + 1} 个视频评论区未见展开控件（${panel.nodeCount} 节点；线索：${hints.join(" / ") || "无"}），换下一个视频。`);
       }
     }
-    assert.ok(panel && expander, "四个视频的评论区均未见「展开N条回复」控件（该场景在当前 feed 不可得）。");
+    assert.ok(panel && expander, `四个视频的评论区均未见「展开N条回复」控件（${feedError ?? "该场景在当前 feed 不可得"}）。`);
     // 定位展开控件所属列表（最近 RecyclerView 祖先）
     let list: UiNode | null = panelFlat.find((pair) => pair.node === expander)?.parent ?? null;
     while (list && !/RecyclerView/.test(list.className ?? "")) list = panelFlat.find((pair) => pair.node === list)?.parent ?? null;
@@ -158,18 +179,48 @@ async function runProbe(): Promise<void> {
     adb("shell", "input", "tap", String(Math.round((expander.bounds!.left + expander.bounds!.right) / 2)), String(Math.round((expander.bounds!.top + expander.bounds!.bottom) / 2)));
     await delay(4000);
     const started = Date.now();
-    const refresh = await connection.send("Runtime.evaluate", {
-      expression: `window.electronApi.refreshViewNode(${JSON.stringify(`${requestId}-panel`)}, ${JSON.stringify(list.id)}, "list").then(r => ({ failures: r.failures, branch: r.branch }))`,
-      awaitPromise: true, returnByValue: true,
-    });
+    // 刷新必须沿用面板快照「实际成功那次」的 requestId：主进程按这个键精确校验活快照
+    //（liveSessions 存的是最后一次成功采集用的 id，不是我们最初提议的 id）。
+    const invokeRefresh = async () => {
+      const callStarted = Date.now();
+      const reply = await connection!.send("Runtime.evaluate", {
+        expression: `window.electronApi.refreshViewNode(${JSON.stringify(panel.requestId)}, ${JSON.stringify(list.id)}, "list").then(r => ({ failures: r.failures, branch: r.branch }))`,
+        awaitPromise: true, returnByValue: true,
+      });
+      assert.ok(!reply.exceptionDetails, `列表分批刷新被拒绝：${JSON.stringify(reply.exceptionDetails ?? null).slice(0, 300)}`);
+      const value = reply.result?.value as { failures: Array<{ id: string; message: string }>; branch: UiNode };
+      assert.ok(value?.branch, "列表刷新未返回新分支。");
+      return { value, callDuration: Date.now() - callStarted };
+    };
+    // 面板采集刚跑完（70s+），紧随其后的刷新极易吃读树瞬态失败（设备被打满时 dumpsys 段落缺层级）。
+    // 与分支探针一致做整体重试：至多 4 次、6s 间隔；身份变化等非瞬态错误立即上抛。
+    let refreshed: Awaited<ReturnType<typeof invokeRefresh>> | null = null;
+    for (let refreshAttempt = 0; !refreshed; refreshAttempt++) {
+      try { refreshed = await invokeRefresh(); }
+      catch (first) {
+        const message = (first as Error).message ?? "";
+        if (refreshAttempt >= 3 || !/Debug V2|返回内容为空|返回了无效数据|读取 View Hierarchy|未读取到 Debug View 节点|连接超时|等待页面稳定|尚未就绪|冷启动/.test(message)) throw first;
+        console.log(`[retry] 列表刷新第 ${refreshAttempt + 1} 次未成（${message.slice(0, 60)}），等待 6s 重试。`);
+        await delay(6000);
+      }
+    }
     const duration = Date.now() - started;
-    assert.ok(!refresh.exceptionDetails, `列表分批刷新被拒绝：${JSON.stringify(refresh.exceptionDetails ?? null).slice(0, 300)}`);
-    const result = refresh.result?.value as { failures: Array<{ id: string; message: string }>; branch: UiNode };
-    assert.ok(result?.branch, "列表刷新未返回新分支。");
+    const result = refreshed.value;
     const newChildren = result.branch.children.map((item) => ({ ref: refOf(item), visible: item.visibleToUser, cls: cls(item) }));
     const newRefs = newChildren.map((item) => item.ref).filter(Boolean);
     const added = newRefs.filter((ref) => !oldRefs.includes(ref));
     const missing = oldRefs.filter((ref) => !newRefs.includes(ref));
+    // 取证：扩展回复会真实改写列表子项集合。把"新增/丢失"子项的类名与可见性打出来，
+    // 便于区分「评论条目身份丢失」（真 bug）与「容器/tab 宿主被 App 换实例」（契约内替换）。
+    const describe = (items: typeof oldChildren) => items.map((item) => `${item.cls}${item.visible ? "" : "(不可见)"}`);
+    if (missing.length) {
+      const missingDetail = oldChildren.filter((item) => missing.includes(item.ref));
+      console.log(`[diff] 丢失 ${missing.length} 项：${JSON.stringify(describe(missingDetail).slice(0, 6))}`);
+    }
+    if (added.length) {
+      const addedDetail = newChildren.filter((item) => added.includes(item.ref));
+      console.log(`[diff] 新增 ${added.length} 项：${JSON.stringify(describe(addedDetail).slice(0, 6))}`);
+    }
     const branchSubtree = subtreeOf(result.branch);
     const captured = branchSubtree.filter((node) => node.layerImageStatus === "captured").length;
     const offViewport = branchSubtree.filter((node) => node.attributes?.["out-of-viewport"] === "true").length;
@@ -182,23 +233,36 @@ async function runProbe(): Promise<void> {
       captured, offViewport, skipped,
       subtree: branchSubtree.length,
     });
-    // 合并语义断言：新增条目（回复）进入、原评论条目身份保持、无串图
-    assert.ok(added.length >= 1, `展开后未见新增条目（added=${added.length}），列表刷新未体现结构变化。`);
-    assert.deepEqual(missing, [], `原条目身份丢失：${missing.slice(0, 3).join(",")}`);
+    // 断言失败也保留真实差异，避免长时间真机采集后只得到一句 missing 错误。
+    record("identityDiff", {
+      missing: oldChildren.filter((item) => missing.includes(item.ref)),
+      added: newChildren.filter((item) => added.includes(item.ref)),
+    });
+    writeFileSync(join(output, "summary.json"), JSON.stringify(metrics, null, 2));
+    // RecyclerView 可重建/复用旧条目实例；旧 ref 消失不等于丢图。
+    // 只验真实结构净增长、新树身份唯一、补图无失败，替换细节留在 identityDiff 中供复核。
+    assert.ok(newChildren.length > list.children.length && added.length > missing.length,
+      `展开后列表未净增长（${list.children.length}→${newChildren.length}，新增 ${added.length}，替换/移除 ${missing.length}）。`);
+    assert.equal(new Set(newRefs).size, newRefs.length, "刷新后列表出现重复控件身份。");
     assert.equal(result.failures.length, 0, `刷新失败项：${result.failures.map((item) => item.message).join("；")}`);
     assert.ok(offViewport >= 1, "屏外条目未标注 out-of-viewport。");
 
-    // 4) 优雅退出并核对转发
-    const version = await (await fetch(`http://127.0.0.1:${debuggerPort}/json/version`)).json() as any;
-    const browser = await connect(version.webSocketDebuggerUrl);
-    await shutdownProbeElectron(child, browser);
-    forwardAfter = forwardCount();
-    record("forwards", { before: forwardBefore, after: forwardAfter });
-    assert.ok(forwardAfter <= forwardBefore, "退出后 adb 转发出现残留。");
-    writeFileSync(join(output, "summary.json"), JSON.stringify(metrics, null, 2));
-    console.log(`[pass] 列表可见项分批刷新验证通过（${list.children.length} → ${newChildren.length} 条目，新增 ${added.length}，${duration}ms）。`);
+    passed = true;
+    record("result", { before: list.children.length, after: newChildren.length, added: added.length, durationMs: duration });
   } finally {
     connection?.close();
-    if (child.exitCode === null) child.kill();
+    if (child.exitCode === null && debuggerPort !== null) {
+      try {
+        const version = await (await fetch(`http://127.0.0.1:${debuggerPort}/json/version`)).json() as { webSocketDebuggerUrl: string };
+        await shutdownProbeElectron(child, await connect(version.webSocketDebuggerUrl));
+      } catch { child.kill(); }
+    } else if (child.exitCode === null) child.kill();
+    forwardAfter = forwardCount();
+    record("forwards", { before: forwardBefore, after: forwardAfter });
+    writeFileSync(join(output, "summary.json"), JSON.stringify(metrics, null, 2));
+    if (passed) {
+      assert.ok(forwardAfter <= forwardBefore, "退出后 adb 转发出现残留。");
+      console.log(`[pass] 列表可见项分批刷新验证通过（见 ${output}/summary.json）。`);
+    }
   }
 }

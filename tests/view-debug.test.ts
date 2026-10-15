@@ -2,12 +2,569 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:net";
 import { crc32, deflateSync, inflateSync } from "node:zlib";
-import { applyViewProperties, attachViewLayerImages, captureSignal, debugViewTree, hasActivityHierarchy, isTransientTreeReadError, matchSdkVisibleLayers, nativeViewBranchContextMatches, nativeViewBranchMatches, nativeViewNodeMatches, needsViewBitmapFallback, parsePureViewRefs, parseViewStyleReply, partitionViewItems, shouldReclaimSession } from "../electron/adb";
-import { captureViewBitmaps, captureViewLayers, matchesViewRoot, parseCapturedViewLayers, parseCapturedViewLayerPrefix } from "../electron/view-debug";
-import { inspectQmlHierarchy } from "../electron/qml-debug";
+import { applyViewProperties, debugViewTree, hasActivityHierarchy, isTransientTreeReadError, nativeViewBranchContextMatches, nativeViewBranchMatches, nativeViewNodeMatches } from "../electron/capture/native-tree";
+import { attachViewLayerImages, matchSdkVisibleLayers, needsViewBitmapFallback } from "../electron/capture/layer-images";
+import { captureSignal } from "../electron/device/runtime";
+import { isSdkVisibleCaptureInterruption, markInterruptedSdkImages, parsePureViewRefs, parseViewStyleReply } from "../electron/sdk/capture-protocol";
+import { partitionViewItems } from "../electron/capture/refresh";
+import { shouldReclaimSession } from "../electron/sdk/provider-session";
+import { captureViewBitmaps } from "../electron/capture/view-bitmaps";
+import { captureViewLayers } from "../electron/capture/view-debug";
+import { matchesViewRoot, parseCapturedViewLayers, parseCapturedViewLayerPrefix } from "../electron/capture/view-protocol";
+import type { ViewHierarchyTiming } from "../electron/capture/view-debug";
+import { inspectQmlHierarchy } from "../electron/capture/qml-debug";
 import { makeNode } from "../benchmarks/fixtures";
-import { decodeViewHierarchy } from "../electron/view-hierarchy";
+import { decodeViewHierarchy } from "../electron/capture/view-hierarchy";
 import type { UiNode } from "../shared/types";
+import { applyVerifiedSdkViewTypes, parseCaptureGeometryFile, summarizeSdkGeometry } from "../electron/capture/layer-images";
+import { captureSdkRefOrFallback, checkSdkMergedTreeOutcome, markFailedSupplementImages, parseSdkCaptureFailure, parseSdkTaskDiagnostics, parseSdkCapturePhases, settleSdkMergedTree } from "../electron/sdk/capture-protocol";
+
+test("SDK supplementary UI timeouts never dispatch JDWP; unsupported replies keep compatibility", async () => {
+  for (const message of ["SDK 补齐抓取失败：java.lang.IllegalStateException: View selection timed out",
+    "SDK 补齐抓取失败：View capture timed out", "SDK 补齐抓取失败：View capture could not reach UI thread",
+    "SDK 补齐抓取失败：Visible capture time budget exceeded", "SDK 补齐抓取失败：java.lang.InterruptedException",
+    "会话调用超时：capture-refs"]) {
+    const failure = new Error(message); let reported: unknown; let jdwp = 0;
+    await assert.rejects(captureSdkRefOrFallback(async () => { throw failure; }, async () => { jdwp++; return "jdwp"; },
+      error => { reported = error; }), error => error === failure);
+    assert.equal(jdwp, 0); assert.equal(reported, failure);
+  }
+  for (const message of ["SDK 补齐抓取失败：Unauthorized or unsupported request", "SDK 补齐抓取失败：响应无效",
+    "会话通道已关闭", "会话调用超时：capture", "View selection timed out"]) {
+    let jdwp = 0;
+    assert.equal(await captureSdkRefOrFallback(async () => { throw new Error(message); }, async () => { jdwp++; return "jdwp"; }, () => {}), "jdwp");
+    assert.equal(jdwp, 1);
+  }
+  assert.equal(await captureSdkRefOrFallback(async () => "sdk", async () => { assert.fail("no fallback after success"); }, () => { assert.fail("no error"); }), "sdk");
+});
+
+test("supplementary cancellation never dispatches compatibility capture or converts cancellation into failure", async () => {
+  const controller = new AbortController(), canceled = new Error("Canceled");
+  await assert.rejects(captureSdkRefOrFallback(async () => { controller.abort(canceled); throw new Error("unsupported"); },
+    async () => { assert.fail("no fallback"); }, () => { assert.fail("do not report SDK failure"); }, controller.signal), error => error === canceled);
+  await assert.rejects(captureSdkRefOrFallback(async () => { assert.fail("no capture"); }, async () => { assert.fail("no fallback"); },
+    () => {}, controller.signal), error => error === canceled);
+});
+
+test("supplementary interruption only marks pending candidates and preserves verified images and earlier reasons", () => {
+  const root = makeNode("root"), image = makeNode("image"), pending = makeNode("pending"), stale = makeNode("stale"), other = makeNode("other");
+  root.children = [image, pending, stale, other];
+  image.layerImageStatus = "captured"; image.layerImageDataUrl = "data:image/png;base64,AA==";
+  image.layerImageSize = { width: 10, height: 20 }; image.attributes = { "image-source": "sdk" };
+  stale.attributes = { "image-capture-error": "geometry mismatch" };
+  other.layerImageStatus = "style";
+  const before = structuredClone(image), bounds = structuredClone(pending.bounds);
+  markFailedSupplementImages(root, [image, pending, stale], new Error("SDK 补齐抓取失败：View selection timed out"));
+  assert.deepEqual(image, before); assert.deepEqual(pending.bounds, bounds);
+  assert.equal(pending.layerImageStatus, "failed"); assert.match(pending.attributes!["image-capture-error"], /View selection timed out/);
+  assert.equal(stale.attributes!["image-capture-error"], "geometry mismatch"); assert.equal(other.layerImageStatus, "style");
+  assert.match(root.attributes!["texture-capture-warning"], /保留此前采集结果/);
+});
+
+test("SDK rejected geometry summary is bounded and never retains pixels or changes matching", () => {
+  const root = makeNode("0"), parent = makeNode("0/0"), node = makeNode("0/0/0");
+  parent.attributes = { "view-ref": "example.Parent@1" };
+  node.attributes = { "view-ref": "example.Child@2" };
+  parent.children = [node]; root.children = [parent];
+  const layer = { name: "example.Child@2", x: node.bounds!.left + 50, y: node.bounds!.top,
+    width: node.bounds!.right - node.bounds!.left, height: node.bounds!.bottom - node.bounds!.top,
+    visible: true, imageDataUrl: "private-pixels", geometry: { ref: "example.Child@2", rootRef: "example.Parent@1",
+      started: 10, ended: 20, rootReached: true, chain: [["example.Child@2", "example.Parent@1", 50, 0, 10, 10],
+        ["example.Parent@1", "", 50, 0, 10, 10]] } };
+  const summary = JSON.parse(summarizeSdkGeometry(root, [layer]));
+  assert.equal(summary.counts.position, 1);
+  assert.deepEqual(summary.deltas, [["50,0", 1]]);
+  assert.equal(summary.samples[0].treeParent, "example.Parent@1");
+  assert.equal(summary.samples[0].evidence.chain.length, 2);
+  assert.equal(JSON.stringify(summary).includes("private-pixels"), false);
+  assert.throws(() => matchSdkVisibleLayers(root, [layer]), /重新读取控件树/);
+  const many = Array.from({ length: 40 }, (_, i) => ({ ...layer, name: `example.Other@${i}` }));
+  const bounded = JSON.parse(summarizeSdkGeometry(root, many));
+  assert.equal(bounded.counts.missing, 40);
+  assert.equal(bounded.samples.length, 8);
+  const noEvidence = JSON.parse(summarizeSdkGeometry(root, [{ ...layer, geometry: undefined }]));
+  assert.equal(noEvidence.samples[0].evidence, null);
+});
+
+test("SDK queue diagnostics are bounded, optional and separate from pixel validation", () => {
+  const fields = {uiQueueBuckets:"1;2;3;4;5",uiQueueMaxMs:"400",uiSlowTasks:"example.View@12|20|400|60"};
+  const parse = (v: Record<string,string>) => parseSdkTaskDiagnostics(k=>v[k]);
+  assert.equal(parse(fields)["sdk-task-queue-max-ms"],"400");
+  assert.deepEqual(parse({}),{});
+  assert.equal(parse({...fields,uiSlowTasks:"-"})["sdk-task-slow"],"-");
+  for (const [key,value] of Object.entries({uiQueueBuckets:"5001;0;0;0;0",uiQueueMaxMs:"-1",uiSlowTasks:"bad|0|0|50"}))
+    assert.deepEqual(parse({...fields,[key]:value}),{});
+  for (const value of ["example.View@12|0|401|60","example.View@12|0|0|49","example.View@12|65001|0|50",
+    Array(9).fill(fields.uiSlowTasks).join(";"),"x".repeat(3001)]) assert.deepEqual(parse({...fields,uiSlowTasks:value}),{});
+  assert.deepEqual(parse({...fields,uiQueueBuckets:"1000;1000;1000;1000;1001"}),{});
+});
+
+test("SDK timeout diagnostics are optional, bounded and bound to the failed request", () => {
+  const fields: Record<string,string> = {error:"View capture timed out", nonce:"abc", rootRef:"example.Root@12", processInstance:"12345678-1234-1234-1234-123456789012", failurePhase:"draw", failureTarget:"example.View@34", failureWaitMs:"3000", failureCompleted:"0"};
+  const parse = (values: Record<string,string>) => parseSdkCaptureFailure(k=>values[k], "abc", "example.Root@12", fields.processInstance);
+  assert.equal(parse(fields)?.["sdk-visible-failure-phase"], "draw");
+  assert.equal(parseSdkCaptureFailure(()=>undefined,"abc","example.Root@12"),null);
+  for (const [key,value] of Object.entries({nonce:"other",rootRef:"example.Root@99",processInstance:"00000000-0000-0000-0000-000000000000",failurePhase:"unknown",failureTarget:"bad ref",failureWaitMs:"65001",failureCompleted:"5001",result:"ok",error:"Unsupported"}))
+    assert.equal(parse({...fields,[key]:value}),null,key);
+  for (const value of ["-1","NaN","1.5",""]) assert.equal(parse({...fields,failureWaitMs:value}),null);
+  assert.equal(parse({...fields,failurePhase:"ui-queue"})?.["sdk-visible-failure-completed"],"0");
+  assert.equal(parseSdkCaptureFailure(k=>fields[k],"abc","example.Root@12" )?.["sdk-visible-failure-phase"],"draw");
+  for (const phase of ["draw-prepare", "draw-snapshot"]) {
+    const newer = {...fields,failurePhase:phase,failurePhaseStartedMs:"100",failurePhaseWaitMs:"2900"};
+    assert.equal(parse(newer)?.["sdk-visible-failure-phase"],phase);
+    assert.equal(parse(newer)?.["sdk-visible-failure-phase-wait-ms"],"2900");
+    for (const [key,value] of Object.entries({failurePhaseStartedMs:"3001",failurePhaseWaitMs:"3001"}))
+      assert.equal(parse({...newer,[key]:value}),null);
+    for (const value of ["-1","NaN","1.5","", "2800"]) assert.equal(parse({...newer,failurePhaseWaitMs:value}),null);
+    assert.equal(parse({...fields,failurePhaseStartedMs:"100"}),null);
+    assert.equal(parse({...newer,failurePhaseStartedMs:"99"})?.["sdk-visible-failure-phase"],phase);
+  }
+});
+
+test("SDK failure timeline separates queue, snapshot entry and return without authorizing results", () => {
+  const fields: Record<string,string> = {error:"View capture timed out", nonce:"abc", rootRef:"example.Root@12",
+    processInstance:"12345678-1234-1234-1234-123456789012", failurePhase:"draw-snapshot", failureTarget:"example.View@34",
+    failureWaitMs:"3000", failureCompleted:"10"};
+  const timeline = {version:1, observedMs:3000, enteredMs:250, snapshotStartedMs:300,
+    queueMs:400, geometryMs:12, drawMs:150, verifyMs:4, snapshotPrepareMs:5, snapshotInvokeMs:100};
+  const parse = (value: unknown, extra: Record<string,string> = {}) => parseSdkCaptureFailure(
+    k=>({...fields, ...extra, failureTiming:JSON.stringify(value)})[k], "abc", "example.Root@12", fields.processInstance);
+  assert.deepEqual(JSON.parse(parse(timeline)!["sdk-visible-failure-timing"]), timeline);
+  assert.equal(JSON.parse(parse({...timeline,snapshotReturnedMs:2999})!["sdk-visible-failure-timing"]).snapshotReturnedMs,2999);
+  for (const change of [{version:2}, {observedMs:2999}, {enteredMs:-1}, {enteredMs:301}, {snapshotStartedMs:3001},
+    {snapshotReturnedMs:299}, {snapshotReturnedMs:3001}, {drawMs:65001}, {queueMs:1.5}, {target:"private"}]) {
+    const result = parse({...timeline,...change});
+    assert.equal(result?.["sdk-visible-failure-phase"], "draw-snapshot");
+    assert.equal(result?.["sdk-visible-failure-timing"], undefined);
+  }
+  const {enteredMs, snapshotStartedMs, ...queued} = timeline;
+  assert.ok(parse(queued,{failurePhase:"ui-queue"})?.["sdk-visible-failure-timing"]);
+  assert.equal(parse(timeline,{failurePhase:"ui-queue"})?.["sdk-visible-failure-timing"],undefined);
+  assert.equal(parse(timeline,{failurePhase:"draw-prepare"})?.["sdk-visible-failure-timing"],undefined);
+  assert.equal(parse(queued)?.["sdk-visible-failure-timing"],undefined);
+  assert.equal(parse(timeline,{nonce:"stale"}),null);
+  assert.equal(parse(timeline,{result:"ok"}),null);
+});
+
+test("late merged trees are adopted only after the provider request settles, without classic capture", async () => {
+  let resolve!: (value: string) => void;
+  const request = new Promise<string>(r => { resolve = r; });
+  const events: string[] = [];
+  const tree = { nonce: "current-request" };
+  const settled = settleSdkMergedTree(request, async () => { events.push("read"); return tree; }, async value => {
+    assert.equal(value, tree); events.push("adopt");
+  }, () => { events.push("classic"); });
+  await Promise.resolve(); assert.deepEqual(events, []);
+  resolve("reply");
+  assert.equal(await settled, "reply"); assert.deepEqual(events, ["read", "adopt"]);
+});
+
+test("missing merged trees start legacy capture only after provider completion", async () => {
+  const events: string[] = [];
+  const outcome = { error: new Error("capture timed out") };
+  const result = await settleSdkMergedTree(Promise.resolve().then(() => { events.push("provider-ended"); return outcome; }),
+    async () => { events.push("read"); return undefined; }, async () => { assert.fail("no tree"); }, () => { events.push("classic"); });
+  assert.equal(result, outcome); assert.deepEqual(events, ["provider-ended", "read", "classic"]);
+});
+
+test("merged UI failure is checked before missing-file fallback queues another tree", async () => {
+  const events: string[] = [];
+  const failure = new Error("会话调用超时：capture-visible");
+  await assert.rejects(settleSdkMergedTree(Promise.resolve({ error: failure }),
+    async () => { events.push("read"); return undefined; }, async () => { events.push("adopt"); },
+    () => { events.push("classic"); }, outcome => { if (outcome.error) throw outcome.error; }), e => e === failure);
+  assert.deepEqual(events, []);
+});
+
+test("merged SDK reply guard rejects known UI failures before any classic tree or file read", async () => {
+  const nonce = "1234567890abcdef", instance = "a-current-process";
+  for (const fields of ["tree=failed, treeFailure=ui-timeout", "tree=failed, treeFailure=ui-unavailable",
+    "tree=failed, treeFailure=interrupted", "error=java.lang.IllegalStateException: View capture timed out",
+    "error=View selection timed out", "error=java.lang.InterruptedException"]) {
+    let fileReads = 0, classic = 0;
+    const outcome = { reply: { code: 0, stdout: Buffer.from(`Bundle[{${fields}, nonce=${nonce}, processInstance=${instance}}]`) }, error: null };
+    await assert.rejects(settleSdkMergedTree(Promise.resolve(outcome), async () => { fileReads++; return undefined; },
+      async () => assert.fail("no adoption"), () => { classic++; }, r => checkSdkMergedTreeOutcome(r, nonce, instance)),
+      e => isSdkVisibleCaptureInterruption(e));
+    assert.equal(fileReads, 0); assert.equal(classic, 0);
+  }
+  const timeout = new Error("会话调用超时：capture-visible");
+  assert.throws(() => checkSdkMergedTreeOutcome({ reply: null, error: timeout }, nonce), e => e === timeout);
+  const aborted = new DOMException("user canceled", "AbortError");
+  assert.throws(() => checkSdkMergedTreeOutcome({ reply: null, error: aborted }, nonce), e => e === aborted);
+});
+
+test("old SDK without merged support retains classic compatibility; malformed failure never authorizes work", async () => {
+  const nonce = "1234567890abcdef", instance = "current";
+  for (const fields of ["result=ok", "tree=failed", "error=Unauthorized or unsupported request"]) {
+    let classic = 0;
+    const outcome = { reply: { code: 0, stdout: Buffer.from(`Bundle[{${fields}}]`) }, error: null };
+    await settleSdkMergedTree(Promise.resolve(outcome), async () => undefined, async () => assert.fail("no adoption"),
+      () => { classic++; }, r => checkSdkMergedTreeOutcome(r, nonce, instance));
+    assert.equal(classic, 1);
+  }
+  for (const [fields, code] of [["tree=failed, treeFailure=unknown", 0], ["tree=ok, treeFailure=ui-timeout", 0],
+    ["tree=failed, treeFailure=ui-timeout, nonce=wrong", 0], ["tree=failed, treeFailure=ui-timeout, processInstance=wrong", 0],
+    ["tree=failed, treeFailure=ui-timeout", 1]] as const) {
+    const out = `Bundle[{nonce=${nonce}, processInstance=${instance}, ${fields}}]`;
+    // For identity cases, replace the original field rather than insert an ambiguous duplicate.
+    const text = fields.includes("nonce=wrong") ? out.replace(`nonce=${nonce}, `, "")
+      : fields.includes("processInstance=wrong") ? out.replace(`processInstance=${instance}, `, "") : out;
+    assert.throws(() => checkSdkMergedTreeOutcome({ reply: { code, stdout: Buffer.from(text) }, error: null }, nonce, instance), /失败响应无效/);
+  }
+});
+
+test("merged tree adoption rejects invalid identity; aborted file reads do not start legacy capture", async () => {
+  let classic = 0;
+  await assert.rejects(settleSdkMergedTree(Promise.resolve("reply"), async () => ({ nonce: "wrong" }),
+    async () => { throw new Error("SDK 进程或根控件已变化"); }, () => { classic++; }), /根控件已变化/);
+  await assert.rejects(settleSdkMergedTree(Promise.resolve("reply"), async () => { throw new DOMException("Canceled", "AbortError"); },
+    async () => { assert.fail("no tree"); }, () => { classic++; }), { name: "AbortError" });
+  assert.equal(classic, 0);
+});
+
+test("SDK UI interruption stops bulk fallback without disabling unsupported-SDK compatibility", () => {
+  for (const reason of ["java.lang.IllegalStateException: View capture timed out", "View selection timed out",
+    "View capture could not reach UI thread", "Visible capture time budget exceeded", "java.lang.InterruptedException"]) {
+    assert.equal(isSdkVisibleCaptureInterruption(new Error(`SDK 可见层抓取失败：${reason}；{\"rootMatches\":false}`)), true);
+  }
+  assert.equal(isSdkVisibleCaptureInterruption(new Error("会话调用超时：capture-visible")), true);
+  for (const message of ["会话调用超时：capture", "会话通道已关闭", "SDK 可见层抓取失败：响应无效",
+    "SDK 可见层抓取失败：Unauthorized or unsupported request", "SDK 可见层文件校验失败",
+    "SDK 可见层中 180 个移动、27 个尺寸或状态变化，需要重新读取控件树", "View capture timed out"]) {
+    assert.equal(isSdkVisibleCaptureInterruption(new Error(message)), false, message);
+  }
+  assert.equal(isSdkVisibleCaptureInterruption("SDK 可见层抓取失败：View capture timed out"), false);
+});
+
+test("interrupted SDK capture keeps own pixels and marks unresolved Views without erasing proven empty/style/hidden states", () => {
+  const root = makeNode("root"), image = makeNode("image"), missing = makeNode("missing"), empty = makeNode("empty"), style = makeNode("style"), hidden = makeNode("hidden");
+  root.children = [image, missing, empty, style, hidden];
+  for (const n of root.children) { n.visibleToUser = true; n.attributes = { "view-ref": `example.View@${n.id}` }; }
+  image.layerImageDataUrl = "data:image/png;base64,AA=="; image.layerImageStatus = "captured";
+  missing.layerImageStatus = "ambiguous"; missing.bounds = { left: 10, top: 20, right: 30, bottom: 40, raw: "[10,20][30,40]" };
+  empty.layerImageEmpty = true; empty.layerImageStatus = "unavailable";
+  style.layerImageStatus = "style"; hidden.visibleToUser = false; hidden.layerImageStatus = "hidden";
+  markInterruptedSdkImages(root, new Error("SDK 可见层抓取失败：View capture timed out"));
+  assert.equal(image.layerImageDataUrl,"data:image/png;base64,AA=="); assert.equal(image.layerImageStatus,"captured");
+  assert.equal(missing.layerImageStatus,"failed"); assert.match(missing.attributes!["image-capture-error"],/尚无独立画面证据/);
+  assert.deepEqual(missing.bounds,{ left: 10, top: 20, right: 30, bottom: 40, raw: "[10,20][30,40]" });
+  assert.equal(empty.layerImageStatus,"unavailable"); assert.equal(style.layerImageStatus,"style"); assert.equal(hidden.layerImageStatus,"hidden");
+  assert.ok(root.attributes!["sdk-visible-interrupted"]); assert.equal(root.layerImageStatus,undefined);
+});
+
+test("SDK phase timings accept legacy absence and reject partial or invalid telemetry", () => {
+  assert.deepEqual(parseSdkCapturePhases(() => undefined), {});
+  const fields: Record<string, string> = { uiQueueMs: "12", geometryMs: "3", drawMs: "50", verifyMs: "4" };
+  assert.deepEqual(parseSdkCapturePhases(key => fields[key]), { "SDK 主线程排队": 12, "SDK 几何读取": 3, "SDK 独立图绘制": 50, "SDK 绘制后校验": 4 });
+  for (const value of [undefined, "NaN", "-1", "1.5", "65001"]) assert.throws(() => parseSdkCapturePhases(key => key === "drawMs" ? value : fields[key]));
+  assert.equal(parseSdkCapturePhases(key => key === "geometryWriteMs" ? "7" : fields[key])["SDK 几何文件构建"], 7);
+  assert.throws(() => parseSdkCapturePhases(key => key === "geometryWriteMs" ? "7" : undefined));
+  assert.throws(() => parseSdkCapturePhases(key => key === "geometryWriteMs" ? "-1" : fields[key]));
+  assert.equal(parseSdkCapturePhases(key => key === "geometryWriteMs" ? "130000" : fields[key])["SDK 几何文件构建"], 130000);
+  assert.throws(() => parseSdkCapturePhases(key => key === "geometryWriteMs" ? "130001" : fields[key]));
+  for (const [key, label] of [["snapshotPrepareMs", "SDK 截图接口准备"], ["snapshotInvokeMs", "SDK 截图调用"], ["uiTaskMaxMs", "SDK 最长主线程任务"], ["snapshotInvokeMaxMs", "SDK 最长截图调用"]]) {
+    assert.equal(parseSdkCapturePhases(name => name === key ? "7" : fields[name])[label], 7);
+    for (const value of ["NaN", "-1", "1.5", "65001"]) assert.throws(() => parseSdkCapturePhases(name => name === key ? value : fields[name]));
+    assert.throws(() => parseSdkCapturePhases(name => name === key ? "7" : undefined));
+  }
+});
+
+test("SDK optional thread CPU counters preserve legacy absence and bound worker accumulation", () => {
+  const base: Record<string, string> = { uiQueueMs: "12", geometryMs: "3", drawMs: "50", verifyMs: "4" };
+  for (const [key, label, limit] of [
+    ["geometryCpuMs", "SDK 几何读取 CPU", 65_000], ["drawCpuMs", "SDK 独立图绘制 CPU", 65_000],
+    ["verifyCpuMs", "SDK 绘制后校验 CPU", 65_000], ["encodeCpuMs", "SDK 编码 CPU", 130_000],
+    ["geometryWriteCpuMs", "SDK 几何文件构建 CPU", 130_000],
+  ] as const) {
+    assert.equal(parseSdkCapturePhases(name => name === key ? "7" : base[name])[label], 7);
+    assert.equal(parseSdkCapturePhases(name => name === key ? String(limit) : base[name])[label], limit);
+    assert.equal(parseSdkCapturePhases(name => base[name])[label], undefined);
+    for (const value of ["NaN", "-1", "1.5", String(limit + 1)]) assert.throws(() => parseSdkCapturePhases(name => name === key ? value : base[name]));
+    assert.throws(() => parseSdkCapturePhases(name => name === key ? "7" : undefined));
+  }
+});
+
+test("SDK geometry serialization counters are optional and bounded", () => {
+  const base: Record<string, string> = { uiQueueMs: "12", geometryMs: "3", drawMs: "50", verifyMs: "4" };
+  for (const [key, label] of Object.entries({ geometryJsonMs: "SDK 几何 JSON 序列化", geometryUtf8Ms: "SDK 几何 UTF-8 转换", geometryDiskMs: "SDK 几何文件写入", geometryJsonCpuMs: "SDK 几何 JSON 序列化 CPU", geometryUtf8CpuMs: "SDK 几何 UTF-8 转换 CPU", geometryDiskCpuMs: "SDK 几何文件写入 CPU" })) {
+    const limit = key.startsWith("geometryDisk") ? 65_000 : 130_000;
+    assert.equal(parseSdkCapturePhases(name => name === key ? "7" : base[name])[label], 7);
+    assert.equal(parseSdkCapturePhases(name => name === key ? String(limit) : base[name])[label], limit);
+    assert.equal(parseSdkCapturePhases(name => base[name])[label], undefined);
+    for (const value of ["NaN", "-1", "1.5", String(limit + 1)]) assert.throws(() => parseSdkCapturePhases(name => name === key ? value : base[name]));
+    assert.throws(() => parseSdkCapturePhases(name => name === key ? "7" : undefined));
+  }
+});
+
+test("full geometry sidecar binds every batch to nonce, process, root and exact image geometry", () => {
+  const rootRef = "android.view.View@ff", nonce = "0123456789abcdef", instance = "sample-process";
+  const layers = Array.from({ length: 12 }, (_, i) => ({ name: `android.view.View@${(i + 1).toString(16)}`, visible: true, x: 10, y: 20, width: 30, height: 40, imageDataUrl: "data:image/png;base64,AA==" }));
+  const row = (ref: string, parent: string) => [ref, parent, 10, 20, 30, 40, 0, 0, 1, 0, [1, 0, 0, 0, 1, 0, 0, 0, 1], false, false, false];
+  const records = layers.map(layer => ({ ref: layer.name, rootRef, started: 10, ended: 20, rootReached: true, chain: [row(layer.name, rootRef), row(rootRef, "")] }));
+  const envelope = { version: 1, nonce, processInstance: instance, rootRef, records };
+  const parse = (value: unknown) => parseCaptureGeometryFile(Buffer.from(JSON.stringify(value)), nonce, instance, rootRef, layers);
+  assert.equal(parse(envelope).size, 12);
+  const diagnostic = { ...records[0], diagnosticOnly: true };
+  assert.equal(parse({ ...envelope, records: [diagnostic] }).get(diagnostic.ref)?.diagnosticOnly, true);
+  assert.throws(() => parse({ ...envelope, records: [{ ...diagnostic, diagnosticOnly: "yes" }] }));
+  assert.throws(() => parse({ ...envelope, records: [{ ...diagnostic, bitmapSpace: "view-local" }] }));
+  assert.equal(parse({ ...envelope, records: [] }).size, 0);
+  for (const changed of [{ nonce: "stale" }, { processInstance: "stale" }, { rootRef: "stale" }, { version: 2 }]) assert.throws(() => parse({ ...envelope, ...changed }));
+  assert.throws(() => parse({ ...envelope, records: [...records.slice(0, 11), records[0]] }));
+  assert.throws(() => parse({ ...envelope, records: [{ ...records[0], chain: [row(layers[0].name, rootRef).map((v, i) => i === 2 ? 11 : v), row(rootRef, "")] }] }));
+  assert.throws(() => parse({ ...envelope, records: [{ ...records[0], ref: "android.view.View@eee" }] }));
+});
+import { annotateFallbackGeometry, applyFallbackLayerImage, canonicalizeSdkWindowRoot, layerCaptureFailureWarning, parseCaptureGeometryEvidence, retryFallbackGeometry } from "../electron/capture/layer-images";
+import { isStaleCaptureTreeError } from "../electron/sdk/capture-protocol";
+
+test("same-task parent evidence is bounded, linked, rooted and optional for old SDKs", () => {
+  const row = (ref: string, parent: string) => [ref, parent, 10, 20, 10, 20, 0, 0, 1, 0, [1, 0, 0, 0, 1, 0, 0, 0, 1], false, false, false];
+  const evidence = { ref: "android.view.View@abc", rootRef: "android.view.View@def", started: 100, ended: 120, rootReached: true,
+    chain: [row("android.view.View@abc", "android.view.View@def"), row("android.view.View@def", "")] };
+  const encode = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64");
+  assert.equal(parseCaptureGeometryEvidence(undefined, [evidence.ref], evidence.rootRef).size, 0);
+  assert.deepEqual(parseCaptureGeometryEvidence(encode([evidence]), [evidence.ref], evidence.rootRef).get(evidence.ref), evidence);
+  const transformed = { ...evidence, bitmapSpace: "view-local", localToScreen: [0.9, 0, 10.25, 0, 0.9, 20.5, 0, 0, 1] };
+  assert.deepEqual(parseCaptureGeometryEvidence(encode([transformed]), [evidence.ref], evidence.rootRef).get(evidence.ref), transformed);
+  const clipped = { ...transformed, clipContext: evidence.chain.map(row => ({ ref: row[0],
+    clipBounds: [0, 0, 5, 5], padding: [1, 2, 3, 4], localToScreen: transformed.localToScreen })) };
+  assert.deepEqual(parseCaptureGeometryEvidence(encode([clipped]), [evidence.ref], evidence.rootRef).get(evidence.ref), clipped);
+  for (const clipContext of [[], [{ ...clipped.clipContext[0], ref: "wrong" }, clipped.clipContext[1]],
+    [{ ...clipped.clipContext[0], padding: [-1, 0, 0, 0] }, clipped.clipContext[1]],
+    [{ ...clipped.clipContext[0], clipBounds: [5, 0, 0, 5] }, clipped.clipContext[1]],
+    [{ ...clipped.clipContext[0], localToScreen: [1, 0, 0, 0, 1, 0, 0, 0, 1] }, clipped.clipContext[1]]])
+    assert.throws(() => parseCaptureGeometryEvidence(encode([{ ...clipped, clipContext }]), [evidence.ref], evidence.rootRef), /证据无效/);
+  for (const altered of [{ ...transformed, bitmapSpace: "screen" }, { ...transformed, localToScreen: [1] },
+    { ...transformed, localToScreen: [1, 0, 99, 0, 1, 20, 0, 0, 1] }])
+    assert.throws(() => parseCaptureGeometryEvidence(encode([altered]), [evidence.ref], evidence.rootRef), /证据无效/);
+  for (const altered of [
+    { ...evidence, rootRef: "android.view.View@fff" }, { ...evidence, ended: 99 }, { ...evidence, ended: 4000 },
+    { ...evidence, rootReached: false }, { ...evidence, chain: [row(evidence.ref, ""), row(evidence.rootRef, "")] },
+    { ...evidence, chain: Array.from({ length: 10 }, () => row(evidence.ref, evidence.rootRef)) },
+    { ...evidence, chain: [[...row(evidence.ref, evidence.rootRef).slice(0, 10), [1], false, false, false]] },
+  ]) assert.throws(() => parseCaptureGeometryEvidence(encode([altered]), [evidence.ref], evidence.rootRef), /证据无效/);
+  assert.throws(() => parseCaptureGeometryEvidence(encode([evidence, evidence]), [evidence.ref, "android.view.View@fff"], evidence.rootRef), /证据无效/);
+  assert.throws(() => parseCaptureGeometryEvidence(encode([evidence]), ["android.view.View@fff"], evidence.rootRef), /证据无效/);
+  assert.throws(() => parseCaptureGeometryEvidence("bad!", [evidence.ref], evidence.rootRef), /证据无效/);
+  const partial = { ...evidence, rootReached: false, chain: [row(evidence.ref, evidence.rootRef)] };
+  assert.equal(parseCaptureGeometryEvidence(encode([partial]), [evidence.ref], evidence.rootRef).size, 1, "bounded partial chains must not pretend to reach the root");
+});
+
+test("fallback geometry diagnostics compare only sampled ancestors without moving tree bounds", () => {
+  const parent = movingLayer("0"), child = movingLayer("0/0");
+  parent.children = [child];
+  const original = { ...child.bounds! };
+  const image = { x: 13, y: 22, width: 10, height: 20, imageDataUrl: "data:image/png;base64,AA==", kind: "own" as const, empty: false };
+  applyFallbackLayerImage(child, image);
+  annotateFallbackGeometry(parent, new Map([[parent.attributes!["view-ref"], image], [child.attributes!["view-ref"], image]]));
+  assert.equal(child.attributes!["image-capture-geometry-kind"], "position-mismatch");
+  assert.equal(child.attributes!["image-capture-position-delta"], "3,2");
+  assert.match(child.attributes!["image-capture-ancestor-evidence"], /3,2.*非同帧/);
+  assert.deepEqual(child.bounds, original);
+  annotateFallbackGeometry(parent, new Map([[child.attributes!["view-ref"], image]]), "retry");
+  assert.match(child.attributes!["image-capture-ancestor-evidence"], /来源未知/);
+  assert.equal(child.attributes!["image-capture-evidence-phase"], "retry");
+  assert.equal(applyFallbackLayerImage(child, { ...image, x: 10, y: 20 }), true);
+  for (const key of ["geometry-kind", "position-delta", "ancestor-evidence", "evidence-phase", "initial-geometry"]) {
+    assert.equal(child.attributes![`image-capture-${key}`], undefined);
+  }
+});
+
+test("same-draw parent context supersedes cross-batch hints but never authorizes a bounds update", () => {
+  const parent = movingLayer("0"), child = movingLayer("0/0");
+  parent.children = [child];
+  const row = (ref: string, parentRef: string, x: number) => [ref, parentRef, x, 20, 10, 20, 0, 0, 1, 0, [1, 0, 0, 0, 1, 0, 0, 0, 1], false, false, false];
+  const geometry = { ref: child.attributes!["view-ref"], rootRef: parent.attributes!["view-ref"], started: 100, ended: 120, rootReached: true,
+    chain: [row(child.attributes!["view-ref"], parent.attributes!["view-ref"], 13), row(parent.attributes!["view-ref"], "", 13)] };
+  const image = { x: 13, y: 20, width: 10, height: 20, imageDataUrl: "data:image/png;base64,AA==", kind: "own" as const, empty: false, geometry };
+  applyFallbackLayerImage(child, image);
+  annotateFallbackGeometry(parent, new Map([[child.attributes!["view-ref"], image]]));
+  assert.match(child.attributes!["image-capture-ancestor-evidence"], /3,0.*同绘制任务父链/);
+  assert.equal(child.bounds!.left, 10);
+  assert.equal(JSON.parse(child.attributes!["image-capture-parent-context"]).chain.length, 2);
+  const reparented = { ...image, geometry: { ...geometry, chain: [row(geometry.ref, "android.view.View@ffff", 13)] } };
+  applyFallbackLayerImage(child, reparented);
+  annotateFallbackGeometry(parent, new Map([[child.attributes!["view-ref"], reparented]]));
+  assert.match(child.attributes!["image-capture-ancestor-evidence"], /直接父对象与树不一致/);
+  assert.equal(child.bounds!.left, 10);
+});
+
+test("geometry retry retains original evidence on failure but clears it after recovery", async () => {
+  for (const x of [13, 10]) {
+    const node = movingLayer();
+    const image = { x: 12, y: 20, width: 10, height: 20, imageDataUrl: "data:image/png;base64,AA==", kind: "own" as const, empty: false };
+    applyFallbackLayerImage(node, image);
+    annotateFallbackGeometry(node, new Map([[node.attributes!["view-ref"], image]]));
+    const original = node.attributes!["image-capture-initial-geometry"];
+    await retryFallbackGeometry([node], async refs => new Map([[refs[0], { ...image, x }]]), node);
+    if (x === 13) {
+      assert.equal(node.attributes!["image-capture-initial-geometry"], original);
+      assert.equal(node.attributes!["image-capture-position-delta"], "3,0");
+      assert.equal(node.attributes!["image-capture-evidence-phase"], "retry");
+    } else assert.equal(node.attributes!["image-capture-initial-geometry"], undefined);
+  }
+});
+
+test("fallback rejects nonfinite or partial positions and classifies size changes separately", () => {
+  const node = movingLayer();
+  const image = { x: 10, y: 20, width: 10, height: 20, imageDataUrl: "data:image/png;base64,AA==", kind: "own" as const, empty: false };
+  for (const value of [NaN, Infinity, undefined]) {
+    assert.equal(applyFallbackLayerImage(node, { ...image, x: value }), false);
+    assert.equal(node.attributes!["image-capture-geometry-kind"], "invalid-image-position");
+  }
+  assert.equal(applyFallbackLayerImage(node, { ...image, width: 9 }), false);
+  assert.equal(node.attributes!["image-capture-geometry-kind"], "size-mismatch");
+  assert.equal(applyFallbackLayerImage(node, { ...image, x: undefined, y: undefined }), true, "legacy records with no position retain their existing compatibility");
+});
+
+function movingLayer(id = "0/0") {
+  const node = makeNode(id);
+  node.bounds = { left: 10, top: 20, right: 20, bottom: 40, raw: "[10,20][20,40]" };
+  node.layerImageStatus = "failed";
+  node.attributes = { "view-ref": `android.view.View@${id.replace(/\//g, "")}`, "image-capture-error": "采集期间控件位置变化，请重新采集" };
+  return node;
+}
+
+test("small geometry retry recovers only checked images in one batch without changing bounds", async () => {
+  const node = movingLayer(), original = { ...node.bounds! };
+  let calls = 0;
+  const result = await retryFallbackGeometry([node], async refs => {
+    calls++;
+    assert.deepEqual(refs, [node.attributes!["view-ref"]]);
+    return new Map([[refs[0], { x: 10, y: 20, width: 10, height: 20, imageDataUrl: "data:image/png;base64,AA==", kind: "own", empty: false }]]);
+  });
+  assert.equal(calls, 1);
+  assert.deepEqual(result, { requested: 1, recovered: 1 });
+  assert.deepEqual(node.bounds, original);
+  assert.equal(node.layerImageStatus, "captured");
+  assert.equal(node.attributes!["image-capture-error"], undefined);
+  await retryFallbackGeometry([node], async () => assert.fail("a valid image must not be retried"));
+});
+
+test("geometry retry rejects continued motion, changed size, and missing coordinates without looping", async () => {
+  for (const geometry of [{ x: 12, y: 20, width: 10, height: 20 }, { x: 10, y: 20, width: 10, height: 19 }, { width: 10, height: 20 }]) {
+    const node = movingLayer();
+    let calls = 0;
+    const result = await retryFallbackGeometry([node], async refs => {
+      calls++;
+      return new Map([[refs[0], { ...geometry, imageDataUrl: "data:image/png;base64,AA==", kind: "own", empty: false }]]);
+    });
+    assert.equal(calls, 1);
+    assert.deepEqual(result, { requested: 1, recovered: 0 });
+    assert.equal(node.layerImageStatus, "failed");
+    assert.equal(node.layerImageDataUrl, undefined);
+  }
+});
+
+test("geometry retry skips large batches, pixel-heavy layers, pure containers and unrelated failures", async () => {
+  const tooMany = Array.from({ length: 9 }, (_, i) => movingLayer(`0/${i}`));
+  const large = movingLayer(); large.bounds = { left: 0, top: 0, right: 2001, bottom: 2000, raw: "" };
+  const unrelated = movingLayer(); unrelated.attributes!["image-capture-error"] = "缓冲层读取失败";
+  const pure = movingLayer(); pure.layerImageStatus = "unavailable";
+  for (const nodes of [tooMany, [large], [unrelated, pure]]) {
+    assert.deepEqual(await retryFallbackGeometry(nodes, async () => assert.fail("retry exceeded its scope")), { requested: 0, recovered: 0 });
+  }
+});
+
+test("geometry retry propagates cancellation and preserves the initial failure", async () => {
+  const node = movingLayer();
+  const error = new Error("cancelled");
+  await assert.rejects(retryFallbackGeometry([node], async () => { throw error; }), error);
+  assert.equal(node.attributes!["image-capture-error"], "采集期间控件位置变化，请重新采集");
+  assert.equal(node.layerImageStatus, "failed");
+});
+
+test("fallback size mismatch records geometry, reports failure, and clears after a valid image", () => {
+  const root = makeNode("0"), node = makeNode("0/0");
+  root.children = [node];
+  node.bounds = { left: 0, top: 0, right: 10, bottom: 20, raw: "[0,0][10,20]" };
+  const image = { width: 9, height: 20, imageDataUrl: "data:image/png;base64,AA==", kind: "own" as const, empty: false };
+  assert.equal(applyFallbackLayerImage(node, image), false);
+  assert.equal(node.layerImageStatus, "failed");
+  assert.equal(node.attributes!["image-capture-expected-size"], "10x20");
+  assert.equal(node.attributes!["image-capture-actual-size"], "9x20");
+  assert.equal(node.layerImageDataUrl, undefined);
+  assert.match(layerCaptureFailureWarning(root)!, /^1 个控件/);
+  assert.equal(applyFallbackLayerImage(node, { ...image, width: 10 }), true);
+  assert.equal(node.layerImageStatus, "captured");
+  assert.equal(node.attributes!["image-capture-error"], undefined);
+  assert.equal(node.attributes!["image-capture-actual-size"], undefined);
+  assert.equal(layerCaptureFailureWarning(root), null);
+  assert.equal(applyFallbackLayerImage(node, image), false);
+  assert.equal(node.layerImageStatus, "captured", "a rejected retry must not discard a valid existing own image");
+  assert.deepEqual(node.layerImageSize, { width: 10, height: 20 });
+});
+
+test("verified rectangular own images carry placement without changing measured bounds, and replacements clear it", () => {
+  const node = makeNode("placed");
+  node.bounds = { left: 80, top: 20, right: 180, bottom: 60, raw: "[80,20][180,60]" };
+  const matrix = [0.8,0,80,0,0.8,20,0,0,1], identity = [1,0,0,0,1,0,0,0,1];
+  const geometry = { ref: "android.view.View@1", rootRef: "android.widget.FrameLayout@2", started: 100, ended: 110, rootReached: true,
+    bitmapSpace: "view-local" as const, localToScreen: matrix,
+    chain: [
+      ["android.view.View@1", "android.widget.FrameLayout@2", 80,20,100,40,0,0,0.5,0,identity,false,false,false],
+      ["android.widget.FrameLayout@2", "", 0,0,120,100,0,0,0.5,0,identity,true,true,false],
+    ], clipContext: [
+      { ref: "android.view.View@1", clipBounds: null, padding: [0,0,0,0], localToScreen: matrix },
+      { ref: "android.widget.FrameLayout@2", clipBounds: null, padding: [0,0,10,0], localToScreen: identity },
+    ] };
+  const image = { width: 100, height: 40, x: 80, y: 20, imageDataUrl: "data:image/png;base64,AA==", kind: "own" as const, empty: false };
+  const bounds = structuredClone(node.bounds);
+  assert.equal(applyFallbackLayerImage(node, { ...image, geometry }), true);
+  assert.deepEqual(node.bounds, bounds);
+  assert.deepEqual(node.layerCapturePlacement?.screen, { left: 80, top: 20, width: 30, height: 32 });
+  assert.equal(node.layerCapturePlacement?.opacity, 0.25);
+  assert.equal(applyFallbackLayerImage(node, { ...image, x: 90, geometry }), false);
+  assert.equal(node.layerCapturePlacement?.opacity, 0.25, "rejected new pixels retain the old image's placement");
+  assert.equal(applyFallbackLayerImage(node, { ...image, geometry: { ...geometry, rootReached: false } }), true);
+  assert.equal(node.layerCapturePlacement, undefined);
+  assert.equal(node.attributes!["image-capture-placement"], "unsupported-context-legacy-fallback");
+  assert.equal(applyFallbackLayerImage(node, image), true);
+  assert.equal(node.attributes!["image-capture-placement"], undefined);
+});
+
+test("final layer warnings include local size failures and clear on successful recapture", () => {
+  const root = makeNode("0"), node = makeNode("0/0");
+  root.children = [node];
+  assert.equal(layerCaptureFailureWarning(root), null);
+  node.layerImageStatus = "failed";
+  node.attributes = { "image-capture-error": "采集期间控件尺寸变化，请重新采集" };
+  assert.match(layerCaptureFailureWarning(root)!, /^1 个控件/);
+  const pure = makeNode("0/1");
+  pure.layerImageStatus = "unavailable";
+  root.children.push(pure);
+  assert.match(layerCaptureFailureWarning(root)!, /^1 个控件/);
+  node.layerImageStatus = "captured";
+  assert.equal(layerCaptureFailureWarning(root), null);
+});
+
+test("SDK supplementary images keep their coordinates and reject moved or incomplete geometry", () => {
+  const node = makeNode("0/0");
+  node.bounds = { left: 75, top: 336, right: 1155, bottom: 1776, raw: "[75,336][1155,1776]" };
+  const image = { x: -1058, y: 336, width: 1080, height: 1440, imageDataUrl: "data:image/png;base64,AA==", kind: "own" as const, empty: false };
+  assert.equal(applyFallbackLayerImage(node, image), false);
+  assert.equal(node.layerImageStatus, "failed");
+  assert.match(node.attributes!["image-capture-error"], /位置变化/);
+  assert.equal(node.attributes!["image-capture-expected-position"], "75,336");
+  assert.equal(node.attributes!["image-capture-actual-position"], "-1058,336");
+  assert.equal(applyFallbackLayerImage(node, { ...image, x: 77 }), false);
+  assert.equal(applyFallbackLayerImage(node, { ...image, x: 75, y: undefined }), false);
+  assert.equal(applyFallbackLayerImage(node, { ...image, x: 76 }), true, "same one-pixel tolerance as the visible SDK batch");
+  assert.equal(node.attributes!["image-capture-error"], undefined);
+  assert.equal(node.attributes!["image-capture-actual-position"], undefined);
+});
+
+test("stale starting windows require fresh trees, ordinary capture failures retain fallback", () => {
+  assert.equal(isStaleCaptureTreeError(new Error("Debug 窗口与当前控件树不一致，请重新采集。")), true);
+  assert.equal(isStaleCaptureTreeError(new Error("Debug 窗口身份已变化，请重新采集。")), true);
+  assert.equal(isStaleCaptureTreeError(new Error("SDK 特殊画面控件与当前控件树不一致")), true);
+  assert.equal(isStaleCaptureTreeError(new Error("SDK 纯布局控件与当前控件树不一致")), true);
+  assert.equal(isStaleCaptureTreeError(new Error("SDK 可见层中 180 个移动、27 个尺寸或状态变化，需要重新读取控件树")), true);
+  assert.equal(isStaleCaptureTreeError(new Error("SDK 可见层抓取失败：View selection timed out")), false);
+  assert.equal(isStaleCaptureTreeError(new Error("Debug View 连接提前关闭")), false);
+  assert.equal(isStaleCaptureTreeError("Debug 窗口身份已变化"), false);
+});
 
 const activityTarget = { packageName: "example.app", activityName: "example.app.MainActivity", component: "example.app/example.app.MainActivity" };
 const activityHierarchy = `mAppBounds=Rect(0, 104 - 1080, 2355)
@@ -110,7 +667,7 @@ function encodedView(hash: number, extra: EncodedProperties = {}): EncodedProper
 
 test("V2 decoding preserves identity, text, scroll, transforms and rejects incomplete hierarchies", () => {
   const root = debugViewTree(activityHierarchy, activityTarget);
-  const child = encodedView(-1, { "layout:left": 10, "layout:top": 20, "drawing:translationX": 3, "text:text": "背景 = 😀", "id": "id/title", "drawing:alpha": 0.5, "padding:paddingLeft": 2 });
+  const child = encodedView(-1, { "layout:left": 10, "layout:top": 20, "drawing:translationX": 3, "text:text": "背景 = 😀", "id": "id/title", "drawing:alpha": 0.5, "padding:paddingLeft": 2, "drawing:hardwareAccelerated": false });
   const properties = encodedView(0x9c5dabe, { "meta:__name__": "com.android.internal.policy.DecorView", "drawing:scaleX": 2, "drawing:scaleY": 2, "drawing:pivotX": 0, "drawing:pivotY": 0, "scrolling:scrollX": 4, "scrolling:scrollY": 5, "meta:__childCount__": 1, "meta:__child__0": child });
   const bytes = encodedHierarchy(properties);
   applyViewProperties(root, decodeViewHierarchy(bytes), true);
@@ -120,6 +677,7 @@ test("V2 decoding preserves identity, text, scroll, transforms and rejects incom
   assert.equal(node.text, "背景 = 😀");
   assert.equal(node.attributes?.["effective-alpha"], "0.5");
   assert.equal(node.attributes?.["padding-left"], "2");
+  assert.equal(node.attributes?.["hardware-accelerated"], "false", "native software evidence survives V2 decoding without an SDK");
   assert.equal(node.attributes?.["skip-draw"], undefined, "willNotDraw must not be mistaken for PFLAG_SKIP_DRAW");
   const current = structuredClone(root);
   assert.equal(nativeViewNodeMatches(root, current, node.id), true);
@@ -194,6 +752,71 @@ test("captured framework views skip duplicate JDWP lookup, custom and surface vi
   assert.equal(needsViewBitmapFallback(node, true, true), false, "SDK-confirmed pure layouts need no JDWP lookup");
 });
 
+test("adopted SDK inheritance skips only captured ordinary type-only candidates", () => {
+  const node = makeNode("custom");
+  node.className = "com.example.CustomText";
+  node.layerImageStatus = "captured";
+  const attrs = { "tree-source": "debug-sdk", "sdk-process-instance": "current-instance",
+    "view-ref": "com.example.CustomText@abc", "sdk-class-hierarchy": "com.example.CustomText → android.widget.TextView → android.view.View" };
+  node.attributes = { ...attrs };
+  assert.equal(needsViewBitmapFallback(node), false);
+  for (const status of ["unavailable", "ambiguous", "failed"] as const) {
+    node.layerImageStatus = status;
+    assert.equal(needsViewBitmapFallback(node), true, `missing ${status} image still captured`);
+  }
+  node.layerImageStatus = "captured";
+  const invalidAttributes: Record<string, string>[] = [
+    { "skip-draw": "true" }, { "tree-source": "debug-view" }, { "sdk-process-instance": "" },
+    { "view-ref": "com.example.Other@abc" }, { "view-ref": "com.example.CustomText@invalid" },
+    { "sdk-class-hierarchy": "com.example.CustomText → android.widget.TextView" },
+    { "sdk-class-hierarchy": "com.example.Other → android.view.View" },
+    { "sdk-class-hierarchy": "com.example.CustomText → android.view.SurfaceView → android.view.View" },
+    { "sdk-class-hierarchy": "com.example.CustomText → android.view.TextureView → android.view.View" },
+    { "sdk-class-hierarchy": "com.example.CustomText → android.widget.VideoView → android.view.SurfaceView → android.view.View" },
+    { "sdk-class-hierarchy": "com.example.CustomText → android.view.View → android.view.View" },
+    { "sdk-class-hierarchy": "com.example.CustomText → invalid/class → android.view.View" },
+  ];
+  for (const changes of invalidAttributes) {
+    node.attributes = { ...attrs, ...changes };
+    assert.equal(needsViewBitmapFallback(node), true, JSON.stringify(changes));
+  }
+  node.attributes = {};
+  assert.equal(needsViewBitmapFallback(node), true, "old SDK has no class proof");
+});
+
+test("checked SDK types arrive before fallback without replacing tree, flags or pixels", () => {
+  const root = makeNode("root"), node = makeNode("custom"), unrelated = makeNode("other");
+  root.children = [node, unrelated];
+  node.className = unrelated.className = "com.example.CustomText";
+  node.attributes = { "view-ref": "com.example.CustomText@abc", "tree-source": "debug-view", "skip-draw": "false" };
+  unrelated.attributes = { "view-ref": "com.example.CustomText@def" };
+  node.layerImageStatus = "captured";
+  node.layerImageDataUrl = "original-image";
+  const verified = makeNode("sdk-root"), donor = makeNode("sdk-child");
+  donor.className = node.className;
+  donor.attributes = { "view-ref": node.attributes["view-ref"], "tree-source": "debug-sdk", "sdk-process-instance": "current",
+    "sdk-class-hierarchy": "com.example.CustomText → android.widget.TextView → android.view.View", "skip-draw": "true" };
+  donor.layerImageDataUrl = "different-image";
+  verified.children = [donor];
+  applyVerifiedSdkViewTypes(root, verified);
+  assert.equal(root.children[0], node);
+  assert.equal(node.attributes["tree-source"], "debug-view");
+  assert.equal(node.attributes["skip-draw"], "false");
+  assert.equal(node.layerImageDataUrl, "original-image");
+  assert.equal(node.layerImageStatus, "captured");
+  assert.equal(needsViewBitmapFallback(node), false);
+  assert.equal(unrelated.attributes["sdk-class-hierarchy"], undefined);
+  const wrongClass = makeNode("wrong");
+  wrongClass.className = "com.example.Other";
+  wrongClass.attributes = { "view-ref": donor.attributes["view-ref"] };
+  const wrongRoot = makeNode("wrong-root"); wrongRoot.children = [wrongClass];
+  applyVerifiedSdkViewTypes(wrongRoot, verified);
+  assert.equal(wrongClass.attributes["sdk-class-hierarchy"], undefined);
+  donor.attributes["sdk-class-hierarchy"] = "com.example.CustomText → android.view.SurfaceView → android.view.View";
+  applyVerifiedSdkViewTypes(root, verified);
+  assert.equal(needsViewBitmapFallback(node), true, "video ancestry must keep live fallback");
+});
+
 test("SDK visible images keep only stable View identities and bound stale images", () => {
   const root = makeNode("0"), node = makeNode("0/0");
   node.attributes = { "view-ref": "example.CustomView@1" };
@@ -201,11 +824,11 @@ test("SDK visible images keep only stable View identities and bound stale images
   root.children = [node];
   const layer = { name: "example.CustomView@1", x: 2, y: 3, width: 10, height: 10, visible: true, imageDataUrl: "data:image/png;base64,AA==" };
   assert.deepEqual(matchSdkVisibleLayers(root, [layer]).matched, [layer]);
-  assert.throws(() => matchSdkVisibleLayers(root, [{ ...layer, x: 4 }]), /回退完整抓图/);
-  assert.throws(() => matchSdkVisibleLayers(root, [{ ...layer, width: 9 }]), /回退完整抓图/);
-  assert.throws(() => matchSdkVisibleLayers(root, [{ ...layer, name: "example.CustomView@2" }]), /回退完整抓图/);
+  assert.throws(() => matchSdkVisibleLayers(root, [{ ...layer, x: 4 }]), /重新读取控件树/);
+  assert.throws(() => matchSdkVisibleLayers(root, [{ ...layer, width: 9 }]), /重新读取控件树/);
+  assert.throws(() => matchSdkVisibleLayers(root, [{ ...layer, name: "example.CustomView@2" }]), /重新读取控件树/);
   assert.throws(() => matchSdkVisibleLayers(root, [layer, layer]), /对象重复/);
-  assert.throws(() => matchSdkVisibleLayers(root, Array.from({ length: 9 }, (_, index) => ({ ...layer, name: `example.CustomView@${index + 2}` }))), /回退完整抓图/);
+  assert.throws(() => matchSdkVisibleLayers(root, Array.from({ length: 9 }, (_, index) => ({ ...layer, name: `example.CustomView@${index + 2}` }))), /重新读取控件树/);
   root.children = Array.from({ length: 12 }, (_, index) => ({ ...node, id: `0/${index}`, attributes: { "view-ref": `example.CustomView@${index + 10}` } }));
   const changing = root.children.map((child, index) => ({ ...layer, name: child.attributes!["view-ref"], width: index < 9 ? 10 : 11 }));
   const partial = matchSdkVisibleLayers(root, changing);
@@ -214,12 +837,30 @@ test("SDK visible images keep only stable View identities and bound stale images
 });
 
 test("only DecorView shorthand is accepted as an alias of a qualified root identity", () => {
+  assert.equal(matchesViewRoot("DecorView@7dd128d", "com.android.internal.policy.DecorView@7dd128d"), true, "business SDK root aliases refer to the same instance");
+  assert.equal(matchesViewRoot("DecorView@7dd128d", "com.android.internal.policy.DecorView@7dd128e"), false, "different instances still invalidate capture");
   assert.equal(matchesViewRoot("DecorView@abc", "com.android.internal.policy.DecorView@abc"), true);
   assert.equal(matchesViewRoot("DecorView@abc", "com.android.internal.policy.impl.PhoneWindow$DecorView@abc"), true);
   assert.equal(matchesViewRoot("DecorView@abc", "com.android.internal.policy.DecorView@def"), false);
   assert.equal(matchesViewRoot("DecorView@abc", "com.example.NotDecorView@abc"), false);
   assert.equal(matchesViewRoot("LinearLayout@abc", "android.widget.LinearLayout@abc"), false);
   assert.equal(matchesViewRoot("one.DecorView@abc", "two.DecorView@abc"), false);
+});
+
+test("verified SDK root aliases retain root own images and reject different objects", () => {
+  const root = makeNode("0"), window = makeNode("0/0");
+  window.className = "DecorView";
+  window.attributes = { "view-ref": "DecorView@7dd128d" };
+  window.bounds = { left: 0, top: 0, right: 10, bottom: 10, raw: "[0,0][10,10]" };
+  root.children = [window];
+  assert.throws(() => canonicalizeSdkWindowRoot(root, "com.android.internal.policy.DecorView@7dd128e"), /根控件已变化/);
+  assert.equal(window.attributes["view-ref"], "DecorView@7dd128d");
+  const ref = "com.android.internal.policy.DecorView@7dd128d";
+  canonicalizeSdkWindowRoot(root, ref);
+  assert.equal(window.className, "com.android.internal.policy.DecorView");
+  const layer = { name: ref, x: 0, y: 0, width: 10, height: 10, visible: true, imageDataUrl: "data:image/png;base64,AA==" };
+  assert.deepEqual(matchSdkVisibleLayers(root, [layer]).matched, [layer]);
+  assert.equal(matchSdkVisibleLayers(root, [layer]).refs.has(ref), true);
 });
 
 test("DDMS restores omitted custom parents and images, preserving identity and native properties", () => {
@@ -272,7 +913,10 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
   const strings = new Map<number, string>(), classes = new Map<string, number>(), arrays = new Map<number, number>();
   const pins: number[] = [], released: number[] = [], recycled: number[] = [], drawn: number[] = [];
   let next = 1000, disposed = false, suspendCount = 0, resumes = 0, brokenPixels = false, emptyTexture = false, skipOwn = false, disconnect = false;
-  let customDraw = false, overlayOwn = false;
+  let customDraw = false, overlayOwn = false, legacyWakes = 0;
+  const methodQueries: number[] = [];
+  let missingOverlay = false, badFields = "", badDrawMethodsOnce = false;
+  const fieldReads: number[][] = [];
   const refs = ["example.Image@aaa", "example.Image@bbb", "example.Image@ccc", "android.view.TextureView@ddd"];
   const args = (data: Buffer, start: number, count: number) => {
     const values: number[] = [];
@@ -309,7 +953,7 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
             assert.equal(body.readBigInt64BE(21), 0n);
             payload = int(7); event = true; break;
           case "15/2": break;
-          case "199/1": assert.equal(body.subarray(0, 4).toString(), "VUOP"); assert.equal(body.readInt32BE(8), 2); break;
+          case "199/1": legacyWakes++; assert.equal(body.subarray(0, 4).toString(), "VUOP"); assert.equal(body.readInt32BE(8), 2); break;
           case "1/2": {
             const name = body.subarray(4).toString();
             assert.notEqual(name, "Landroid/view/ViewDebug$HardwareCanvasProvider;", "load the snapshot provider on cold startup");
@@ -336,14 +980,29 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
             payload = Buffer.concat([Buffer.from([1]), int(classes.get(name)!)]); break;
           }
           case "2/5": {
+            methodQueries.push(body.readInt32BE());
+            if (badDrawMethodsOnce && body.readInt32BE() === classes.get("Lexample/Image;")) {
+              badDrawMethodsOnce = false; payload = int(-1); break;
+            }
             const extra = customDraw && body.readInt32BE() === classes.get("Lexample/DecoratedLayout;")
               ? [int(16), string("dispatchDraw"), string("(Landroid/graphics/Canvas;)V"), int(0)] : [];
             payload = Buffer.concat([int(methods.length + Number(extra.length > 0)), ...methods.flatMap(([id, name, sig]) => [int(id), string(name), string(sig), int(0)]), ...extra]); break;
           }
-          case "2/4": payload = Buffer.concat([int(2), int(99), string("mPrivateFlags"), string("I"), int(0), int(100), string("mOverlay"), string("Landroid/view/ViewOverlay;"), int(0)]); break;
+          case "2/4": payload = Buffer.concat([int(missingOverlay ? 1 : 2), int(99), string("mPrivateFlags"), string("I"), int(0), ...(missingOverlay ? [] : [int(100), string("mOverlay"), string("Landroid/view/ViewOverlay;"), int(0)])]); break;
           case "9/2": {
-            const field = body.readInt32BE(8); assert.ok(field === 99 || field === 100);
-            payload = Buffer.concat([int(1), field === 99 ? tagged("I", skipOwn ? 0x80 : 0) : tagged("L", overlayOwn ? 900 : 0)]); break;
+            const count = body.readInt32BE(4);
+            assert.equal(body.length, 8 + 4 * count);
+            const fields = Array.from({ length: count }, (_, i) => body.readInt32BE(8 + i * 4));
+            fieldReads.push(fields);
+            payload = Buffer.concat([int(count), ...fields.map(field => {
+              assert.ok(field === 99 || field === 100);
+              return field === 99 ? tagged("I", skipOwn ? 0x80 : 0) : tagged("L", overlayOwn ? 900 : 0);
+            })]);
+            if (badFields === "count") payload.writeInt32BE(count + 1);
+            if (badFields === "tag") payload[4] = 76;
+            if (badFields === "short") payload = payload.subarray(0, payload.length - 1);
+            if (badFields === "trailing") payload = Buffer.concat([payload, Buffer.from([0])]);
+            break;
           }
           case "9/7": pins.push(body.readInt32BE()); break;
           case "9/8": released.push(body.readInt32BE()); break;
@@ -402,7 +1061,7 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const address = server.address(); assert.ok(address && typeof address !== "string");
-    const captured = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, refs.map((ref) => ({ ref, captureOwn: true })), AbortSignal.timeout(5000));
+    const captured = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window", metadataBatch: true }, refs.map((ref) => ({ ref, captureOwn: true })), AbortSignal.timeout(5000));
     assert.deepEqual(drawn, [501, 502, 503]);
     assert.deepEqual([...captured.images.keys()], [refs[3], refs[0], refs[2]], "prioritize video buffers before the bounded own-view fallback");
     assert.match(captured.failures.get(refs[1])!, /exception/);
@@ -413,8 +1072,40 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
     }
     assert.equal(suspendCount, 0, "never forcibly interrupt a draw/layout operation");
     assert.equal(disposed, true);
+    for (const key of ["connectMs", "idsMs", "threadLookupMs", "boundaryMs", "metadataMs", "rootVerifyMs"] as const)
+      assert.ok(Number.isFinite(captured.timing[key]) && captured.timing[key] >= 0);
+    assert.ok(captured.timing.setupRequests > 0);
+    assert.ok(captured.timing.threadNameRequests > 0);
     assert.deepEqual(released.sort(), pins.sort());
     assert.deepEqual(recycled.sort(), [601, 701, 603, 703, 704].sort());
+    const serialMetadata = await captureViewBitmaps(address.port,
+      { rootRef: "example.DecorView@abc", windowName: "activity-window", metadataBatch: false },
+      refs.map(ref => ({ ref, captureOwn: true })), AbortSignal.timeout(5000));
+    assert.deepEqual([...serialMetadata.images], [...captured.images], "batching changes transport, not pixels");
+    assert.deepEqual([...serialMetadata.failures], [...captured.failures]);
+    assert.equal(serialMetadata.timing.setupRequests, captured.timing.setupRequests, "same read-only requests in both modes");
+    const wakeCount = legacyWakes;
+    await assert.rejects(captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window", hardwareAccelerated: false }, [{ ref: refs[0], captureOwn: true }]), /软件窗口需要新版 SDK/);
+    assert.equal(legacyWakes, wakeCount, "known software window never calls the HWUI wake");
+    let safeWakes = 0;
+    const software = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window", hardwareAccelerated: false,
+      wakeUi: async () => { safeWakes++; } }, [{ ref: refs[0], captureOwn: true }]);
+    assert.equal(safeWakes, 1); assert.equal(legacyWakes, wakeCount);
+    assert.equal(software.images.size, 1);
+    assert.ok(classes.has("Landroid/view/ViewDebug$SoftwareCanvasProvider;"));
+    await assert.rejects(captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window",
+      wakeUi: async () => { throw new Error("wake identity rejected"); } }, [{ ref: refs[0], captureOwn: true }]), /wake identity rejected/);
+    assert.equal(legacyWakes, wakeCount, "safe wake failure must not fall back to unsafe HWUI");
+    const wakeCancellation = new AbortController();
+    await assert.rejects(captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window",
+      wakeUi: async () => { wakeCancellation.abort(); wakeCancellation.signal.throwIfAborted(); } }, [{ ref: refs[0], captureOwn: true }], wakeCancellation.signal), /abort/i);
+    await assert.rejects(captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window",
+      wakeUi: async () => { throw new Error("SDK wake timeout"); } }, [{ ref: refs[0], captureOwn: true }]), /SDK wake timeout/);
+    const recoveredWake = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window", hardwareAccelerated: false,
+      wakeUi: async () => {} }, [{ ref: refs[0], captureOwn: true }]);
+    assert.equal(recoveredWake.images.size, 1, "the next capture recovers after wake rejection, cancellation and timeout");
+    assert.equal(legacyWakes, wakeCount); assert.equal(disposed, true);
+    assert.equal(suspendCount, 0);
     const extraRefs = Array.from({ length: 70 }, (_, i) => `example.Image@${(0x1000 + i).toString(16)}`);
     refs.push(...extraRefs);
     const batch = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, extraRefs.map(ref => ({ ref, captureOwn: true })), AbortSignal.timeout(5000));
@@ -433,13 +1124,32 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
     assert.deepEqual(drawn, capturedObjects, "a stale window never captures another view's pixels");
     assert.deepEqual(released.sort(), pins.sort());
     brokenPixels = false; emptyTexture = true; skipOwn = true;
+    const emptyFieldReads = fieldReads.length;
     const empty = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [{ ref: refs[0], captureOwn: true }, { ref: refs[3], captureOwn: false }]);
     assert.equal(empty.images.size, 0, "a transparent video buffer is not a successful capture");
     assert.match(empty.failures.get(refs[3])!, /未确认取得视频画面/);
     assert.equal(empty.kinds.get(refs[3]), "texture", "probe video buffers even when DDMS already supplied a bitmap");
     assert.equal(empty.skipDraw.has(refs[0]), true);
+    assert.deepEqual(fieldReads.at(-1), [99, 100], "flags and overlay use one object-local read");
+    assert.equal(fieldReads.length - emptyFieldReads, 1, "skip-draw decision needs one round trip instead of two");
+    assert.equal(empty.timing.fieldReadRequests, 1);
+    assert.equal(empty.timing.batchedFieldReads, 1);
     assert.deepEqual(drawn, capturedObjects, "skip-draw containers should not consume the capture budget");
     customDraw = true;
+    const beforeClassification = methodQueries.length;
+    const classified = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [{ ref: refs[0], captureOwn: false }]);
+    assert.equal(classified.kinds.get(refs[0]), "own");
+    assert.equal(classified.images.size, 0, "an existing ordinary bitmap is not captured again");
+    assert.equal(methodQueries.slice(beforeClassification).filter(id => [classes.get("Lexample/Image;"), classes.get("Lexample/DecoratedLayout;")].includes(id)).length, 0,
+      "buffer classification needs superclass identities, not custom dispatchDraw method lists");
+    const mixed = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [{ ref: refs[0], captureOwn: false }, { ref: refs[2], captureOwn: true }]);
+    assert.deepEqual([...mixed.images.keys()], [refs[2]], "kind-only caching must not hide inherited drawing when the same class needs a bitmap later");
+    assert.equal(mixed.skipDraw.size, 0);
+    badDrawMethodsOnce = true;
+    const recoveredMethods = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [refs[0], refs[2]].map(ref => ({ ref, captureOwn: true })));
+    assert.match(recoveredMethods.failures.get(refs[0])!, /Invalid JDWP member list/);
+    assert.equal(recoveredMethods.images.has(refs[2]), true, "a failed method query must not cache false and hide later inherited drawing");
+    assert.equal(recoveredMethods.skipDraw.size, 0);
     const decorated = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [refs[0], refs[2]].map(ref => ({ ref, captureOwn: true })));
     assert.deepEqual([...decorated.images.keys()], [refs[0], refs[2]], "inherited dispatchDraw pixels survive SKIP_DRAW, including cached types");
     assert.equal(decorated.skipDraw.size, 0);
@@ -448,6 +1158,29 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
     assert.equal(overlay.images.has(refs[0]), true, "an overlay must be captured even without an own background");
     assert.equal(overlay.skipDraw.size, 0);
     overlayOwn = false;
+    for (const malformed of ["count", "tag", "short", "trailing"]) {
+      badFields = malformed;
+      const beforeDraw = drawn.length, beforeRead = fieldReads.length;
+      const rejected = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [{ ref: refs[0], captureOwn: true }]);
+      assert.equal(rejected.images.size, 0);
+      assert.equal(rejected.skipDraw.size, 0, "bad fields must never imply transparency");
+      assert.match(rejected.failures.get(refs[0])!, /Invalid JDWP field value/);
+      assert.equal(drawn.length, beforeDraw);
+      assert.equal(fieldReads.length - beforeRead, 1, "no retry after malformed batched reply");
+      assert.deepEqual(released.sort(), pins.sort());
+    }
+    badFields = ""; missingOverlay = true; skipOwn = false;
+    const legacy = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [{ ref: refs[0], captureOwn: true }]);
+    assert.equal(legacy.images.size, 1, "missing overlay field does not block non-skip drawing");
+    assert.equal(legacy.images.get(refs[0])!.imageDataUrl, captured.images.get(refs[0])!.imageDataUrl, "single-field compatibility and batched path retain identical pixels");
+    assert.deepEqual(fieldReads.at(-1), [99]);
+    assert.equal(legacy.timing.fieldReadRequests, 1);
+    assert.equal(legacy.timing.batchedFieldReads, 0, "counters are local to this connection, not prior captures");
+    skipOwn = true;
+    const missing = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [{ ref: refs[0], captureOwn: true }]);
+    assert.equal(missing.images.size, 0); assert.equal(missing.skipDraw.size, 0);
+    assert.match(missing.failures.get(refs[0])!, /field unavailable: mOverlay/);
+    missingOverlay = false;
     emptyTexture = false; skipOwn = false; disconnect = true;
     const partial = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [{ ref: refs[0], captureOwn: true }, { ref: refs[3], captureOwn: false }]);
     assert.deepEqual([...partial.images.keys()], [refs[3]], "disconnect must preserve already captured video pixels");
@@ -848,12 +1581,13 @@ test("skip-draw containers do not compete with anonymous drawable images, but re
 
 test("exported native z, clipping and padding are preserved without inventing missing values", () => {
   const root: UiNode = { ...makeNode("root"), attributes: { "view-ref": "View@a" } };
-  const values = { "drawing:getZ()": "7.5", "drawing:getElevation()": "5", "drawing:getClipChildren()": "true", "drawing:getClipToPadding()": "false", "padding:mPaddingLeft": "12" };
+  const values = { "drawing:getZ()": "7.5", "drawing:getElevation()": "5", "drawing:getClipChildren()": "true", "drawing:getClipToPadding()": "false", "padding:mPaddingLeft": "12", "drawing:isHardwareAccelerated()": "false" };
   applyViewProperties(root, `View@a ${Object.entries(values).map(([k, v]) => `${k}=${v.length},${v}`).join(" ")} `);
   assert.equal(root.attributes?.["z"], "7.5");
   assert.equal(root.attributes?.["clip-children"], "true");
   assert.equal(root.attributes?.["padding-left"], "12");
   assert.equal(root.attributes?.["padding-right"], undefined);
+  assert.equal(root.attributes?.["hardware-accelerated"], "false");
 });
 
 test("Debug capture chooses the window whose root identity matches, not the first window", async () => {
@@ -924,7 +1658,17 @@ test("Debug capture chooses the window whose root identity matches, not the firs
     const root = debugViewTree(activityHierarchy, activityTarget);
     const rootRefs = root.children.map((node) => node.attributes!["view-ref"]);
     let batchTiming: { waitMs: number; readMs: number; parseMs: number; bytes: number; layers: number } | undefined;
-    assert.deepEqual(await captureViewLayers(address.port, { rootRefs, onHierarchy: (value) => { dump = value; }, onBatchTiming: (timing) => { batchTiming = timing; } }), []);
+    const hierarchyTimings: ViewHierarchyTiming[] = [];
+    const recordHierarchy = (info: ViewHierarchyTiming) => { hierarchyTimings.push(info); };
+    assert.deepEqual(await captureViewLayers(address.port, { rootRefs, onHierarchy: (value) => {
+      assert.equal(hierarchyTimings.length, 1, "timing must finish before preview/SDK callbacks"); dump = value;
+    }, onHierarchyTiming: info => { recordHierarchy(info); throw new Error("diagnostic sink failure"); }, onBatchTiming: (timing) => { batchTiming = timing; } }), []);
+    const firstTiming = hierarchyTimings[0];
+    assert.equal(firstTiming.success, true); assert.equal(firstTiming.phase, "complete");
+    assert.equal(firstTiming.probeRequests, 2); assert.equal(firstTiming.exportRequests, 1);
+    const parts = [firstTiming.connectMs, firstTiming.windowsMs, firstTiming.probeMs, firstTiming.exportMs, firstTiming.decodeMs];
+    assert.ok(parts.every(ms => Number.isFinite(ms) && ms >= 0));
+    assert.ok(parts.reduce((sum, ms) => sum + ms, 0) <= firstTiming.totalMs, "nonoverlapping protocol parts fit within total");
     assert.equal(batchTiming?.bytes, 9);
     assert.equal(batchTiming?.layers, 0);
     assert.ok(batchTiming && batchTiming.waitMs >= 0 && batchTiming.readMs >= 0 && batchTiming.parseMs >= 0);
@@ -942,8 +1686,11 @@ test("Debug capture chooses the window whose root identity matches, not the firs
     assert.deepEqual(await captureViewLayers(address.port, { rootRefs, skipImages: () => skipAfterHierarchy, onHierarchy: () => { skipAfterHierarchy = true; } }), []);
     assert.equal(layerRequests, 2, "a successfully detected SDK should skip the bulk capture");
     incompleteOnce = true;
-    assert.deepEqual(await captureViewLayers(address.port, { rootRefs, skipImages: true, onHierarchy: () => undefined }), [], "a transient malformed V2 tree should be retried once");
-    await assert.rejects(captureViewLayers(address.port, { rootRefs: ["stale"], onHierarchy: () => assert.fail("wrong window properties") }), /窗口与当前控件树不一致/);
+    assert.deepEqual(await captureViewLayers(address.port, { rootRefs, skipImages: true, onHierarchyTiming: recordHierarchy, onHierarchy: () => undefined }), [], "a transient malformed V2 tree should be retried once");
+    assert.equal(hierarchyTimings.at(-1)?.exportRequests, 2); assert.equal(hierarchyTimings.at(-1)?.success, true);
+    await assert.rejects(captureViewLayers(address.port, { rootRefs: ["stale"], onHierarchyTiming: recordHierarchy, onHierarchy: () => assert.fail("wrong window properties") }), /窗口与当前控件树不一致/);
+    assert.equal(hierarchyTimings.at(-1)?.phase, "probe"); assert.equal(hierarchyTimings.at(-1)?.success, false);
+    assert.equal(hierarchyTimings.at(-1)?.exportRequests, 0);
     assert.deepEqual(captured, Array(6).fill("activity"));
     duplicateRoot = false;
     changedRoot = true;
@@ -953,11 +1700,21 @@ test("Debug capture chooses the window whose root identity matches, not the firs
     await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchy: () => assert.fail("truncated hierarchy") }), /提前关闭/);
     truncate = false;
     incomplete = true;
-    await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchy: () => assert.fail("unfinished Android export") }), /Debug V2/);
+    await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchyTiming: recordHierarchy, onHierarchy: () => assert.fail("unfinished Android export") }), /Debug V2/);
+    assert.equal(hierarchyTimings.at(-1)?.phase, "decode"); assert.equal(hierarchyTimings.at(-1)?.success, false);
+    assert.equal(hierarchyTimings.at(-1)?.exportRequests, 2);
     duplicateRoot = true;
     await assert.rejects(captureViewLayers(address.port, { rootRefs, onHierarchy: () => assert.fail("ambiguous window properties") }), /多个 Debug 窗口匹配/);
     assert.deepEqual(captured, Array(10).fill("activity"));
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+});
+
+test("hierarchy diagnostics retain pre-cancelled connection without device commands", async () => {
+  const records: ViewHierarchyTiming[] = [];
+  await assert.rejects(captureViewLayers(1, { rootRefs: [], signal: AbortSignal.abort(),
+    onHierarchy: () => assert.fail("cancelled hierarchy"), onHierarchyTiming: info => records.push(info) }), { name: "AbortError" });
+  assert.equal(records.length, 1); assert.equal(records[0].phase, "connect"); assert.equal(records[0].success, false);
+  assert.equal(records[0].probeRequests, 0); assert.equal(records[0].exportRequests, 0);
 });
 
 test("cancel closes stalled native and QML connections promptly", async () => {

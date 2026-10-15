@@ -11,7 +11,7 @@ app.whenReady().then(async () => {
   window.webContents.on("render-process-gone", (_event, details) => { console.error(details); app.exit(1); });
   const report = { generatedAt: new Date().toISOString(), sandbox: true, electron: process.versions.electron, chrome: process.versions.chrome, scope: "Actual ScreenshotPreview + production CSS, synthetic PNG/XML-equivalent nodes, fractional pointer-up events and layout assertions. Electron page zoom, not OS DPI or physical-device rotation.", runs: [], success: false };
   try {
-    report.layerImages = await require("../.benchmarks/coordinates/layer-images.cjs").verifyLayerImages();
+    report.layerImages = await require("../.benchmarks/coordinates/layer-images.cjs").verifyLayerImages(join(output, "coordinates/webp-alpha-worker.cjs"));
     await window.loadURL(pathToFileURL(join(project, "benchmarks/coordinates.html")).href);
     const { screenshot, ...rendering } = await window.webContents.executeJavaScript("window.benchmarkLayerRendering()");
     report.rendering = rendering;

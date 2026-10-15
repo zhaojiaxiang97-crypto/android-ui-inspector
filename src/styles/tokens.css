@@ -18,6 +18,24 @@
   --ref-green: #78d86b;
   --ref-danger: #ed7e7e;
   --ref-orange: #e9ad66;
+  --ref-input: #20252d;
+  --ref-input-line: #343b47;
+  --ref-hover: #252c36;
+  --ref-selected-text: #e1ebfc;
+  --ref-selected-muted: #acbfdc;
+  --ref-selected-bg: rgba(77, 134, 247, 0.18);
+  --ref-mark-text: #ffe0a3;
+  --ref-value-accent: #9fcdff;
+  --ref-info-text: #9bb9d8;
+  --ref-info-line: #31516e;
+  --ref-scrollbar: #546071;
+  --ref-floating-panel: rgba(27, 32, 40, 0.96);
+  --ref-canvas: #101214;
+  --ref-checker-light: #ffffff;
+  --ref-checker-dark: #d1d5da;
+  --ref-control-hover: rgba(255, 255, 255, 0.065);
+  --ref-icon-purple: #d6b6f2;
+  --ref-icon-teal: #75c5d4;
   --ref-font-ui: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
   --ref-font-mono: "Cascadia Mono", "DM Mono", Consolas, monospace;
   --ref-radius-sm: 6px;
@@ -30,4 +48,44 @@
   --ref-space-5: 24px;
   --ref-space-6: 32px;
   --ref-shadow-panel: 0 18px 36px rgba(0, 0, 0, 0.32);
+}
+
+/* Theme changes the workbench chrome only. Capture images and the neutral
+   inspection canvas keep their source colours and existing overlay palette. */
+:root[data-appearance="light"] {
+  color-scheme: light;
+  --ref-bg: #f3f5f8;
+  --ref-sidebar: #edf1f6;
+  --ref-panel: #ffffff;
+  --ref-panel-raised: #f8fafc;
+  --ref-toolbar: #eef2f7;
+  --ref-line: #c8d1dd;
+  --ref-line-soft: #dce3ec;
+  --ref-text: #172333;
+  --ref-text-soft: #34445b;
+  --ref-muted: #57657a;
+  --ref-faint: #657287;
+  --ref-blue: #245fb6;
+  --ref-blue-strong: #285fcb;
+  --ref-green: #2e712e;
+  --ref-danger: #b03737;
+  --ref-orange: #92530b;
+  --ref-input: #ffffff;
+  --ref-input-line: #bcc8d8;
+  --ref-hover: #e6edf6;
+  --ref-selected-text: #153d76;
+  --ref-selected-muted: #355578;
+  --ref-selected-bg: #dae7fa;
+  --ref-mark-text: #754706;
+  --ref-value-accent: #245fa7;
+  --ref-info-text: #365f88;
+  --ref-info-line: #9ab6d3;
+  --ref-scrollbar: #a2afc0;
+  --ref-floating-panel: rgba(255, 255, 255, 0.97);
+  --ref-checker-light: #ffffff;
+  --ref-checker-dark: #d6dce5;
+  --ref-control-hover: rgba(30, 63, 112, 0.075);
+  --ref-icon-purple: #744aa1;
+  --ref-icon-teal: #237384;
+  --ref-shadow-panel: 0 18px 36px rgba(33, 49, 76, 0.16);
 }

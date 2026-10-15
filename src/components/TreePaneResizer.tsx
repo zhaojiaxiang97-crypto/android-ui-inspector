@@ -1,17 +1,28 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
+import { DEFAULT_WORKSPACE_LAYOUT, treePaneWidthBounds } from "../../shared/workspace-layout";
 
-export function TreePaneResizer() {
+export function TreePaneResizer({ width, onWidthChange }: { width?: number; onWidthChange?: (width: number) => void }) {
   const handleRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ pointerId: number; x: number; width: number } | null>(null);
+  const preferredWidth = useRef(width !== undefined && Number.isFinite(width) ? width : DEFAULT_WORKSPACE_LAYOUT.treeWidth);
+  const onWidthChangeRef = useRef(onWidthChange);
+  onWidthChangeRef.current = onWidthChange;
 
   function resize(width: number) {
     const handle = handleRef.current, grid = handle?.parentElement;
     if (!handle || !grid) return;
-    const max = Math.max(240, Math.min(720, grid.clientWidth - 360));
-    const next = Math.round(Math.max(240, Math.min(width, max)));
+    const { min, max } = treePaneWidthBounds(grid.clientWidth, handle.offsetWidth);
+    const next = Math.round(Math.max(min, Math.min(width, max)));
     grid.style.setProperty("--tree-pane-width", `${next}px`);
     handle.setAttribute("aria-valuenow", String(next));
     handle.setAttribute("aria-valuemax", String(max));
+    handle.setAttribute("aria-valuemin", String(min));
+    return next;
+  }
+
+  function commitWidth(next: number) {
+    preferredWidth.current = next;
+    onWidthChangeRef.current?.(next);
   }
 
   function endDrag() {
@@ -19,14 +30,19 @@ export function TreePaneResizer() {
     dragRef.current = null;
     handle?.parentElement?.classList.remove("is-resizing-tree");
     if (drag && handle?.hasPointerCapture(drag.pointerId)) handle.releasePointerCapture(drag.pointerId);
+    if (drag && handle) commitWidth(Number(handle.getAttribute("aria-valuenow")));
   }
 
+  useLayoutEffect(() => {
+    if (width !== undefined && Number.isFinite(width)) preferredWidth.current = width;
+    resize(preferredWidth.current);
+  }, [width]);
   useEffect(() => {
     const handle = handleRef.current!, grid = handle.parentElement!;
-    const observer = new ResizeObserver(() => resize(Number(handle.getAttribute("aria-valuenow"))));
+    const observer = new ResizeObserver(() => resize(dragRef.current ? Number(handle.getAttribute("aria-valuenow")) : preferredWidth.current));
     observer.observe(grid);
     window.addEventListener("blur", endDrag);
-    return () => { observer.disconnect(); window.removeEventListener("blur", endDrag); endDrag(); };
+    return () => { observer.disconnect(); window.removeEventListener("blur", endDrag); dragRef.current = null; grid.classList.remove("is-resizing-tree"); };
   }, []);
 
   return <div ref={handleRef} className="tree-pane-resizer" role="separator" tabIndex={0}
@@ -46,12 +62,15 @@ export function TreePaneResizer() {
       if (drag?.pointerId === event.pointerId) resize(drag.width + event.clientX - drag.x);
     }}
     onPointerUp={endDrag} onPointerCancel={endDrag} onLostPointerCapture={endDrag}
-    onDoubleClick={() => resize(306)}
+    onDoubleClick={() => { resize(DEFAULT_WORKSPACE_LAYOUT.treeWidth); commitWidth(DEFAULT_WORKSPACE_LAYOUT.treeWidth); }}
     onKeyDown={event => {
+      if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
       const step = event.shiftKey ? 40 : 10;
       const direction = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
       if (!direction && event.key !== "Home") return;
       event.preventDefault(); event.stopPropagation();
-      resize(event.key === "Home" ? 306 : Number(event.currentTarget.getAttribute("aria-valuenow")) + direction * step);
+      const preferred = event.key === "Home" ? DEFAULT_WORKSPACE_LAYOUT.treeWidth : Number(event.currentTarget.getAttribute("aria-valuenow")) + direction * step;
+      const next = resize(preferred);
+      if (next !== undefined) commitWidth(event.key === "Home" ? preferred : next);
     }} />;
 }

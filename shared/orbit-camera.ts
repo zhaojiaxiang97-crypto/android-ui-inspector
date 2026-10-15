@@ -9,6 +9,49 @@ export type OrbitCamera = {
   panY: number;
 };
 
+export type OrbitRotationMode = "free" | "horizontal";
+
+export const LAYER_VIEW_PRESETS = {
+  front: { label: "正视", azimuth: 0, elevation: 0, layerGap: 80 },
+  stacked: { label: "层叠", azimuth: 32, elevation: 0, layerGap: 128 },
+  exploded: { label: "展开", azimuth: 48, elevation: 0, layerGap: 208 },
+} as const;
+export type LayerViewPreset = keyof typeof LAYER_VIEW_PRESETS;
+
+export const DEFAULT_ORBIT_CAMERA: OrbitCamera = {
+  distance: 1520, azimuth: 32, elevation: 0, roll: 0, layerGap: 128, panX: 0, panY: 0,
+};
+
+export function cameraForLayerPreset(camera: OrbitCamera, preset: LayerViewPreset, mode: OrbitRotationMode): OrbitCamera {
+  const { azimuth, elevation, layerGap } = LAYER_VIEW_PRESETS[preset];
+  return constrainOrbitCamera({ ...camera, azimuth, elevation, layerGap, roll: 0, panX: 0, panY: 0 }, mode);
+}
+
+export function matchesLayerPreset(camera: OrbitCamera, preset: LayerViewPreset, mode: OrbitRotationMode) {
+  const target = cameraForLayerPreset(camera, preset, mode);
+  return (["azimuth", "elevation", "roll", "layerGap", "panX", "panY"] as const).every(key => Math.abs(camera[key] - target[key]) < 0.01);
+}
+
+export const ORBIT_PARAMETER_LIMITS = {
+  layerGap: { min: 24, max: 240, step: 8 },
+  distance: { min: 720, max: 1800, step: 40 },
+} as const;
+export type OrbitParameter = keyof typeof ORBIT_PARAMETER_LIMITS;
+
+export function parseOrbitParameter(parameter: OrbitParameter, draft: string, current: number): { value: number; error: null } | { value: null; error: string } {
+  const text = draft.trim(), value = Number(text), { min, max, step } = ORBIT_PARAMETER_LIMITS[parameter];
+  if (!text) return { value: null, error: "请输入数值。" };
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text) || !Number.isFinite(value)) return { value: null, error: "请输入有限数值。" };
+  if (value < min || value > max) return { value: null, error: `范围为 ${min}–${max} px。` };
+  // Keep legacy values such as 1100 when unchanged; new edits follow the step.
+  if (value !== current && (value - min) % step !== 0) return { value: null, error: `以 ${min} px 为起点，每次增加 ${step} px。` };
+  return { value, error: null };
+}
+
+export function constrainOrbitCamera(camera: OrbitCamera, mode: OrbitRotationMode): OrbitCamera {
+  return mode === "horizontal" && (camera.elevation !== 0 || camera.roll !== 0) ? { ...camera, elevation: 0, roll: 0 } : camera;
+}
+
 // Keep full-screen planes readable instead of letting an oblique view turn
 // them into edge-on blades. Yaw remains unrestricted for the full orbit.
 export const MIN_ELEVATION = -65;
@@ -46,5 +89,5 @@ export function orbitFromKeys(camera: OrbitCamera, key: "ArrowUp" | "ArrowDown" 
 export function cameraTransform(camera: Pick<OrbitCamera, "azimuth" | "elevation" | "roll">) {
   // The scene is the world and the camera orbits around it. Applying the
   // inverse camera rotation keeps the screenshot center fixed in the viewport.
-  return `rotateZ(${-camera.roll}deg) rotateX(${-camera.elevation}deg) rotateY(${-camera.azimuth}deg)`;
+  return `rotateZ(${-camera.roll}deg) rotateY(${-camera.azimuth}deg) rotateX(${-camera.elevation}deg)`;
 }

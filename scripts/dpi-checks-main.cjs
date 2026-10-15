@@ -3,6 +3,7 @@ const { app, BrowserWindow } = require("electron");
 const { mkdirSync, mkdtempSync, writeFileSync } = require("node:fs");
 const { join, resolve } = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { inspectCoordinateMatrix, assertCompleteCoordinateMatrix } = require("./lib/coordinate-matrix-checks.cjs");
 
 const project = resolve(__dirname, "..");
 const factorArgument = process.argv.find((value) => value.startsWith("--scale-factor="));
@@ -34,20 +35,29 @@ app.whenReady().then(async () => {
   const report = {
     generatedAt: new Date().toISOString(),
     requestedScaleFactor: scaleFactor,
-    scope: "Electron force-device-scale-factor proxy over the production ScreenshotPreview coordinate harness; this is a deterministic DPI proxy, not a live Windows Settings or multi-monitor switch.",
+    scope: "Electron force-device-scale-factor proxy over the production ScreenshotPreview coordinate harness at page zoom 1; this is a deterministic DPI proxy, not physical monitor DPI or a live Windows Settings/multi-monitor switch.",
     success: false,
   };
   try {
     await window.loadURL(pathToFileURL(join(project, "benchmarks/coordinates.html")).href);
+    const readViewport = () => window.webContents.executeJavaScript("({ devicePixelRatio: window.devicePixelRatio, visualViewportScale: window.visualViewport?.scale ?? null, innerWidth, innerHeight, screenWidth: window.screen.width, screenHeight: window.screen.height })");
+    report.pageZoomFactor = window.webContents.getZoomFactor();
+    report.viewport = await readViewport();
+    report.gpuFeatureStatus = app.getGPUFeatureStatus();
+    assert.ok(Math.abs(report.pageZoomFactor - 1) < 0.001, `DPI proxy requires page zoom 1, received ${report.pageZoomFactor}`);
     const result = await window.webContents.executeJavaScript("window.verifyCoordinates()");
-    const viewport = await window.webContents.executeJavaScript("({ devicePixelRatio: window.devicePixelRatio, visualViewportScale: window.visualViewport?.scale ?? null, innerWidth, innerHeight, screenWidth: window.screen.width, screenHeight: window.screen.height })");
-    assert.ok(Math.abs(Number(result.devicePixelRatio) - scaleFactor) < 0.06, `devicePixelRatio ${result.devicePixelRatio} did not match ${scaleFactor}`);
-    assert.equal(result.checks.filter((check) => !check.startsWith("pixel:")).length, 31, "DPI proxy did not complete the full coordinate and interaction matrix");
-    assert.equal(result.checks.filter((check) => check.startsWith("pixel:")).length, 12, "DPI proxy did not complete layer pixel checks");
-    report.viewport = viewport;
     report.checks = result.checks;
+    report.harnessDevicePixelRatio = result.devicePixelRatio;
+    report.harnessViewport = result.viewport;
+    report.viewport = await readViewport();
+    report.pageZoomFactor = window.webContents.getZoomFactor();
+    report.coverage = inspectCoordinateMatrix(result.checks);
+    assert.ok(Math.abs(report.pageZoomFactor - 1) < 0.001, `DPI proxy changed page zoom to ${report.pageZoomFactor}`);
+    assert.ok(Math.abs(Number(result.devicePixelRatio) - scaleFactor) < 0.06, `devicePixelRatio ${result.devicePixelRatio} did not match ${scaleFactor}`);
+    assert.ok(Math.abs(Number(report.viewport.devicePixelRatio) - scaleFactor) < 0.06, `viewport devicePixelRatio ${report.viewport.devicePixelRatio} did not match ${scaleFactor}`);
+    assertCompleteCoordinateMatrix(report.coverage);
     report.success = true;
-    console.log(`PASS: ${result.checks.length} coordinate groups at devicePixelRatio ${viewport.devicePixelRatio}`);
+    console.log(`PASS: ${report.coverage.totalGroups} coordinate groups (${report.coverage.interactionGroups} interaction, ${report.coverage.pixelGroups} pixel) at devicePixelRatio ${report.viewport.devicePixelRatio}, page zoom ${report.pageZoomFactor}`);
   } catch (error) {
     report.error = String(error);
     console.error(error);

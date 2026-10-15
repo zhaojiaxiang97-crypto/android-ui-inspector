@@ -37,7 +37,7 @@ export function clipLayerImageToOutlines(node: UiNode, clipNodes: readonly UiNod
   if (!bounds || bounds.right <= bounds.left || bounds.bottom <= bounds.top || image.width < 1 || image.height < 1)
     throw new Error("图层轮廓裁剪缺少有效尺寸，已隐藏不准确的画面。");
   const scaleX = image.width / (bounds.right - bounds.left), scaleY = image.height / (bounds.bottom - bounds.top);
-  const paths: Array<{ left: number; top: number; right: number; bottom: number; radius: number }> = [];
+  const paths: Array<{ left: number; top: number; right: number; bottom: number; radiusX: number; radiusY: number }> = [];
   for (const clipNode of clipNodes) {
     const parent = clipNode.bounds;
     const [left, top, right, bottom, radius] = ["Left", "Top", "Right", "Bottom", "Radius"]
@@ -50,11 +50,12 @@ export function clipLayerImageToOutlines(node: UiNode, clipNodes: readonly UiNod
       top: (parent.top + top - bounds.top) * scaleY,
       right: (parent.left + right - bounds.left) * scaleX,
       bottom: (parent.top + bottom - bounds.top) * scaleY,
-      radius: Math.min(radius * scaleX, radius * scaleY),
+      radiusX: radius * scaleX,
+      radiusY: radius * scaleY,
     };
     // Screen-sized rectangular outlines already match the render bounds; avoid
     // allocating a copied texture for this common root View.
-    if (path.radius === 0 && path.left <= 0 && path.top <= 0 && path.right >= image.width && path.bottom >= image.height) continue;
+    if (path.radiusX === 0 && path.radiusY === 0 && path.left <= 0 && path.top <= 0 && path.right >= image.width && path.bottom >= image.height) continue;
     paths.push(path);
   }
   if (!paths.length) return image;
@@ -65,7 +66,7 @@ export function clipLayerImageToOutlines(node: UiNode, clipNodes: readonly UiNod
   if (!context) throw new Error("无法建立图层轮廓裁剪画布。");
   for (const path of paths) {
     context.beginPath();
-    context.roundRect(path.left, path.top, path.right - path.left, path.bottom - path.top, path.radius);
+    context.roundRect(path.left, path.top, path.right - path.left, path.bottom - path.top, { x: path.radiusX, y: path.radiusY });
     context.clip();
   }
   context.drawImage(image, 0, 0);
@@ -124,6 +125,14 @@ export function textureDimensions(width: number, height: number, maxPixels = 2_0
   return result;
 }
 
+// Older SDK trees omitted ViewGroup clipping flags. Use Android's defaults for
+// those local reconstructions, but always honor an explicitly captured false.
+// clipChildren clips each child to its own bounds (not the parent's bounds).
+function subtreeClipFlag(node: UiNode, key: "clip-children" | "clip-to-padding") {
+  const value = node.attributes?.[key];
+  return value === undefined ? node.attributes?.["tree-source"] === "debug-sdk" : value === "true";
+}
+
 // Only supplied, independent bitmaps participate; never sample the screen image.
 export async function composeSubtreeImage(
   root: UiNode,
@@ -171,13 +180,13 @@ export async function composeSubtreeImage(
     }
     context.save();
     try {
-      const padding = ["left", "top", "right", "bottom"].map((side) => Number(node.attributes?.[`padding-${side}`] ?? 0));
-      if (b && node.attributes?.["clip-to-padding"] === "true" && padding.every(Number.isFinite) && padding.some((value) => value > 0)) {
+      const padding = ["Left", "Top", "Right", "Bottom"].map((side) => Number(node.attributes?.[`sdk-padding${side}`] ?? node.attributes?.[`padding-${side.toLowerCase()}`] ?? 0));
+      if (b && subtreeClipFlag(node, "clip-to-padding") && padding.every(Number.isFinite) && padding.some((value) => value > 0)) {
         clip(context, b.left + padding[0], b.top + padding[1], b.right - b.left - padding[0] - padding[2], b.bottom - b.top - padding[1] - padding[3]);
       }
       for (const child of children) {
         if (isQml && Number(child.attributes?.z ?? 0) < 0) continue;
-        await paint(child, context, node.attributes?.["clip-children"] === "true", qmlAlphaDivisor);
+        await paint(child, context, subtreeClipFlag(node, "clip-children"), qmlAlphaDivisor);
       }
     } finally { context.restore(); }
   };

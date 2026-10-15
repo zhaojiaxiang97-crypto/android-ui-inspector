@@ -9,9 +9,12 @@ const outputDirectory = join(project, ".benchmarks");
 const diagnosticUnsandboxed = process.argv.includes("--diagnostic-unsandboxed");
 const checksOnly = process.argv.includes("--checks-only");
 mkdirSync(outputDirectory, { recursive: true });
-app.setPath("userData", mkdtempSync(join(outputDirectory, "electron-profile-")));
+const checksBase = join(outputDirectory, "tree-ui");
+mkdirSync(checksBase, { recursive: true });
+const evidence = mkdtempSync(join(checksBase, "run-"));
+app.setPath("userData", join(evidence, "profile"));
 app.commandLine.appendSwitch("enable-logging");
-app.commandLine.appendSwitch("log-file", join(outputDirectory, "electron-render.log"));
+app.commandLine.appendSwitch("log-file", join(evidence, "electron-render.log"));
 app.disableHardwareAcceleration();
 const deadline = setTimeout(() => {
   console.error("Rendering benchmark exceeded 180 seconds");
@@ -42,10 +45,46 @@ app.whenReady().then(async () => {
     const virtualZoomChecks = await window.webContents.executeJavaScript("window.verifyVirtualTreeBehavior()");
     window.webContents.setZoomFactor(1);
     console.log("Virtual tree checks at 125% zoom:", virtualZoomChecks.checks.length, "passed");
-    const inspectionChecks = await window.webContents.executeJavaScript("window.verifyInspectionBehavior()");
-    console.log("Inspection lifecycle checks:", JSON.stringify(inspectionChecks));
+    if (checksOnly) await window.webContents.executeJavaScript("void (window.captureFeedbackCheckpoint = () => new Promise(resolve => { window.captureFeedbackResume = resolve; window.captureFeedbackReady = true; }))");
+    const inspectionRun = window.webContents.executeJavaScript("window.verifyInspectionBehavior()");
     if (checksOnly) {
-      writeFileSync(join(outputDirectory, diagnosticUnsandboxed ? "tree-behavior-diagnostic.json" : "tree-behavior.json"), JSON.stringify({ generatedAt: new Date().toISOString(), sandbox: !diagnosticUnsandboxed, correctness, virtualCorrectness, virtualZoomChecks, inspectionChecks }, null, 2) + "\n");
+      const checkpointDeadline = Date.now() + 30000;
+      let finished = false;
+      inspectionRun.then(() => { finished = true; }, () => { finished = true; });
+      while (!finished && !await window.webContents.executeJavaScript("Boolean(window.captureFeedbackReady)")) {
+        if (Date.now() > checkpointDeadline) throw new Error("Capture feedback screenshot checkpoint timed out");
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (!finished) {
+        for (const width of [1280, 960]) {
+          window.setContentSize(width, 880);
+          await window.webContents.executeJavaScript("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+          const layout = await window.webContents.executeJavaScript(`(() => {
+            const panel = document.querySelector('.capture-failure-feedback');
+            const button = panel?.querySelector('.capture-retry');
+            const pane = panel?.parentElement;
+            return { title: panel?.querySelector('h4')?.textContent, buttonVisible: Boolean(button && button.getBoundingClientRect().bottom <= pane.getBoundingClientRect().bottom),
+              fitsWidth: Boolean(panel && panel.scrollWidth <= panel.clientWidth + 1), height: panel?.getBoundingClientRect().height };
+          })()`);
+          if (layout.title !== "控件树读取超时" || !layout.buttonVisible || !layout.fitsWidth) throw new Error(`Capture feedback layout invalid at ${width}: ${JSON.stringify(layout)}`);
+          writeFileSync(join(outputDirectory, `capture-feedback-${width}.png`), (await window.webContents.capturePage()).toPNG());
+          console.log(`Capture feedback layout at ${width}:`, JSON.stringify(layout));
+        }
+        window.setContentSize(1280, 880);
+        await window.webContents.executeJavaScript("window.captureFeedbackResume(); delete window.captureFeedbackCheckpoint;");
+      }
+    }
+    const inspectionChecks = await inspectionRun;
+    console.log("Inspection lifecycle checks:", JSON.stringify(inspectionChecks));
+    const debugHandoff = await window.webContents.executeJavaScript("window.verifyDebugHandoff()");
+    console.log("Debug handoff checks:", JSON.stringify(debugHandoff));
+    const hoverIntegration = await window.webContents.executeJavaScript("window.verifyWorkbenchHover()");
+    console.log("Workbench hover checks:", JSON.stringify(hoverIntegration));
+    if (checksOnly) {
+      const result = JSON.stringify({ passed: true, generatedAt: new Date().toISOString(), sandbox: !diagnosticUnsandboxed, correctness, virtualCorrectness, virtualZoomChecks, inspectionChecks, debugHandoff, hoverIntegration }, null, 2) + "\n";
+      writeFileSync(join(evidence, "result.json"), result);
+      writeFileSync(join(outputDirectory, diagnosticUnsandboxed ? "tree-behavior-diagnostic.json" : "tree-behavior.json"), result);
+      console.log(`Tree evidence: ${evidence}`);
       clearTimeout(deadline);
       app.exit(0);
       return;
@@ -85,7 +124,9 @@ app.whenReady().then(async () => {
     app.exit(0);
   } catch (error) {
     console.error(error);
-    console.error("Benchmark failed. Inspect the failing assertion and .benchmarks/electron-render.log; do not treat a failed behavior check as a sandbox startup problem.");
+    writeFileSync(join(evidence, "result.json"), JSON.stringify({ passed: false, error: String(error), sandbox: !diagnosticUnsandboxed }, null, 2));
+    writeFileSync(join(evidence, "failed.png"), (await window.webContents.capturePage()).toPNG());
+    console.error(`Benchmark failed. Evidence: ${evidence}; do not treat a failed behavior check as a sandbox startup problem.`);
     clearTimeout(deadline);
     app.exit(1);
   }

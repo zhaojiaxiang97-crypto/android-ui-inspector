@@ -8,8 +8,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { createInspectorMcpServer } from "../electron/mcp-server";
-import { publishMcpSnapshot, readMcpSnapshot, revokeMcpSnapshot } from "../electron/mcp-snapshot";
+import { createInspectorMcpServer } from "../electron/automation/mcp-server";
+import { publishMcpSnapshot, readMcpSnapshot, revokeMcpSnapshot } from "../electron/automation/mcp-snapshot";
 import { makeNode } from "../benchmarks/fixtures";
 import type { UiSnapshot } from "../shared/types";
 import { isUiSnapshot } from "../shared/snapshot-validation";
@@ -34,6 +34,37 @@ const data = (result: CallToolResult) => {
   assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), result.structuredContent);
   return result.structuredContent!;
 };
+
+test("MCP exposes Helper source and separate semantics without treating hint as text or claiming layer images", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "inspector-helper-mcp-")), path = join(directory, "current.json");
+  const server = createInspectorMcpServer(path), client = new Client({ name: "helper-test", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair(); await server.connect(b); await client.connect(a);
+  const call = async (name: string, args: Record<string, unknown> = {}) => await client.callTool({ name, arguments: args }) as CallToolResult;
+  try {
+    const snapshot = fixture(); snapshot.captureMode = "fast"; snapshot.inspectionSource = "accessibility-helper";
+    const input = snapshot.root!.children[0]; input.text = null;
+    delete input.layerImageDataUrl; delete input.layerImageStatus; delete input.layerImageSize;
+    input.attributes = { hint: "Account name", error: "Account is required", "state-description": "Paused", "inspection-source": "accessibility-helper" };
+    assert.equal(isUiSnapshot(snapshot), true);
+    assert.equal(isUiSnapshot({ ...snapshot, captureMode: "deep" }), false);
+    assert.equal(isUiSnapshot({ ...snapshot, captureMode: undefined }), false);
+    assert.equal(isUiSnapshot({ ...snapshot, captureMode: "unknown" }), false);
+    const { id: snapshotId } = publishMcpSnapshot(path, snapshot, null);
+    assert.equal(data(await call("get_snapshot")).source, "accessibility-helper");
+    const details = data(await call("get_node", { snapshotId, nodeId: input.id }));
+    const semantic = details.node as Record<string, unknown>;
+    assert.equal(semantic.text, null); assert.equal(semantic.hint, "Account name"); assert.equal(semantic.error, "Account is required");
+    assert.equal(semantic.stateDescription, "Paused"); assert.equal((details.attributes as Record<string, string>).hint, "Account name");
+    assert.equal(data(await call("search_nodes", { snapshotId, query: "Account name", by: "text" })).total, 0);
+    assert.equal(data(await call("get_tree", { snapshotId })).source, "accessibility-helper");
+    assert.equal((await call("get_image", { snapshotId, nodeId: input.id })).isError, true);
+    assert.ok(!((await call("get_image", { snapshotId })).isError));
+    const tool = (await client.listTools()).tools.find(tool => tool.name === "capture_ui")!;
+    assert.deepEqual((tool.inputSchema.properties!.backend as { enum: string[] }).enum, ["uiautomator", "accessibility-helper"]);
+    assert.ok(!tool.inputSchema.properties!.helperTokenFile);
+    revokeMcpSnapshot(path); assert.equal((await call("get_node", { snapshotId, nodeId: input.id })).isError, true);
+  } finally { await client.close(); await server.close(); rmSync(directory, { recursive: true, force: true }); }
+});
 
 test("MCP reads only an explicit share: paging, node metrics, images, validation, stale IDs and revocation", async () => {
   const directory = mkdtempSync(join(tmpdir(), "inspector-mcp-"));
@@ -138,7 +169,7 @@ test("MCP packaged stdio entry speaks to an official client without Electron or 
   const directory = mkdtempSync(join(tmpdir(), "inspector-mcp-stdio-"));
   const path = join(directory, "current.json");
   const entry = join(directory, "server.cjs");
-  execFileSync("bun", ["build", resolve("scripts/mcp.ts"), "--outfile", entry, "--target", "node", "--format", "cjs"], { stdio: "pipe" });
+  execFileSync("bun", ["build", resolve("electron/automation/mcp.ts"), "--outfile", entry, "--target", "node", "--format", "cjs"], { stdio: "pipe" });
   const snapshot = fixture();
   snapshot.root!.children[1].layerImageDataUrl = `data:image/svg+xml;base64,${Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>').toString("base64")}`;
   const shared = publishMcpSnapshot(path, snapshot, null);
@@ -148,7 +179,11 @@ test("MCP packaged stdio entry speaks to an official client without Electron or 
   transport.stderr?.on("data", chunk => { stderr += String(chunk); });
   try {
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 13);
+    const tools = (await client.listTools()).tools;
+    assert.equal(tools.length, 16);
+    for (const name of ["define_debug_task", "check_debug_task"]) {
+      assert.ok(tools.some(tool => tool.name === name && tool.annotations?.readOnlyHint === true));
+    }
     const result = await client.callTool({ name: "get_snapshot", arguments: {} }) as CallToolResult;
     assert.equal(data(result).snapshotId, shared.id);
     const svg = await client.callTool({ name: "get_image", arguments: { snapshotId: shared.id, nodeId: "0/1" } }) as CallToolResult;

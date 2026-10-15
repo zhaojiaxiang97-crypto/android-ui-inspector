@@ -4,6 +4,10 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { layerPreviewReadiness } from "./lib/layer-preview-readiness.mjs";
+import { fixtureCaptureLifecycle } from "./lib/fixture-capture-lifecycle.mjs";
+import { desktopDeviceLifecycle } from "./lib/desktop-device-lifecycle.mjs";
+import { descendantPlaneIds, branchChildrenRemoved, visibleNativeBranchIds } from "./lib/layer-branch-check.mjs";
 
 const require = createRequire(import.meta.url);
 const project = fileURLToPath(new URL("../", import.meta.url));
@@ -13,8 +17,11 @@ const requireLiveStyle = process.argv.includes("--require-live-style");
 const expectLandscape = process.argv.includes("--expect-landscape");
 const reducedMotion = process.argv.includes("--reduced-motion");
 const fixture = process.argv.includes("--fixture");
+const fixtureLifecycle = process.argv.includes("--fixture-capture-lifecycle");
+const deviceLifecycle = process.argv.includes("--device-capture-lifecycle");
 const dragOutside = process.argv.includes("--drag-outside");
 const homeOnly = process.argv.includes("--home-only");
+const workbenchOnly = process.argv.includes("--workbench-only");
 const fixtureStateArgument = process.argv.find((value) => value.startsWith("--fixture-state="))?.slice("--fixture-state=".length);
 const fixtureState = fixtureStateArgument ?? "connected";
 const viewportArgument = process.argv.find((value) => value.startsWith("--viewport="))?.slice("--viewport=".length);
@@ -22,20 +29,26 @@ const viewportMatch = viewportArgument?.match(/^(\d+)x(\d+)$/i);
 const requestedViewport = viewportMatch ? { width: Number(viewportMatch[1]), height: Number(viewportMatch[2]) } : null;
 const scaleArgument = process.argv.find((value) => value.startsWith("--scale-factor="))?.slice("--scale-factor=".length);
 const requestedScaleFactor = scaleArgument ? Number(scaleArgument) : null;
-const supportedOptions = ["--packaged", "--require-device", "--require-live-style", "--expect-landscape", "--reduced-motion", "--fixture", "--drag-outside", "--home-only"];
-if (process.argv.slice(2).some((value) => !supportedOptions.includes(value) && !value.startsWith("--viewport=") && !value.startsWith("--scale-factor=") && !value.startsWith("--fixture-state="))) throw new Error("Supported options: --packaged --require-device --require-live-style --expect-landscape --reduced-motion --fixture --drag-outside --home-only --viewport=WxH --scale-factor=N --fixture-state=connected|loading|unauthorized|empty|adb-missing");
+const supportedOptions = ["--packaged", "--require-device", "--require-live-style", "--expect-landscape", "--reduced-motion", "--fixture", "--fixture-capture-lifecycle", "--device-capture-lifecycle", "--drag-outside", "--home-only", "--workbench-only"];
+if (deviceLifecycle && (!requireDevice || fixture || homeOnly || workbenchOnly || requireLiveStyle)) throw new Error("Device lifecycle requires a real authorized device only");
+if (fixtureLifecycle && (!fixture || packaged || requireDevice || homeOnly || workbenchOnly || fixtureState !== "connected")) throw new Error("Capture lifecycle requires only the connected development fixture");
+if (process.argv.slice(2).some((value) => !supportedOptions.includes(value) && !value.startsWith("--viewport=") && !value.startsWith("--scale-factor=") && !value.startsWith("--fixture-state="))) throw new Error("Supported options: --packaged --require-device --require-live-style --expect-landscape --reduced-motion --fixture --drag-outside --home-only --workbench-only --viewport=WxH --scale-factor=N --fixture-state=connected|loading|unauthorized|empty|adb-missing");
 if (!["connected", "loading", "unauthorized", "empty", "adb-missing"].includes(fixtureState)) throw new Error(`Invalid fixture state: ${fixtureState}`);
 if (viewportArgument && (!viewportMatch || requestedViewport.width < 640 || requestedViewport.height < 480)) throw new Error(`Invalid viewport: ${viewportArgument}`);
 if (requestedScaleFactor !== null && (!Number.isFinite(requestedScaleFactor) || requestedScaleFactor < 0.5 || requestedScaleFactor > 3)) throw new Error(`Invalid scale factor: ${scaleArgument}`);
 if (fixture && packaged) throw new Error("The visual fixture is available in development mode only");
 if (requireLiveStyle && (!requireDevice || fixture)) throw new Error("--require-live-style requires a real authorized device");
 if (homeOnly && !fixture) throw new Error("--home-only requires --fixture so the home screen has deterministic device data");
+if (workbenchOnly && (!requireDevice || fixture)) throw new Error("--workbench-only requires a real authorized device");
 require("./prepare-windows-runtime.cjs").prepareWindowsRuntime(packaged ? "Unpacked" : "Development");
 const output = join(project, ".benchmarks", "app-smoke", new Date().toISOString().replace(/[:.]/g, "-"));
 mkdirSync(output, { recursive: true });
-const executable = packaged ? join(project, "release/win-unpacked/Android UI Inspector.exe") : require("electron");
+const executable = packaged ? process.env.INSPECTOR_PACKAGED_EXECUTABLE || (process.platform === "darwin"
+  ? join(project, `release/${process.arch === "arm64" ? "mac-arm64" : "mac"}/Android UI Inspector.app/Contents/MacOS/Android UI Inspector`)
+  : join(project, "release/win-unpacked/Android UI Inspector.exe")) : require("electron");
 const args = [
   ...(fixture ? ["--visual-fixture", `--visual-fixture-state=${fixtureState}`] : []),
+  ...(fixtureLifecycle ? ["--visual-capture-lifecycle"] : []),
   ...(requestedScaleFactor === null ? [] : [`--force-device-scale-factor=${requestedScaleFactor}`]),
   ...(requestedViewport ? [`--window-size=${requestedViewport.width + 16}x${requestedViewport.height + 65}`] : []),
   ...(packaged ? [] : [project]),
@@ -115,7 +128,7 @@ async function connect(url) {
 }
 
 let connection;
-const report = { generatedAt: new Date().toISOString(), packaged, fixture, fixtureState: fixture ? fixtureState : null, homeOnly, reducedMotion, dragOutside, requestedViewport, requestedScaleFactor, success: false, checks: [] };
+const report = { generatedAt: new Date().toISOString(), packaged, fixture, fixtureState: fixture ? fixtureState : null, homeOnly, workbenchOnly, reducedMotion, dragOutside, requestedViewport, requestedScaleFactor, success: false, checks: [] };
 const recordCheck = (label) => { report.checks.push(label); console.log(`PASS: ${label}`); };
 try {
   await until(() => endpoint, "debugger startup");
@@ -168,19 +181,34 @@ try {
     await delay(120);
     recordCheck("initial loading state");
   } else {
-    await until(() => evaluate("!document.querySelector('.refresh-button').disabled"), "initial device probe");
-    await evaluate("document.querySelector('.refresh-button').click()");
-    await until(() => evaluate("!document.querySelector('.refresh-button').disabled"), "device refresh");
+    const refreshSelector = ".refresh-button, .home-secondary-actions > button:not([aria-haspopup]), .home-primary-action:not(.capture-button)";
+    await until(() => evaluate(`document.querySelector(${JSON.stringify(refreshSelector)})?.disabled === false`), "initial device probe");
+    await evaluate(`document.querySelector(${JSON.stringify(refreshSelector)}).click()`);
+    await until(() => evaluate(`document.querySelector(${JSON.stringify(refreshSelector)})?.disabled === false`), "device refresh");
     recordCheck("device refresh button");
   }
-  const captureButtonCount = await evaluate("document.querySelectorAll('.topbar .capture-button').length");
-  assert.equal(captureButtonCount, 1, "Expected exactly one screenshot capture button in the top toolbar");
+  const captureButtonCount = await evaluate("document.querySelectorAll('.capture-button').length");
+  const connectedHome = await evaluate("document.querySelector('.home-view')?.dataset.state === 'connected'");
+  assert.equal(captureButtonCount, connectedHome ? 1 : 0, "Home must expose one capture entry only for an authorized device");
+  assert.equal(await evaluate("document.querySelectorAll('.topbar .capture-button').length"), 0, "Home header duplicates the primary capture action");
   assert.equal(await evaluate("document.querySelectorAll('.inspect-button').length"), 0, "Legacy inline inspect button must not return");
-  recordCheck("single toolbar capture entry");
-  const deviceCount = await evaluate("document.querySelectorAll('.device-select option[data-device-state=\\\"device\\\"]').length");
+  recordCheck("single authorized home capture entry");
+  let deviceCount = 0;
+  if (await evaluate("Boolean(document.querySelector('.home-secondary-actions button[aria-haspopup=dialog]:not([disabled])'))")) {
+    await evaluate("document.querySelector('.home-secondary-actions button[aria-haspopup=dialog]').click()");
+    await until(() => evaluate("Boolean(document.querySelector('.home-device-switcher[open]'))"), "device chooser");
+    deviceCount = await evaluate("Array.from(document.querySelectorAll('.home-device-option')).filter(button => button.querySelector('.home-device-option-dot.device') && !button.disabled).length");
+    await evaluate(homeOnly || deviceCount === 0 ? "document.querySelector('.home-device-switcher-close').click()"
+      : "Array.from(document.querySelectorAll('.home-device-option')).find(button => button.querySelector('.home-device-option-dot.device') && !button.disabled).click()");
+    await until(() => evaluate("!document.querySelector('.home-device-switcher')"), "close device chooser");
+  }
   report.readyDevices = deviceCount;
   if (requireDevice) assert.ok(deviceCount > 0, "Expected a connected and authorized Android device");
-  if (homeOnly) {
+  if (deviceLifecycle) {
+    await desktopDeviceLifecycle({ evaluate, until, connection, output, report, recordCheck });
+  } else if (fixtureLifecycle) {
+    await fixtureCaptureLifecycle({ evaluate, until, connection, output, report, recordCheck });
+  } else if (homeOnly) {
     const homeState = await evaluate(`(() => {
       const box = (selector) => {
         const element = document.querySelector(selector);
@@ -204,7 +232,7 @@ try {
         topbar: box('.topbar'),
         view: box('.home-view'),
         state: box('.home-center-state'),
-        art: box('.home-device-art'),
+        art: box('.home-target-preview, .home-empty-symbol'),
         heading: box('.home-center-state h2'),
         platform: box('.home-device-platform'),
         primaryAction: box('.home-primary-action'),
@@ -213,72 +241,68 @@ try {
         headingText: document.querySelector('.home-center-state h2')?.textContent?.trim() || '',
         platformText: document.querySelector('.home-device-platform')?.textContent?.trim() || '',
         primaryText: document.querySelector('.home-primary-action')?.textContent?.trim() || '',
-        secondaryText: document.querySelector('.home-secondary-action')?.textContent?.trim() || '',
-        help: box('.toolbar-help-button'),
+        secondaryText: Array.from(document.querySelectorAll('.home-secondary-action')).map(button => button.textContent?.trim()).join(', '),
+        help: box('.home-connection-help > summary'),
         body: box('body'),
         oldHero: Boolean(document.querySelector('.hero-section')),
         oldMetrics: Boolean(document.querySelector('.metrics-grid')),
         oldStatus: Boolean(document.querySelector('.status-banner')),
         oldContentGrid: Boolean(document.querySelector('.content-grid')),
-        captureButtons: document.querySelectorAll('.topbar .capture-button').length,
-        captureVisible: Boolean(document.querySelector('.topbar .capture-button')?.getClientRects().length),
+        captureButtons: document.querySelectorAll('.capture-button').length,
+        captureVisible: Boolean(document.querySelector('.home-primary-action.capture-button')?.getClientRects().length),
         overflowX: document.documentElement.scrollWidth - innerWidth,
       };
     })()`);
     assert.ok(homeState.view?.width > 0 && homeState.state?.width > 0, "Reference home state is not visible");
-    assert.ok(homeState.art?.width > 0 && homeState.primaryAction?.width > 0, "Home device art or primary action is missing");
+    assert.ok(homeState.art?.width > 0 && homeState.primaryAction?.width > 0, "Home device preview or primary action is missing");
     assert.ok(homeState.help?.width > 0, "Home help affordance is missing");
-    assert.ok(Number.parseFloat(homeState.heading?.fontSize ?? "0") >= 28, "Home heading is still too small");
+    assert.ok(Number.parseFloat(homeState.heading?.fontSize ?? "0") >= 18, "Home device heading is unreadable");
     const expectedHomeState = fixtureState === "empty" ? "no-device" : fixtureState;
     assert.ok(homeState.stateClass.includes(`state-${expectedHomeState}`), `Home state class does not expose ${expectedHomeState}`);
     if (fixtureState === "connected") {
-      assert.ok(Number.parseFloat(homeState.platform?.fontSize ?? "0") >= 16, "Home supporting typography is still too small");
+      assert.ok(Number.parseFloat(homeState.platform?.fontSize ?? "0") >= 12, "Home device version is unreadable");
       assert.equal(homeState.platformText, "Android 15", "Connected home did not expose the Android version");
       assert.ok(homeState.secondaryAction?.width > 0, "Connected home switch-device action is missing");
-      assert.equal(homeState.secondaryText, "切换设备");
-      await evaluate("document.querySelector('.home-secondary-action').click()");
+      assert.equal(homeState.secondaryText, "刷新设备, 切换设备");
+      await evaluate("document.querySelector('.home-secondary-actions button[aria-haspopup=dialog]').click()");
       await until(() => evaluate("Boolean(document.querySelector('.home-device-switcher'))"), "home device switcher");
       assert.ok((await evaluate("document.querySelectorAll('.home-device-option').length")) >= 1, "Home device switcher has no device option");
       await evaluate("document.querySelector('.home-device-switcher-close').click()");
       await until(() => evaluate("!document.querySelector('.home-device-switcher')"), "close home device switcher");
     } else {
       assert.equal(homeState.platform, null, "Empty home state should not render a stale Android version");
-      assert.equal(homeState.secondaryAction, null, "Empty home state should expose one primary recovery action");
-      assert.equal(homeState.primaryText, fixtureState === "loading" ? "检查中…" : "刷新设备");
+      assert.equal(homeState.secondaryText, fixtureState === "unauthorized" ? "切换设备" : "", "Unavailable home state exposed an incorrect secondary action");
+      assert.equal(homeState.primaryText, fixtureState === "loading" ? "正在检查…" : "刷新设备");
+      assert.equal(await evaluate("document.querySelector('.home-primary-action').disabled"), fixtureState === "loading", "Home recovery action has an incorrect busy state");
     }
     assert.ok((homeState.topbar?.height ?? 0) <= 100, "Home toolbar wrapped into an oversized header");
     assert.equal(homeState.oldHero, false, "Legacy hero block remains in the home DOM");
     assert.equal(homeState.oldMetrics, false, "Legacy metrics grid remains in the home DOM");
     assert.equal(homeState.oldStatus, false, "Legacy status banner remains in the home DOM");
     assert.equal(homeState.oldContentGrid, false, "Legacy content grid remains in the home DOM");
-    assert.equal(homeState.captureButtons, 1, "Home screen capture hook should remain unique");
-    assert.equal(homeState.captureVisible, false, "Home screen should keep the inspection capture control out of the visual toolbar");
+    assert.equal(homeState.captureButtons, fixtureState === "connected" ? 1 : 0, "Home capture entry must be unique and require an authorized device");
+    assert.equal(homeState.captureVisible, fixtureState === "connected", "Home capture action does not match the actual device state");
     assert.ok(homeState.overflowX <= 1, "Reference home state introduces horizontal overflow");
-    await evaluate("document.querySelector('.toolbar-help-button').click()");
-    const helpText = await evaluate("document.querySelector('.toolbar-help-popover')?.textContent?.trim() || ''");
-    assert.match(helpText, /快速开始/, "Home help popover did not open");
-    await evaluate("document.querySelector('.toolbar-help-button').click()");
-    assert.equal(await evaluate("Boolean(document.querySelector('.toolbar-help-popover'))"), false, "Home help popover did not close");
+    await evaluate("document.querySelector('.home-connection-help > summary').click()");
+    const helpText = await evaluate("document.querySelector('.home-connection-help > div')?.textContent?.trim() || ''");
+    assert.match(helpText, /USB 调试/, "Home help did not show current connection guidance");
+    assert.equal(await evaluate("document.querySelector('.home-connection-help').open"), true, "Home connection help did not open");
+    await evaluate("document.querySelector('.home-connection-help > summary').click()");
+    assert.equal(await evaluate("document.querySelector('.home-connection-help').open"), false, "Home connection help did not close");
     report.homeLayout = homeState;
     const homeScreenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
     writeFileSync(join(output, "home.png"), Buffer.from(homeScreenshot.data, "base64"));
     recordCheck("reference home state keeps one readable device action and no visual toolbar clutter");
     recordCheck("home help affordance opens and closes a readable popover");
   } else if (deviceCount > 0) {
-    await evaluate(`(() => {
-      const select = document.querySelector('.device-select');
-      const option = select?.querySelector('option[data-device-state="device"]');
-      if (!select || !option) return false;
-      select.value = option.value;
-      select.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    })()`);
     await until(() => evaluate("Boolean(document.querySelector('.capture-button:not([disabled])'))"), "device selection");
     await evaluate(`(() => {
       const events = [];
       const startedAt = performance.now();
       window.__appSmokeCaptureEvents = events;
       window.__appSmokeCaptureStartedAt = startedAt;
+      window.__appSmokeLayerReadiness = ${layerPreviewReadiness.toString()};
+      window.__appSmokeDescendants = ${descendantPlaneIds.toString()};
       window.electronApi.onInspectionProgress((progress) => events.push({ kind: "progress", atMs: Math.round(performance.now() - startedAt), stage: progress.stage, elapsedMs: progress.elapsedMs }));
       window.electronApi.onInspectionPreview((preview) => {
         if (preview.phase === "tree") {
@@ -286,6 +310,7 @@ try {
           return;
         }
         const imageCount = preview.updates.filter((update) => Boolean(update.layerImageDataUrl)).length;
+        const imageIds = preview.updates.filter((update) => Boolean(update.layerImageDataUrl)).map(update => update.id);
         const layerEvent = { kind: "layers", atMs: Math.round(performance.now() - startedAt), updateCount: preview.updates.length, imageCount };
         events.push(layerEvent);
         if (imageCount && !window.__appSmokeFirstGpuProbeStarted) {
@@ -293,7 +318,8 @@ try {
           const showAndFlushFirstBatch = () => {
             const modeButton = document.querySelector('.view-mode-toggle button:nth-child(2)');
             if (modeButton?.disabled) {
-              if (performance.now() - startedAt < 15_000) setTimeout(showAndFlushFirstBatch, 25);
+              if (performance.now() - layerEvent.atMs < 15_000) setTimeout(showAndFlushFirstBatch, 25);
+              else layerEvent.webglFailure = '3D mode remained unavailable for 15 seconds';
               return;
             }
             if (!modeButton?.classList.contains('active')) modeButton?.click();
@@ -302,12 +328,17 @@ try {
               const gl = canvas?.getContext('webgl');
               const textureCount = Number(canvas?.dataset.layerTextureCount || 0);
               const renderVersion = Number(canvas?.dataset.layerRenderVersion || 0);
-              if (canvas && gl && textureCount >= imageCount && renderVersion > 0) {
+              const expected = Array.from(document.querySelectorAll('.layer-plane[data-layer-texture-identity]')).map(plane => ({ id: plane.dataset.layerNodeId, key: plane.dataset.layerTextureIdentity }));
+              const committed = JSON.parse(canvas?.dataset.layerCommittedNativeTextures || '[]');
+              const readiness = window.__appSmokeLayerReadiness(imageIds, expected, committed);
+              layerEvent.readiness = readiness;
+              if (canvas && gl && !gl.isContextLost() && readiness.ready && renderVersion > 0) {
                 gl.finish();
                 layerEvent.webglFlushAtMs = Math.round(performance.now() - startedAt);
                 layerEvent.webglRenderVersion = renderVersion;
                 layerEvent.webglTextureCount = textureCount;
               } else if (performance.now() - layerEvent.atMs < 15_000) setTimeout(waitForTextures, 25);
+              else layerEvent.webglFailure = 'No matching first-batch scene submission within 15 seconds';
             });
             waitForTextures();
           };
@@ -321,6 +352,7 @@ try {
     await until(() => evaluate("Boolean(document.querySelector('.capture-button:not([disabled])') || document.querySelector('.error-placeholder'))"), "complete inspection after early tree preview", 90_000);
     const error = await evaluate("document.querySelector('.error-placeholder p')?.textContent");
     assert.ok(!error, error);
+    await until(() => evaluate("(window.__appSmokeCaptureEvents || []).some(event => event.kind === 'layers' && (event.webglFlushAtMs != null || event.webglFailure)) || !(window.__appSmokeCaptureEvents || []).some(event => event.kind === 'layers' && event.imageCount > 0)"), "first batch GPU diagnostic", 16_000);
     const captureEvents = await evaluate("window.__appSmokeCaptureEvents || []");
     const firstTreePreview = captureEvents.find((event) => event.kind === "tree");
     const firstLayerImage = captureEvents.find((event) => event.kind === "layers" && event.imageCount > 0);
@@ -331,16 +363,26 @@ try {
       firstLayerImageToWebglFlushMs: firstLayerImage?.webglFlushAtMs == null ? null : firstLayerImage.webglFlushAtMs - firstLayerImage.atMs,
       firstLayerWebglRenderVersion: firstLayerImage?.webglRenderVersion ?? null,
       firstLayerWebglTextureCount: firstLayerImage?.webglTextureCount ?? null,
+      firstLayerReadiness: firstLayerImage?.readiness ?? null,
+      firstLayerWebglFailure: firstLayerImage?.webglFailure ?? null,
       completionMs: await evaluate("Math.round(performance.now() - window.__appSmokeCaptureStartedAt)"),
       previewBatches: captureEvents.filter((event) => event.kind === "layers").length,
       previewImages: captureEvents.filter((event) => event.kind === "layers").reduce((total, event) => total + event.imageCount, 0),
       stages: captureEvents.filter((event) => event.kind === "progress").map(({ stage, elapsedMs }) => ({ stage, elapsedMs })),
     };
     console.log(`Capture timing: ${JSON.stringify(report.captureTiming)}`);
+    if (workbenchOnly && firstLayerImage) assert.ok(firstLayerImage.webglFlushAtMs != null, firstLayerImage.webglFailure || "First image batch has no eligible submitted scene evidence");
     const initialId = await evaluate("document.querySelector('.node-id')?.textContent");
     const rowCount = await evaluate("document.querySelectorAll('.tree-row').length");
     report.inspectionSummary = await evaluate("document.querySelector('.snapshot-summary').textContent");
     assert.match(report.inspectionSummary, /完整 hierarchy|QML Debug|View Debug|SDK 树/, "Inspection did not use a full UI hierarchy mode");
+    if (workbenchOnly || fixture) {
+      await evaluate("document.querySelector('.workbench-scene-tools > .snapshot-drawer').open = true");
+      await evaluate("Array.from(document.querySelectorAll('.workbench-scene-tools > .snapshot-drawer .snapshot-actions button')).find(button => button.textContent === '保存快照').click()");
+      await until(() => evaluate("document.querySelectorAll('.workbench-scene-tools > .snapshot-drawer .snapshot-history-item').length === 1"), "save capture before interaction assertions");
+      report.captureSavedBeforeInteractions = true;
+      await evaluate("document.querySelector('.workbench-scene-tools > .snapshot-drawer').open = false");
+    }
     const hierarchyNote = await evaluate("document.querySelector('.hierarchy-note')?.textContent || ''");
     if (hierarchyNote) assert.match(hierarchyNote, /VirtualChild/, "Virtual accessibility note is incomplete");
     if (rowCount > 1) {
@@ -492,12 +534,14 @@ try {
         return {
           viewport: { width: window.innerWidth, height: window.innerHeight },
           topbar: box('.topbar'),
+          header: box('.inspection-header'),
+          deviceTools: box('.workbench-device-tools'),
           context: box('.inspector-heading'),
           hierarchy: box('.tree-pane'),
           preview: box('.preview-pane'),
           toolbar: box('.screenshot-view-toolbar'),
           toolbarHost: box('.scene-toolbar-host'),
-          snapshot: box('.snapshot-drawer'),
+          snapshot: box('.workbench-scene-tools > .snapshot-drawer'),
           frame: box('.screenshot-frame'),
           details: box('.floating-inspector'),
           properties: box('.inspector-geometry'),
@@ -515,10 +559,13 @@ try {
       assert.ok(workspaceLayout.details.left >= workspaceLayout.frame.left && workspaceLayout.details.bottom <= workspaceLayout.frame.bottom, "Floating inspector is outside the canvas");
       assert.ok(workspaceLayout.grid?.width > 0 && workspaceLayout.gizmo?.width > 0, "3D viewport decorations are missing");
       assert.ok(workspaceLayout.windowStack?.width > 0, "3D low-frequency options are missing from the overflow menu");
-      assert.ok(workspaceLayout.toolbarHost?.height >= 48, "Canvas toolbar has no reserved row");
-      assert.ok(Math.abs(workspaceLayout.toolbarHost.left - workspaceLayout.preview.left) < 1 && Math.abs(workspaceLayout.toolbarHost.width - workspaceLayout.preview.width) < 1, "Canvas toolbar is not aligned to its pane");
-      assert.ok(workspaceLayout.toolbarHost.bottom <= workspaceLayout.frame.top + 1 && workspaceLayout.details.top >= workspaceLayout.frame.top, "Toolbar or inspector covers the wrong region");
-      if (runtime.nativeMenu) assert.equal(workspaceLayout.topbar?.height, 0, "Native actions still reserve a window toolbar");
+      assert.ok(workspaceLayout.header?.height >= 56 && workspaceLayout.toolbarHost?.height >= 32, "Workbench toolbar has no reserved header space");
+      assert.ok(workspaceLayout.toolbarHost.left >= workspaceLayout.deviceTools.right
+        && workspaceLayout.toolbarHost.right <= workspaceLayout.header.right
+        && workspaceLayout.toolbarHost.top >= workspaceLayout.header.top
+        && workspaceLayout.toolbarHost.bottom <= workspaceLayout.header.bottom, "Canvas toolbar overlaps device controls or leaves the header");
+      assert.ok(workspaceLayout.header.bottom <= workspaceLayout.frame.top + 1 && workspaceLayout.details.top >= workspaceLayout.frame.top, "Toolbar or inspector covers the wrong region");
+      if (runtime.nativeMenu) assert.equal(workspaceLayout.topbar, null, "Home toolbar remains in the active workbench");
       if (workspaceLayout.viewport.width >= 1100) assert.ok(workspaceLayout.toolbar?.height <= 80, "Wide inspector toolbar wrapped unexpectedly");
       assert.ok(workspaceLayout.documentOverflowX <= 1, "Inspector layout introduces horizontal document overflow");
       const pivotLayout = await evaluate(`(() => {
@@ -546,29 +593,34 @@ try {
       recordCheck("tree selection opens 3D layer scene and highlights selected plane");
       recordCheck("dark reference workspace keeps canvas, properties and 3D viewport decorations visible");
       await evaluate("document.querySelector('.layer-settings').open = false");
+      await evaluate("document.querySelector('.inspector-detach').click()");
+      await until(() => evaluate("!document.querySelector('.floating-inspector').classList.contains('is-docked')"), "detach property panel before drag");
       await delay(250);
       const detailsDrag = await evaluate(`(() => {
         const handle = document.querySelector('.inspector-drag-handle');
         const details = document.querySelector('.floating-inspector');
         if (!handle || !details) return null;
         const rect = handle.getBoundingClientRect();
+        const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
         return {
           left: details.getBoundingClientRect().left,
           top: details.getBoundingClientRect().top,
           frameHeight: document.querySelector('.screenshot-frame').getBoundingClientRect().height,
-          x: rect.left + rect.width / 2,
-          y: rect.top + rect.height / 2,
+          x, y,
+          exposed: handle.contains(document.elementFromPoint(x, y)),
         };
       })()`);
       assert.ok(detailsDrag, "Floating inspector drag handle is missing");
+      assert.equal(detailsDrag.exposed, true, "Floating inspector drag handle is covered by another control");
+      await connection.send("Page.bringToFront");
+      await until(() => evaluate("document.hasFocus()"), "focus property panel drag");
       await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: detailsDrag.x, y: detailsDrag.y, button: "none", buttons: 0 });
       await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x: detailsDrag.x, y: detailsDrag.y, button: "left", buttons: 1, modifiers: 0, clickCount: 1 });
-      await delay(80);
+      await until(() => evaluate("document.querySelector('.floating-inspector').classList.contains('is-dragging')"), "property panel pointer capture");
       await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: detailsDrag.x - 100, y: detailsDrag.y + 60, button: "left", buttons: 1, modifiers: 0 });
-      await delay(80);
+      await until(() => evaluate(`document.querySelector('.floating-inspector').getBoundingClientRect().left < ${detailsDrag.left - 80}`), "property panel drag");
       await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: detailsDrag.x - 100, y: detailsDrag.y + 60, button: "left", buttons: 0, modifiers: 0, clickCount: 1 });
       report.inspectorDrag = await evaluate(`({ before: ${JSON.stringify(detailsDrag)}, after: document.querySelector('.floating-inspector').getBoundingClientRect().toJSON(), focused: document.hasFocus() })`);
-      await until(() => evaluate(`document.querySelector('.floating-inspector').getBoundingClientRect().left < ${detailsDrag.left - 80}`), "property panel drag");
       await evaluate("document.querySelector('.inspector-collapse').click()");
       await until(() => evaluate("document.querySelector('.floating-inspector').getBoundingClientRect().height <= 48"), "property panel collapse");
       await evaluate("document.querySelector('.inspector-collapse').click()");
@@ -616,7 +668,8 @@ try {
       report.boxModel = { ...boxModel, screenshot: "box-model.png" };
       await evaluate("document.querySelector('.inspector-padding').open = false; document.querySelector('.inspector-body').scrollTop = 0");
       recordCheck("compact box model remains readable inside the floating inspector");
-      const hoverPoints = await evaluate(`(() => {
+      await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+      const hoverPoints = () => evaluate(`(() => {
         const rect = document.querySelector('.layer-webgl-canvas')?.getBoundingClientRect();
         if (!rect) return [];
         const canvas = document.querySelector('.layer-webgl-canvas');
@@ -626,7 +679,7 @@ try {
         return [...probe, ...[0.2, 0.5, 0.8].flatMap((x) => [0.2, 0.5, 0.8].map((y) => ({ x: rect.left + rect.width * x, y: rect.top + rect.height * y })))]
       })()`);
       let hoverResult = null;
-      for (const point of hoverPoints) {
+      for (const point of await hoverPoints()) {
         // Keep this hit-test assertion in browser CSS pixels at every forced DPR.
         await evaluate(`document.querySelector('.layer-webgl-canvas')?.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: ${point.x}, clientY: ${point.y}, pointerId: 1, pointerType: 'mouse', isPrimary: true }))`);
         await delay(80);
@@ -647,50 +700,139 @@ try {
       }
       if (fixture) {
         await evaluate("document.querySelector('.inspector-close').click()");
+        await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+        await connection.send("Page.bringToFront");
+        await until(() => evaluate("document.hasFocus()"), "measurement window focus");
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 100, y: 40, button: "none", buttons: 0 });
         const anchorId = await evaluate("document.querySelector('.tree-row.selected').dataset.treeId");
-        let measurement = null;
-        for (const point of hoverPoints) {
+        const measurementKey = async (key, code, windowsVirtualKeyCode) => {
+          await connection.send("Input.dispatchKeyEvent", { type: "keyDown", key, code, windowsVirtualKeyCode });
+          await connection.send("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode });
+        };
+        const readMeasurement = () => evaluate(`(() => {
+          const overlay = document.querySelector('.layer-measurement');
+          if (!overlay) return null;
+          const label = document.querySelector('.layer-hover-label');
+          return { anchor: overlay.dataset.measureAnchor, target: overlay.dataset.measureTarget, relation: overlay.dataset.measureRelation, text: overlay.textContent,
+            pinned: overlay.dataset.measurePinned, path: overlay.querySelector('path')?.getAttribute('d'),
+            values: document.querySelector('.measurement-card-values, .measurement-card-zero')?.textContent,
+            hoverId: label?.dataset.nodeId, hoverText: label?.textContent, cursor: getComputedStyle(document.querySelector('.layer-webgl-canvas')).cursor };
+        })()`);
+        let candidate = null;
+        for (const point of await hoverPoints()) {
           // Floating canvas tools/inspector can cover a geometrically valid
           // plane. A real click must hit an exposed part of the canvas.
-          if (!await evaluate(`Boolean(document.elementFromPoint(${point.x}, ${point.y})?.closest('.screenshot-frame'))`)) continue;
+          if (!await evaluate(`document.elementFromPoint(${point.x}, ${point.y}) === document.querySelector('.layer-webgl-canvas')`)) continue;
           await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "none", buttons: 0 });
           await delay(80);
+          assert.equal(await evaluate("Boolean(document.querySelector('.layer-measurement, .layer-measurement-status, .measurement-card, .screenshot-pinned-measurement'))"), false, "Ordinary hover showed measurement guides or values before explicit pinning");
           const result = await evaluate(`(() => {
-            const overlay = document.querySelector('.layer-measurement');
-            if (!overlay) return null;
             const label = document.querySelector('.layer-hover-label');
-            return { anchor: overlay.dataset.measureAnchor, target: overlay.dataset.measureTarget, relation: overlay.dataset.measureRelation, text: overlay.textContent, hoverId: label?.dataset.nodeId, hoverText: label?.textContent, cursor: getComputedStyle(document.querySelector('.layer-webgl-canvas')).cursor };
+            const pin = document.querySelector('.pin-layer-measurement');
+            return label?.dataset.nodeId && label.dataset.nodeId !== ${JSON.stringify(anchorId)} && pin && !pin.disabled && pin.getAttribute('aria-pressed') === 'false'
+              ? { hoverId: label.dataset.nodeId, hoverText: label.textContent } : null;
           })()`);
-          if (result) { measurement = { ...result, point }; break; }
+          if (result) { candidate = { ...result, point }; break; }
         }
-        assert.ok(measurement, "Real pointer hover did not show measurements");
+        assert.ok(candidate, "Real pointer hover did not offer a measurable target");
+        await evaluate("document.querySelector('.screenshot-frame').focus({ preventScroll: true })");
+        await measurementKey("m", "KeyM", 77);
+        const measurement = { ...await until(async () => {
+          const state = await readMeasurement();
+          return state?.pinned === "true" && state.values ? state : null;
+        }, "explicit M pins measurement guides and values"), point: candidate.point };
         assert.equal(measurement.anchor, anchorId, "Hover replaced the selected anchor");
+        assert.equal(measurement.target, candidate.hoverId, "Pinning measured a different target than the real pointer hover");
         assert.equal(measurement.hoverId, measurement.target, "Hover label names a different node than the hit test");
         assert.ok(measurement.hoverText.includes("指向"), "Hover label does not distinguish the candidate from the selection");
         assert.equal(measurement.cursor, "crosshair", "Idle canvas shows a drag hand instead of a precise cursor");
+        assert.match(measurement.text, /\d+(?:\.\d+)?\s*px/, "Pinned guides have no source pixel distances");
+        assert.match(measurement.values, /\d+(?:\.\d+)?\s*px/, "Pinned measurement card has no source pixel distances");
         assert.equal(await evaluate("document.querySelector('.tree-row.selected').dataset.treeId"), anchorId, "Measurement changed the selected tree node");
         const screenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
         writeFileSync(join(output, "layers3d-measurement.png"), Buffer.from(screenshot.data, "base64"));
         const { x, y } = measurement.point;
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 100, y: 40, button: "none", buttons: 0 });
+        const fixedOnLeave = await readMeasurement();
+        assert.ok(fixedOnLeave, "Leaving the canvas discarded the explicitly pinned measurement");
+        assert.equal(fixedOnLeave.pinned, "true", "Leaving the canvas unpinned the measurement");
+        assert.equal(fixedOnLeave.anchor, measurement.anchor, "Leaving the canvas changed the fixed anchor");
+        assert.equal(fixedOnLeave.target, measurement.target, "Leaving the canvas changed the fixed target");
+        assert.equal(fixedOnLeave.text, measurement.text, "Leaving the canvas changed source pixel distances");
+        assert.equal(fixedOnLeave.values, measurement.values, "Leaving the canvas changed measurement card values");
+        await connection.send("Page.bringToFront");
+        await until(() => evaluate("document.hasFocus()"), "pinned measurement rotation focus");
+        await evaluate("document.querySelector('.screenshot-frame').focus({ preventScroll: true })");
+        const pinnedRenderBefore = await evaluate("Number(document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderVersion || 0)");
+        await measurementKey("ArrowRight", "ArrowRight", 39);
+        const fixedAfterRotation = await until(async () => {
+          const state = await readMeasurement();
+          return state?.path && state.path !== fixedOnLeave.path ? state : null;
+        }, "pinned measurement guides follow camera rotation");
+        assert.equal(fixedAfterRotation.pinned, "true", "Rotation released the fixed measurement");
+        assert.equal(fixedAfterRotation.anchor, measurement.anchor, "Rotation changed the fixed anchor");
+        assert.equal(fixedAfterRotation.target, measurement.target, "Rotation changed the fixed target");
+        assert.equal(fixedAfterRotation.text, measurement.text, "Rotation changed source pixel distances");
+        assert.equal(fixedAfterRotation.values, measurement.values, "Rotation changed measurement card values");
+        assert.ok(await evaluate("Number(document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderVersion || 0)") > pinnedRenderBefore, "Pinned camera rotation did not redraw the WebGL scene");
+        assert.equal(await evaluate("document.querySelector('.tree-row.selected').dataset.treeId"), anchorId, "Pinned rotation changed the selected anchor");
+        await measurementKey("ArrowLeft", "ArrowLeft", 37);
+        await measurementKey("m", "KeyM", 77);
+        await until(() => evaluate("!document.querySelector('.layer-measurement, .layer-measurement-status, .measurement-card, .screenshot-pinned-measurement') && document.querySelector('.pin-layer-measurement')?.getAttribute('aria-pressed') === 'false' && Boolean(document.querySelector('.layer-webgl-canvas'))"), "M clears fixed guides and values while retaining 3D");
         report.measurementClick = measurement;
+        // A repeated CDP move at the same position may not dispatch pointermove
+        // after screenshot capture cleared native hover. Re-enter explicitly.
+        report.measurementClick.focusBefore = await evaluate(`({ focused: document.hasFocus(), hovered: document.querySelector('.layer-scene')?.dataset.layerHoveredId, hit: document.elementFromPoint(${x}, ${y})?.className })`);
+        await connection.send("Page.bringToFront");
+        await until(() => evaluate("document.hasFocus()"), "measurement click window focus");
+        report.measurementClick.focusAfter = await evaluate(`({ focused: document.hasFocus(), hovered: document.querySelector('.layer-scene')?.dataset.layerHoveredId, hit: document.elementFromPoint(${x}, ${y})?.className })`);
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 100, y: 40, button: "none", buttons: 0 });
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 });
+        await until(async () => {
+          const state = await evaluate(`({ focused: document.hasFocus(), hovered: document.querySelector('.layer-scene')?.dataset.layerHoveredId, hit: document.elementFromPoint(${x}, ${y})?.className, exposed: document.elementFromPoint(${x}, ${y}) === document.querySelector('.layer-webgl-canvas'), canvas: document.querySelector('.layer-webgl-canvas').getBoundingClientRect().toJSON() })`);
+          report.measurementClick.beforeClick = state;
+          return state.hovered === measurement.target && state.exposed;
+        }, "measurement target remains exposed before click");
         await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
         await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: 1 });
         await until(() => evaluate(`document.querySelector('.tree-row.selected').dataset.treeId === ${JSON.stringify(measurement.target)} && !document.querySelector('.layer-measurement')`), "click measurement target becomes anchor");
-        await until(() => evaluate(`document.querySelector('.layer-hover-label.is-selected')?.dataset.nodeId === ${JSON.stringify(measurement.target)}`), "clicked target selected feedback");
+        // Selecting changes the orbit pivot: the stationary pointer may no
+        // longer intersect this plane. Check selection, not an obsolete hover.
+        await until(() => evaluate(`Array.from(document.querySelectorAll('.layer-plane')).some(plane => plane.dataset.layerNodeId === ${JSON.stringify(measurement.target)} && plane.dataset.layerSelected === 'true')`), "clicked target selected plane");
         await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 100, y: 40, button: "none", buttons: 0 });
-        assert.equal(await evaluate("Boolean(document.querySelector('.layer-measurement'))"), false, "Leaving the canvas retained measurement labels");
+        assert.equal(await evaluate("Boolean(document.querySelector('.layer-measurement, .layer-measurement-status, .measurement-card, .screenshot-pinned-measurement'))"), false, "Leaving the canvas retained measurement guides or values after unpinning");
         await evaluate("document.querySelector('.inspector-toggle').click()");
         report.layerMeasurement = { ...measurement, screenshot: "layers3d-measurement.png" };
-        recordCheck("real pointer measures without changing selection, click target replaces anchor, leave clears guides");
+        recordCheck("real pointer hover offers measurement without guides or values; explicit M fixes the pair through leave/rotation, M clears it, click target replaces anchor and leave stays clear");
+      }
+      if (workbenchOnly) {
+        const planes = await evaluate(`Array.from(document.querySelectorAll('.layer-plane')).map(plane => ({ id: plane.dataset.layerNodeId, mode: plane.dataset.layerTextureMode }))`);
+        const candidates = visibleNativeBranchIds(planes);
+        report.businessBranchCandidates = candidates;
+        assert.ok(candidates.length, "Scene has no small branch with independent child images");
+        await evaluate("document.querySelector('.tree-scroll').scrollTop = 0");
+        await until(async () => {
+          await delay(80); // React must mount the next virtualized row window.
+          return evaluate(`(() => {
+            const candidates = ${JSON.stringify(candidates)};
+            if (Array.from(document.querySelectorAll('.tree-row')).some(row => candidates.includes(row.dataset.treeId) && row.getAttribute('aria-expanded') === 'true')) return true;
+            const tree = document.querySelector('.tree-scroll');
+            if (tree.scrollTop + tree.clientHeight >= tree.scrollHeight - 1) throw new Error('Native scene branches were not found in the expanded tree');
+            tree.scrollTop += Math.max(28, tree.clientHeight * .75);
+            return false;
+          })()`);
+        }, "reveal native branch in virtual tree");
       }
       const branchId = await evaluate(`(() => {
         const rows = Array.from(document.querySelectorAll('.tree-row'));
         const rootId = rows[0]?.dataset.treeId;
-        const row = ${fixture ? "rows.find((item) => item.querySelector('.tree-class')?.textContent?.includes('LinearLayout'))" : "rows.find((item) => item.dataset.treeId !== rootId && item.hasAttribute('aria-expanded'))"};
+        const planes = Array.from(document.querySelectorAll('.layer-plane')).map(plane => ({ id: plane.dataset.layerNodeId, mode: plane.dataset.layerTextureMode }));
+        const row = ${fixture ? "rows.find((item) => item.querySelector('.tree-class')?.textContent?.includes('LinearLayout'))" : workbenchOnly ? "rows.find(item => { if (item.dataset.treeId === rootId || item.getAttribute('aria-expanded') !== 'true') return false; const children = window.__appSmokeDescendants(item.dataset.treeId, planes); return children.length >= 1 && children.length <= 6 && planes.some(plane => plane.id === item.dataset.treeId) && planes.some(plane => children.includes(plane.id) && plane.mode === 'native'); })" : "rows.find((item) => item.dataset.treeId !== rootId && item.hasAttribute('aria-expanded'))"};
         row?.click();
         return row?.dataset.treeId || null;
       })()`);
       if (fixture) assert.ok(branchId, "Fixture does not expose a branch node for 3D expansion");
+      if (workbenchOnly) assert.ok(branchId, "No small expanded business branch is available");
       if (branchId) {
         await until(() => evaluate(`document.querySelector('.tree-row.selected')?.dataset.treeId === ${JSON.stringify(branchId)}`), "branch selection");
         const branchSpread = await evaluate(`(() => ({
@@ -720,6 +862,71 @@ try {
           assert.ok(branchSpread.zOrderSources.every(Boolean), "Overview does not report its Z-order source");
         }
         recordCheck("full overview stays expanded while selecting a container");
+        if (workbenchOnly || fixture) {
+          const branchSelector = `.tree-row[data-tree-id=${JSON.stringify(branchId)}]`;
+          const readBranch = () => evaluate(`(() => {
+            const scene = document.querySelector('.layer-scene');
+            const planes = Array.from(document.querySelectorAll('.layer-plane'));
+            return { expanded: document.querySelector(${JSON.stringify(branchSelector)})?.getAttribute('aria-expanded'),
+              composites: Number(scene?.dataset.layerCompositeCount || 0),
+              provenance: planes.map(plane => ({ id: plane.dataset.layerNodeId, source: plane.dataset.layerImageSource, groupState: plane.dataset.layerGroupState })),
+              planes: planes.map(plane => ({ id: plane.dataset.layerNodeId, mode: plane.dataset.layerTextureMode })) };
+          })()`);
+          const before = await readBranch();
+          const childIds = descendantPlaneIds(branchId, before.planes);
+          assert.ok(childIds.length > 0, "Selected branch has no displayed child planes");
+          const expectsComposite = before.planes.some(plane => (plane.id === branchId || childIds.includes(plane.id)) && plane.mode === "native");
+          if (workbenchOnly) assert.ok(expectsComposite, "Business branch has no independent image evidence");
+          report.businessBranch = { id: branchId, childIds, expectsComposite, before, pixelOracle: "not measured" };
+          await evaluate(`document.querySelector(${JSON.stringify(branchSelector)}).querySelector('.tree-chevron').click()`);
+          await until(() => evaluate(`document.querySelector(${JSON.stringify(branchSelector)})?.getAttribute('aria-expanded') === 'false'`), "business branch folds");
+          await until(async () => branchChildrenRemoved(childIds, (await readBranch()).planes), "fold removes child identities");
+          if (expectsComposite) await until(async () => (await readBranch()).planes.some(plane => plane.id === branchId && plane.mode === "composite"), "folded parent has a composite surface");
+          if (workbenchOnly && expectsComposite) {
+            const started = performance.now();
+            const request = { budgetMs: 30_000, elapsedMs: 0, settled: false, timedOut: false, source: null, state: null };
+            report.businessBranch.groupRequest = request;
+            try {
+              await until(async () => {
+                const pixels = (await readBranch()).provenance.find(plane => plane.id === branchId);
+                request.elapsedMs = Math.round(performance.now() - started);
+                request.source = pixels?.source ?? null; request.state = pixels?.groupState ?? null;
+                return ["ready", "unavailable"].includes(request.state);
+              }, "folded native group request settles", request.budgetMs);
+              request.settled = true;
+            } catch (error) {
+              request.timedOut = request.elapsedMs >= request.budgetMs;
+              report.businessBranch.folded = await readBranch();
+              throw error;
+            }
+          } else await delay(600);
+          const folded = await readBranch();
+          if (expectsComposite) {
+            const pixels = folded.provenance.find(plane => plane.id === branchId);
+            assert.ok(pixels && ["live-group", "local-composite"].includes(pixels.source), "Folded pixels have no recorded source");
+            assert.ok(["ready", "pending", "unavailable", "not-live", "not-requested", "hidden-descendants"].includes(pixels.groupState), "Folded group state is unknown");
+            if (pixels.source === "live-group") assert.equal(pixels.groupState, "ready");
+          }
+          report.businessBranch.folded = folded;
+          const foldedScreenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+          writeFileSync(join(output, "business-branch-folded.png"), Buffer.from(foldedScreenshot.data, "base64"));
+          await evaluate(`document.querySelector(${JSON.stringify(branchSelector)}).querySelector('.tree-chevron').click()`);
+          const directChildIds = childIds.filter(id => !id.slice(branchId.length + 1).includes("/"));
+          await until(async () => { const state = await readBranch(); return state.expanded === 'true' && directChildIds.every(id => state.planes.some(plane => plane.id === id)); }, "branch reopens direct child planes");
+          const reopened = await readBranch();
+          assert.ok(!reopened.planes.some(plane => plane.id === branchId && plane.mode === "composite"), "Reopened parent retains its child composite");
+          assert.ok(!reopened.planes.some(plane => childIds.includes(plane.id) && !directChildIds.includes(plane.id)), "Reopening unexpectedly expands the entire descendant subtree");
+          report.businessBranch.reopened = reopened;
+          // Collapse intentionally closes descendants. Only expand-all restores
+          // the original fully expanded overview, not reopening one parent.
+          await evaluate("document.querySelector('.tree-expand-all').click()");
+          await until(async () => { const state = await readBranch(); return state.expanded === 'true' && state.planes.length === before.planes.length; }, "expand-all restores original child planes");
+          const expanded = await readBranch();
+          assert.deepEqual(expanded.planes, before.planes, "Expansion did not restore the original plane identities and own texture modes");
+          assert.ok(!expanded.planes.some(plane => plane.id === branchId && plane.mode === "composite"), "Expanded parent retains its child composite");
+          report.businessBranch = { ...report.businessBranch, id: branchId, childIds, expectsComposite, before, folded, reopened, expanded, pixelOracle: "not measured" };
+          recordCheck("branch collapse closes descendants, reopen shows one level, expand-all restores original identities");
+        }
       }
       const alternateLayerId = await evaluate(`(() => {
         const selectedId = document.querySelector('.tree-row.selected')?.dataset.treeId;
@@ -888,16 +1095,25 @@ try {
       assert.equal(await evaluate("document.querySelectorAll('.layer-plane.surface').length"), 0, "A snapshot without independent bitmaps must not substitute a full-screen crop for its subtree");
       recordCheck("collapsed legacy snapshot avoids unrelated screenshot pixels when independent images are unavailable");
       await evaluate("document.querySelector('.zoom-reset').click(); document.querySelector('.inspector-close').click()");
-      const parentPoint = await until(() => evaluate(`(() => {
+      await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+      report.layerDoubleClick = { clicks: [] };
+      const parentPoint = () => until(() => evaluate(`(() => {
         const c = document.querySelector('.layer-webgl-canvas');
         if (!c?.dataset.layerProbeX) return null;
         const r = c.getBoundingClientRect();
         return { x: r.left + Number(c.dataset.layerProbeX), y: r.top + Number(c.dataset.layerProbeY) };
       })()`), "collapsed parent hit point");
       for (const clickCount of [1, 2]) {
-        await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", ...parentPoint, button: "left", buttons: 1, clickCount });
-        await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...parentPoint, button: "left", buttons: 0, clickCount });
-        if (clickCount === 1) assert.equal(await evaluate("document.querySelector('.tree-row').getAttribute('aria-expanded')"), "false", "Single click expanded the parent");
+        const point = await parentPoint();
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...point, button: "none", buttons: 0 });
+        await connection.send("Input.dispatchMouseEvent", { type: "mousePressed", ...point, button: "left", buttons: 1, clickCount });
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...point, button: "left", buttons: 0, clickCount });
+        await evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+        report.layerDoubleClick.clicks.push(await evaluate(`({ clickCount: ${clickCount}, point: ${JSON.stringify(point)}, selected: document.querySelector('.tree-row.selected')?.dataset.treeId, expanded: document.querySelector('.tree-row')?.getAttribute('aria-expanded'), action: document.querySelector('[aria-label="双击行为"]').value })`));
+        if (clickCount === 1) {
+          assert.equal(await evaluate("document.querySelector('.tree-row.selected')?.dataset.treeId === document.querySelector('.tree-row')?.dataset.treeId"), true, "Single click did not select the parent");
+          assert.equal(await evaluate("document.querySelector('.tree-row').getAttribute('aria-expanded')"), "false", "Single click expanded the parent");
+        }
       }
       await until(() => evaluate("document.querySelector('.tree-row')?.getAttribute('aria-expanded') === 'true' && document.querySelectorAll('.tree-row').length > 1 && document.querySelector('.layer-scene')?.dataset.layerRootComposite === 'false'"), "double-click expands the 3D parent and tree together");
       recordCheck("real pointer double-click expands a collapsed parent in both the 3D scene and tree; single click only selects");
@@ -1037,22 +1253,29 @@ try {
     await connection.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Home", code: "Home", windowsVirtualKeyCode: 36 });
     await until(() => evaluate("document.querySelector('.tree-row.selected')?.dataset.treeId === '0'"), "keyboard Home selection");
     recordCheck("expand-all and keyboard End/Home navigation");
-    await evaluate("document.querySelector('.snapshot-drawer > summary').click()");
-    const historyBounds = await evaluate("document.querySelector('.snapshot-drawer-body').getBoundingClientRect().toJSON()");
-    assert.ok(historyBounds.left >= 0 && historyBounds.right <= runtime.viewport.width && historyBounds.bottom <= runtime.viewport.height, "History popover is clipped after moving into the header");
-    await evaluate("Array.from(document.querySelectorAll('.snapshot-actions button')).find(button => button.textContent === '保存快照').click()");
-    await until(() => evaluate("document.querySelectorAll('.snapshot-history-item').length === 1"), "save isolated snapshot");
+    await evaluate("document.querySelector('.workbench-scene-tools > .snapshot-drawer > summary').click()");
+    const historyBounds = await evaluate(`(() => {
+      const drawer = document.querySelector('.workbench-scene-tools > .snapshot-drawer'), body = drawer.querySelector('.snapshot-drawer-body');
+      const bounds = body.getBoundingClientRect();
+      return { ...bounds.toJSON(), innerWidth, innerHeight, open: drawer.open,
+        exposed: body.contains(document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + Math.min(16, bounds.height / 2))) };
+    })()`);
+    report.historyPopover = historyBounds;
+    assert.ok(historyBounds.open && historyBounds.width > 0 && historyBounds.height > 0 && historyBounds.exposed, "History popover did not open visibly");
+    assert.ok(historyBounds.left >= 0 && historyBounds.right <= historyBounds.innerWidth && historyBounds.bottom <= historyBounds.innerHeight, "History popover is clipped after moving into the header");
+    if (!report.captureSavedBeforeInteractions) await evaluate("Array.from(document.querySelectorAll('.workbench-scene-tools > .snapshot-drawer .snapshot-actions button')).find(button => button.textContent === '保存快照').click()");
+    await until(() => evaluate("document.querySelectorAll('.workbench-scene-tools > .snapshot-drawer .snapshot-history-item').length === 1"), "save isolated snapshot");
     const storedGeometry = await evaluate("window.electronApi.loadSnapshots().then(result => { if (result.error) throw new Error(result.error); return result.snapshots[0]?.snapshot.captureGeometry; })");
     assert.ok(storedGeometry, "Capture metadata was lost while saving/loading");
     assert.deepEqual(storedGeometry.screenshotSize, report.screenshot);
-    await evaluate("document.querySelector('.snapshot-history-item').click()");
+    await evaluate("document.querySelector('.workbench-scene-tools > .snapshot-drawer .snapshot-history-item').click()");
     await until(() => evaluate(`document.querySelector('.screenshot-stage')?.dataset.coordinateStatus === ${JSON.stringify(geometry.status)} && Boolean(document.querySelector('.selection-overlay'))`), "restored snapshot geometry");
     await until(() => evaluate("document.querySelector('.floating-inspector').getBoundingClientRect().height >= 200"), "inspector follows restored snapshot canvas");
     report.storedGeometry = storedGeometry;
-    await evaluate("document.querySelector('.snapshot-drawer').open = false");
+    await evaluate("document.querySelector('.workbench-scene-tools > .snapshot-drawer').open = false");
     recordCheck("snapshot save/load and history preview retain capture geometry");
 
-    if (report.inspectionSummary.includes("SDK 树")) {
+    if (!workbenchOnly && report.inspectionSummary.includes("SDK 树")) {
       // Feed rows recycle between the two captures, so pick a control that survives: the
       // shallowest visible text control fully inside the screen (persistent chrome), read
       // from the restored snapshot instead of the virtualised tree markup.

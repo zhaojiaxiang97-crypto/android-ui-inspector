@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createTree, makeNode } from "../benchmarks/fixtures";
-import { collapseTreeBranch, expandAncestors, indexTree, nearestVisibleId, scrollToTreeRow, TREE_ROW_HEIGHT, treeWindow, visibleTreeRows } from "../shared/visible-tree";
+import { collapseTreeBranch, expandAncestors, indexTree, nearestVisibleId, scrollToTreeDepth, scrollToTreeRow, TREE_ROW_HEIGHT, TREE_DETAIL_ROW_HEIGHT, treeWindow, treeReadingAnchor, restoreTreeReading, visibleTreeRows } from "../shared/visible-tree";
 import { filterTree } from "../shared/tree-utils";
 
 test("visible rows preserve preorder, levels and sibling metadata", () => {
@@ -41,6 +41,19 @@ test("focus falls back to a visible ancestor without positional-prefix confusion
   assert.equal(nearestVisibleId("0/1/0", index, visible), "0/1");
   assert.equal(nearestVisibleId("missing", index, visible), null);
   assert.equal(nearestVisibleId("0/1/0", index, new Map()), null);
+});
+
+test("reopening a collapsed parent does not silently reopen its descendants", () => {
+  const root = makeNode("0");
+  const parent = makeNode("0/0");
+  const child = makeNode("0/0/0");
+  const leaf = makeNode("0/0/0/0");
+  root.children = [parent]; parent.children = [child]; child.children = [leaf];
+  const all = new Set(["0", "0/0", "0/0/0"]);
+  const collapsed = collapseTreeBranch(all, parent.id);
+  const reopened = new Set(collapsed); reopened.add(parent.id);
+  assert.deepEqual(visibleTreeRows(root, reopened).map(row => row.node.id), ["0", "0/0", "0/0/0"]);
+  assert.deepEqual(visibleTreeRows(root, all).map(row => row.node.id), ["0", "0/0", "0/0/0", "0/0/0/0"]);
 });
 
 test("filter metadata describes retained siblings while index retains complete nodes", () => {
@@ -102,4 +115,28 @@ test("row reveal scrolls minimally and clamps invalid or removed selections", ()
   assert.equal(scrollToTreeRow(4, 1000, 0, 320), 0);
   assert.equal(scrollToTreeRow(5000, 1000, 0, 320), 0);
   assert.equal(scrollToTreeRow(-1, 2, 10_000, 320), 0);
+});
+
+test("horizontal reveal keeps a deep row and its parent column visible", () => {
+  assert.equal(scrollToTreeDepth(24, 0, 240), 248);
+  assert.equal(scrollToTreeDepth(24, 248, 240), 248);
+  assert.equal(scrollToTreeDepth(23, 300, 240), 264);
+  assert.equal(scrollToTreeDepth(0, 300, 240), 0);
+  assert.equal(scrollToTreeDepth(511, 0, 240), 6092);
+  assert.equal(scrollToTreeDepth(24, 248, 0), 248);
+});
+
+test("detailed row reveal and reading anchors preserve nodes rather than old pixels", () => {
+  const root = createTree(25_000, "wide"), index = indexTree(root);
+  const rows = visibleTreeRows(root, new Set([root.id]));
+  const positions = new Map(rows.map((row, position) => [row.node.id, position]));
+  const anchor = treeReadingAnchor(rows, 10_000 * TREE_ROW_HEIGHT + 7);
+  const next = restoreTreeReading(anchor, index, positions, rows.length, 450, TREE_DETAIL_ROW_HEIGHT);
+  assert.equal(next, 10_000 * TREE_DETAIL_ROW_HEIGHT + 11);
+  assert.equal(treeReadingAnchor(rows, next, TREE_DETAIL_ROW_HEIGHT).nodeId, anchor.nodeId);
+  assert.equal(scrollToTreeRow(24_999, 25_000, 0, 450, TREE_DETAIL_ROW_HEIGHT), 25_000 * TREE_DETAIL_ROW_HEIGHT - 450);
+  const range = treeWindow(25_000, next, 517.5, TREE_DETAIL_ROW_HEIGHT);
+  assert.ok(range.start * TREE_DETAIL_ROW_HEIGHT <= next && range.end * TREE_DETAIL_ROW_HEIGHT >= next + 517.5);
+  const collapsed = visibleTreeRows(root, new Set()), collapsedPositions = new Map([[root.id, 0]]);
+  assert.equal(restoreTreeReading(anchor, index, collapsedPositions, collapsed.length, 450, TREE_DETAIL_ROW_HEIGHT), 0);
 });

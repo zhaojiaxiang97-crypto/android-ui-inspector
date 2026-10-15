@@ -56,3 +56,16 @@ test("a ready device can be promoted to connected when no explicit selection exi
   const ready = device();
   assert.equal(resolveHomeState({ loading: false, runtimeError: null, probe: probe({ devices: [ready] }), selectedDevice: null }), "connected");
 });
+
+test("offline and unrecognized connection states never ask for USB authorization", () => {
+  for (const state of ["offline", "recovery", "unknown"]) {
+    const offline = device({ state });
+    assert.equal(resolveHomeState({ loading: false, runtimeError: null, probe: probe({ devices: [offline] }), selectedDevice: offline }), "offline");
+    assert.equal(resolveHomeState({ loading: false, runtimeError: null, probe: probe({ devices: [offline] }), selectedDevice: null }), "offline");
+  }
+});
+
+test("selected offline device stays offline even with another authorized device", () => {
+  const offline = device({ serial: "phone-offline", state: "offline" });
+  assert.equal(resolveHomeState({ loading: false, runtimeError: null, probe: probe({ devices: [offline, device()] }), selectedDevice: offline }), "offline");
+});

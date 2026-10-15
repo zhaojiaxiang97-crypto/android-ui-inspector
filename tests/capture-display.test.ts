@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
-import { parseInputDisplay, pngSize } from "../electron/capture-display";
-import { parseUiHierarchy } from "../electron/adb";
+import { parseInputDisplay, pngSize } from "../electron/device/capture-display";
+import { parseUiHierarchy } from "../electron/capture/xml-tree";
 
 const viewport = "Viewport INTERNAL: displayId=0, uniqueId=local:0, port=0, orientation=0, logicalFrame=[0, 0, 1080, 2400], physicalFrame=[0, 0, 1080, 2400], deviceSize=[1080, 2400], isActive=[1]";
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");

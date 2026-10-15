@@ -32,12 +32,12 @@ jobs:
           CI_OS: ${{ runner.os }}
         run: |
           if [ "$CI_OS" = "Linux" ]; then
-            xvfb-run -a bun test
+            xvfb-run -a bun run test
             xvfb-run -a bun run test:tree-ui
             xvfb-run -a bun run test:coordinates
             xvfb-run -a bun run test:dpi
           else
-            bun test
+            bun run test
             bun run test:tree-ui
             bun run test:coordinates
             bun run test:dpi

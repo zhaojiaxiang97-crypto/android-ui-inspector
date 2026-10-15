@@ -1,9 +1,52 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createTree, makeNode } from "../benchmarks/fixtures";
-import { changedLayerImages, filterTree, flattenNodes, layerImageBaseline, mergeLayerImages, nodeDisplayLabel, remapViewNodeIds, replaceTreeBranch, selectionInBranch, treeNodeKind, type TreeFilter } from "../shared/tree-utils";
+import { changedLayerImages, createTreeMatcher, filterTree, flattenNodes, layerImageBaseline, mergeLayerImages, nodeDisplayLabel, remapViewNodeIds, replaceTreeBranch, selectionInBranch, treeNodeKind, treeSearchDetail, treeTextSegments, type TreeFilter } from "../shared/tree-utils";
 
 const noFilter: TreeFilter = { query: "", interactiveOnly: false, identifiedOnly: false };
+
+test("search matches use the filtering predicate, not retained ancestor membership", () => {
+  const root = createTree(21);
+  const filter = { ...noFilter, query: "  nODe 6 " };
+  const matches = createTreeMatcher(filter);
+  const filtered = filterTree(root, filter)!;
+  assert.deepEqual([...flattenNodes(filtered).keys()], ["0", "0/0", "0/0/1"]);
+  assert.deepEqual([...flattenNodes(filtered).values()].filter(matches).map(node => node.id), ["0/0/1"]);
+  const interactive = createTreeMatcher({ ...filter, interactiveOnly: true, identifiedOnly: true });
+  assert.equal(interactive(root.children[0].children[1]), true);
+  assert.equal(interactive({ ...root.children[0].children[1], clickable: false, scrollable: false, focusable: false }), false);
+});
+
+test("search highlight is literal, case-insensitive and preserves text, Unicode and repetitions", () => {
+  for (const [value, query, matches] of [
+    ["TextView / textview", " TextView ", ["TextView", "textview"]],
+    ["android.widget.TextView", "android.widget", ["android.widget"]],
+    ["a.* [b] $c \\d", ".*", [".*"]],
+    ["a.* [b] $c \\d", "[b]", ["[b]"]],
+    ["a.* [b] $c \\d", "\\d", ["\\d"]],
+    ["搜索头像🙂 / 头像🙂", "头像🙂", ["头像🙂", "头像🙂"]],
+    ["<img src=x onerror=alert(1)>", "<img", ["<img"]],
+    ["TextView", " \t ", []], ["", "nothing", []],
+  ] as const) {
+    const segments = treeTextSegments(value, query);
+    assert.equal(segments.map(part => part.text).join(""), value);
+    assert.deepEqual(segments.filter(part => part.match).map(part => part.text), [...matches]);
+  }
+});
+
+test("search context explains hidden fields without replacing the meaningful node name", () => {
+  const node = { ...makeNode("0/0"), text: "播放设置", contentDesc: "点击进入设置", className: "app.widget.PlaybackTextView", resourceId: "com.example.benchmark:id/playback_setting" };
+  assert.equal(treeSearchDetail(node, node.text, "播放"), null);
+  assert.equal(treeSearchDetail(node, node.text, "not-found"), null);
+  const context = treeSearchDetail(node, node.text, "playback_setting")!;
+  assert.equal(context.field, "ID");
+  assert.equal(context.value, node.resourceId);
+  assert.ok(context.display.startsWith("…") && context.display.includes("playback_setting"));
+  assert.equal(treeSearchDetail(node, node.text, "PlaybackTextView")?.field, "类型");
+  assert.equal(treeSearchDetail(node, node.text, "点击进入")?.field, "描述");
+  assert.equal(treeSearchDetail(node, node.text, "0/0")?.field, "路径");
+  assert.equal(node.text, "播放设置");
+});
 
 test("tree icons describe control types independently of labels, clickability and expansion", () => {
   const node = { ...makeNode("0"), text: "播放视频", resourceId: "app:id/video_background_view", clickable: true, scrollable: false };
@@ -33,6 +76,68 @@ test("tree icons describe control types independently of labels, clickability an
   assert.equal(treeNodeKind({ ...node, children: [makeNode("0/0")] }), "container");
   assert.equal(treeNodeKind({ ...node, className: "android.widget.FrameLayout", children: [] }), "frame", "an empty layout is still a layout");
   assert.equal(treeNodeKind({ ...node, className: null }), "leaf");
+});
+
+test("SDK inheritance selects the nearest real Android type while preserving custom names", () => {
+  const node = { ...makeNode("0"), className: "sample.PriceLabel", text: "¥ 128", resourceId: "sample:id/price", scrollable: false,
+    attributes: { "sdk-class-hierarchy": "sample.PriceLabel → android.widget.TextView → android.view.View" } };
+  const before = structuredClone(node);
+  assert.equal(treeNodeKind(node), "text");
+  assert.equal(nodeDisplayLabel(node), "¥ 128");
+  assert.deepEqual(node, before, "icon selection must not rewrite the snapshot or the real class");
+
+  for (const [className, parents, expected] of [
+    ["sample.CustomCheckBox", ["android.widget.CheckBox", "android.widget.CompoundButton", "android.widget.Button", "android.widget.TextView"], "checkbox"],
+    ["sample.SearchTile", ["androidx.appcompat.widget.AppCompatEditText", "android.widget.EditText", "android.widget.TextView"], "input"],
+    ["sample.IconAction", ["android.widget.ImageButton", "android.widget.ImageView"], "button"],
+    ["sample.MovieCanvas", ["android.widget.VideoView", "android.view.SurfaceView"], "video"],
+    ["sample.CustomGrid", ["android.widget.GridView", "android.widget.AbsListView", "android.widget.AdapterView", "android.view.ViewGroup"], "grid"],
+    ["sample.ProductList", ["androidx.recyclerview.widget.RecyclerView", "android.view.ViewGroup"], "list"],
+    ["sample.Pages", ["androidx.viewpager2.widget.ViewPager2", "android.view.ViewGroup"], "pager"],
+    ["sample.ScrollingPanel", ["androidx.core.widget.NestedScrollView", "android.widget.FrameLayout", "android.view.ViewGroup"], "scroll"],
+    ["sample.AvatarButton", ["android.widget.ImageView"], "image"],
+    ["sample.PriceButton", ["sample.MisleadingImageView", "android.widget.TextView"], "text"],
+    ["sample.FakeButton", ["sample.ImageView"], "leaf"],
+    ["sample.FakeTextView", ["android.view.ViewGroup"], "container"],
+    ["android.widget.TextView", [], "text"],
+  ] as const) {
+    const chain = [className, ...parents, "android.view.View"].join(" → ");
+    assert.equal(treeNodeKind({ ...node, className, attributes: { "sdk-class-hierarchy": chain } }), expected, className);
+  }
+  assert.equal(treeNodeKind({ ...node, scrollable: true, children: [makeNode("0/0")] }), "text", "state and descendants do not override the inherited control type");
+});
+
+test("invalid or oversized SDK class chains retain the existing icon fallback", () => {
+  const node = { ...makeNode("0"), className: "sample.CustomButton", scrollable: false };
+  const valid = "sample.CustomButton → android.widget.TextView → android.view.View";
+  for (const chain of [
+    undefined, "", "android.widget.TextView → android.view.View", "sample.OtherButton → android.widget.TextView → android.view.View",
+    "sample.CustomButton → android.widget.TextView", "sample.CustomButton -> android.widget.TextView -> android.view.View",
+    "sample.CustomButton → android.widget.TextView → android.widget.TextView → android.view.View",
+    "sample.CustomButton → android.widget.Text View → android.view.View",
+    `sample.CustomButton → ${"a".repeat(513)} → android.widget.TextView → android.view.View`,
+    [node.className, ...Array.from({ length: 23 }, (_, index) => `sample.Parent${index}`), "android.view.View"].join(" → "),
+    `${valid}${" ".repeat(24 * 512)}`,
+  ]) {
+    const attributes: Record<string, string> = chain === undefined ? {} : { "sdk-class-hierarchy": chain };
+    assert.equal(treeNodeKind({ ...node, attributes }), "button");
+  }
+  const maximumDepth = [node.className, ...Array.from({ length: 21 }, (_, index) => `sample.Parent${index}`), "android.widget.TextView", "android.view.View"];
+  assert.equal(maximumDepth.length, 24);
+  assert.equal(treeNodeKind({ ...node, attributes: { "sdk-class-hierarchy": maximumDepth.join(" → ") } }), "text", "the maximum SDK depth is accepted");
+  assert.equal(treeNodeKind({ ...node, attributes: { "sdk-class-hierarchy": `sample.CustomButton → ${"a".repeat(512)} → android.widget.TextView → android.view.View` } }), "text", "the maximum SDK class length is accepted");
+  assert.equal(treeNodeKind({ ...node, attributes: { "sdk-class-hierarchy": 42 } as unknown as Record<string, string> }), "button", "malformed imported attributes do not crash rendering");
+});
+
+test("QML nodes keep QML icons even when imported attributes contain Android inheritance", () => {
+  for (const [className, extra] of [
+    ["Label_QMLTYPE_7", {}], ["QQuickText", {}], ["custom.Label", { "inspection-source": "debug-qml" }],
+    ["custom.Label", { "qml-debug-id": "0" }],
+  ] as const) {
+    const node = { ...makeNode("0"), className, scrollable: false,
+      attributes: { ...extra, "sdk-class-hierarchy": `${className} → android.widget.ImageView → android.view.View` } };
+    assert.equal(treeNodeKind(node), "text", className);
+  }
 });
 
 test("fixture sizes and flattened preorder are deterministic", () => {
@@ -69,11 +174,13 @@ test("layer previews send only changed images and preserve untouched branches", 
   child.layerImageDataUrl = `data:image/png;base64,${"a".repeat(1024)}`;
   child.layerImageSize = { width: 10, height: 20 };
   child.layerImageStatus = "captured";
+  child.layerCapturePlacement = { screen: { left: 10, top: 20, width: 5, height: 10 }, source: { left: 0, top: 0, width: 10, height: 20 }, opacity: 0.5, hidden: false };
   child.attributes = { "image-source": "own" };
   const first = changedLayerImages(source, baseline)!;
   assert.deepEqual(first.map(update => update.id), [child.id]);
   const shown = mergeLayerImages(displayed, first);
   assert.equal(shown.children[0].layerImageDataUrl, child.layerImageDataUrl);
+  assert.deepEqual(shown.children[0].layerCapturePlacement, child.layerCapturePlacement);
   assert.equal(shown.children[0].attributes?.["image-source"], "own");
   assert.equal(shown.children[1], displayed.children[1]);
   assert.equal(displayed.children[0].layerImageStatus, undefined);
@@ -81,15 +188,33 @@ test("layer previews send only changed images and preserve untouched branches", 
 
   delete child.layerImageDataUrl;
   delete child.layerImageSize;
+  delete child.layerCapturePlacement;
   child.layerImageStatus = "failed";
   delete child.attributes["image-source"];
   child.attributes["image-capture-error"] = "timeout";
   const cleared = mergeLayerImages(shown, changedLayerImages(source, baseline)!);
   assert.equal(cleared.children[0].layerImageDataUrl, undefined);
+  assert.equal(cleared.children[0].layerCapturePlacement, undefined);
   assert.equal(cleared.children[0].attributes?.["image-source"], undefined);
   assert.equal(cleared.children[0].attributes?.["image-capture-error"], "timeout");
   source.children.push(makeNode("0/new"));
   assert.equal(changedLayerImages(source, baseline), null, "a changed tree needs a full preview");
+});
+
+test("moved branch previews re-anchor geometry and pixels without advancing the old baseline", () => {
+  const root = createTree(9), baseline = layerImageBaseline(root);
+  const original = structuredClone([...baseline]);
+  root.layerImageStatus = "captured";
+  const child = root.children[0];
+  child.bounds = { left: 20, top: 30, right: 90, bottom: 100, raw: "[20,30][90,100]" };
+  child.layerImageDataUrl = "data:image/png;base64,new";
+  assert.equal(changedLayerImages(root, baseline), null);
+  assert.deepEqual([...baseline], original);
+  const fresh = layerImageBaseline(root);
+  assert.deepEqual(changedLayerImages(root, fresh), []);
+  // Baselines must not retain mutable bounds objects.
+  child.bounds.left++;
+  assert.equal(changedLayerImages(root, fresh), null);
 });
 
 test("no filter and all-matching filters preserve node references", () => {

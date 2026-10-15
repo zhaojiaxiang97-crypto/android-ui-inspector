@@ -1,41 +1,131 @@
-# Android Debug SDK 样例（P0 与混合验证）
+# Android Debug SDK（可选增强）
 
-这里包含 Debug SDK 和画面验证样例。SDK 提供真实 View 树、属性和独立图；接入 SDK 且至少 200 节点的页面默认尝试 `capture-visible`，DDMS/JDWP 保留兼容采集、局部刷新及缺图/特殊缓冲补采。样例通过 `debugImplementation` 引入 SDK；Release 使用无操作的 `ProbeRunner`，不包含 SDK。当前能力与下一步见 [Lookin 对齐计划](../docs/LOOKIN_ALIGNMENT_PLAN.md)。
+桌面当前源码默认标准采集，无需接入 SDK，也不探测 App 中的 SDK。需要额外树、属性、独立图或业务信息时，再接入本项目 SDK，并在 **偏好设置 → 采集 → 启用 SDK 增强** 中开启；安装 SDK 不会自动启用。切换与重新采集要求见[使用说明](../docs/FIRST_USE.md#sdk-enhancement)。
 
-新版 SDK 的 `capture-visible` 可携带 16 位十六进制请求标识，写入私有临时文件头并回显。`visibleStreamVersion=1` 使用 PNG，`visibleStreamVersion=2`（Android 11/API 30+）使用无损 WebP；桌面仅对匹配本轮标识、当前进程/窗口、对象、尺寸及图片校验的完整记录提前预览，最多三批，最终仍核对完整文件 SHA-256。旧 SDK 不轮询，照原路径等整包；取消后不交付迟到批次。Android 11 以下继续 PNG 兼容路径。整页可见图采集在设备侧采用有界流水线（渲染与编码重叠、2 路编码池顺序写文件）；业务页 207 张 WebP 单次约 2.8–3.3 秒（改造前 5.2–5.9 秒），流式预览与摘要校验不变。特殊层补齐改用批接口 `capture-refs`：一次最多 80 个指定控件，普通控件取自身图、TextureView 读自身缓冲、SurfaceView 用 `PixelCopy` 取当前帧（受保护内容返回失败，不绕过 DRM），纯布局/空白/失败分别标注；桌面校验（进程实例、根、对象、尺寸、SHA-256 与逐图 CRC）不符时回退 JDWP。业务页补齐阶段约 5.1 → 2.3 秒，Surface/Texture 首次拿到真实缓冲帧。桌面侧 happy path 不再全量导出 DDMS/JDWP 层级：先以 VULW + 身份探针匹配窗口，再用 SDK 树重建结构（ref/类名/尺寸/祖先链/窗口锚点/进程逐项交叉校验，任一不符回退原 DDMS 导出），JDWP 仅作兼容回退。`capture-visible` 可携带 `withTree` 布尔扩展：调用开始先原子写入本次 nonce 的 SDK 树文件（≤4MB），桌面在调用中途 adopt 并据此匹配分片预览；旧 SDK 忽略扩展时回退经典两段式读取。Provider 另提供 `open-session`/`close-session`：桌面经 `adb forward tcp:0 localabstract:<包名>.inspector.session` 连接应用内 `LocalServerSocket` 会话通道调用同一批 handler（行式 JSON、回复与 `content` CLI 同格式），免去每次 `content` CLI 的进程启动（约 1.2 秒/次）；对端校验 shell/root UID，超时或取消即关闭会话并回退 content 调用，旧 SDK 无该方法时自动走原通道。
+增强模式按 SDK 能力及身份、窗口、几何证据选择路径，SDK 不可用时保留基础采集；接入不保证任意 App 都有完整或精确图层。源码、安装版和设备验证分别记录。
 
-构建环境：JDK 17+、Gradle 9.6+、Android Platform 36 与 Build Tools 36。SDK 可集成到最低 Android 5 的 Debug App，但自身图仅对 Android 8+ 开放；目前只在 Android 14 真机验过。取得许可并安装官方 SDK 后，可在本目录执行：
+- [接入与构建](#integration)
+- [能力和限制](#capabilities)
+- [保留数据更新业务 SDK](#business-sdk-update)
+- [业务名称与分组信息](#business-debug-metadata)
+- [样例与专项验证](#verification)
+
+当前职责见 [开发结构](../docs/DEVELOPMENT_STRUCTURE.md)，已完成的架构工作见 [架构收尾](../docs/ARCHITECTURE_REFACTOR_PLAN.md#architecture-closeout)，设备和产物验证范围见 [验收记录](../docs/CORE_ACCEPTANCE.md)。历次部署播报、耗时对照、协议细节和失败证据已集中到 [SDK 专项历史参考](../docs/archive/SDK_REFERENCE_HISTORY_2026-10-15.md)，不作为当前部署状态或待办。
+
+<a id="integration"></a>
+
+## 接入与构建
+
+本项目已验构建环境为 Java 17、Gradle 9.6 及 Android Build Tools 36；需要 Android Platform 30（SDK）和 36（样例）。配置 `JAVA_HOME`、`ANDROID_HOME` 后，在仓库根目录执行：
 
 ```sh
-gradle :sample-app:assembleDebug :sample-app:assembleRelease
+gradle -p android :inspector-sdk:assembleDebug :inspector-sdk:assembleRelease \
+  :sample-app:assembleDebug :sample-app:assembleRelease --console=plain
 ```
 
-启动 Debug 样例后，报告位于其私有目录 `files/isolation-probe/result.json`，图像包括 `parent-group.png`、`child-own.png` 和 `parent-own.png`。可用 `adb exec-out run-as com.androiduiinspector.sample cat files/isolation-probe/result.json | jq -e '.isolationPassed == true and .opaqueChildClipped == true'` 复核父子隔离。
+SDK AAR 位于 `android/inspector-sdk/build/outputs/aar/`，样例 APK 位于 `android/sample-app/build/outputs/apk/`。只构建样例不保证重新生成供外部业务工程使用的 AAR；业务更新必须显式构建 SDK，并固定要引用的产物。
 
-样例和 `capture-own` 在 Debug SDK 中定向调用 Android 内部的 `createSnapshot(skipChildren=true)`（全页 `capture-visible` 使用 `ViewDebug.performViewCapture`）；普通反射在此机型会返回 `NoSuchMethodException`，现在通过 `HiddenApiBypass` 调用，没有改动设备全局隐藏 API 策略。2026-09-28 小米 Android 14 真机：父整组图含 3732 个红色子文字像素、19125 个不透明绿色子项像素；父自身图两者均为 0，自己绘制的黄色标记仍在；透明文字叶子含 4872 个红色像素，角落 alpha 为 0。绿色子项越出父边界且被裁剪，`isolationPassed=true`。同一父对象尺寸由 731×506 改到 816×591 后，自身图尺寸同步更新，仍无子文字。Surface/Texture 暂不走此内部接口，Release APK 无 SDK 或绕过库。详见 [改造方案](../docs/LOOKIN_ALIGNMENT_PLAN.md)。
+SDK 尚未发布到 Maven。同一 Gradle 工程可参考 [样例依赖](sample-app/build.gradle.kts) 使用 `debugImplementation(project(":inspector-sdk"))`。外部工程可引用核验后的本地 AAR：
 
-Debug Provider 除 `capture` 树外，还可按 `ref` 调用 `capture-own`；返回尺寸、进程实例和 PNG 的 SHA-256，图片放在 App 私有 `no_backup/inspector-own-image.png`。请求只接受 shell UID、`android.permission.DUMP` 和可调试包。未知对象返回错误，不会把整组图冒充自身图。此入口尚未接入桌面 UI；其他系统版本、自绘类型和性能仍需单独验证。
+```kotlin
+dependencies {
+    debugImplementation(files("libs/inspector-sdk-debug.aar"))
+    debugImplementation("org.lsposed.hiddenapibypass:hiddenapibypass:6.0")
+}
+```
 
-在线混合快照收起父层时可按需调用 `capture-group(ref)`，在 App 内用 `View.draw` 取得整组图。桌面在抓取前后核对进程、窗口、对象、分支结构与尺寸，并核对 PNG 摘要；失败或分支含 SurfaceView/TextureView 时沿用本地合成图。3D 展开仍只显示每层自身图；SDK 给出完整 `clipToOutline` 时，桌面按原始坐标为子图套用自身和祖先的圆角遮罩。`View.draw` 不保留圆角轮廓裁剪，因此遇到非完整矩形轮廓会拒绝失真整组图；可读轮廓用独立图在本机合成，未知自定义路径只显示边框。运行 `adb shell am start -S -n com.androiduiinspector.sample/.MainActivity --es mode visual` 后可用 `adb exec-out run-as com.androiduiinspector.sample cat files/isolation-probe/visual-result.json | jq -e '.visualPassed == true'` 复验。Android 14 样例嵌套圆角像素回归与 3D 真机冒烟已通过；业务 App 当前首页没有可验的圆角父层，仍需在合适页面复验。
+本地 AAR 不携带 Maven 传递依赖声明，需同时配置上述兼容版本的绕过库。业务工程沿用自己的已验证 Gradle 和 Java 工具链，不为接入擅自升级依赖或切换构建参数。
 
-实验入口 `capture-own-batch` 一次接受逗号分隔的 1–10 个 `ref`，仅抓每个控件自身、单张最多 100 万像素、整批最多 200 万像素、每张最多 1 MB PNG，批处理预算 5 秒（单张等待超时可能使最终返回略晚）。图片及带 SHA-256 的清单位于私有 `no_backup/inspector-own-batch-*.png` 和 `inspector-own-batch.json`；读取者必须核对返回的清单摘要、进程实例、页面根节点、每张图片摘要与尺寸，并自行验证前台窗口。Android 14 样例同 10 个小文字控件的批量图与逐张图完全一致，三轮约 2.3–2.4 秒，逐张约 13.0 秒。运行样例回归：先用 `adb shell am start -n com.androiduiinspector.sample/.MainActivity --es mode stress` 打开页面，再执行 `bun scripts/sdk-batch-probe.ts DEVICE_SERIAL`。此接口尚未接入桌面默认采集，不能代替全量采集。
+依赖和业务调用均放在 Debug 源集中；Release 使用 [样例无操作包装](sample-app/src/release/java/com/androiduiinspector/sample/ProbeRunner.java)，不引入 SDK 或绕过库。Provider 由 SDK Manifest 合并，authority 为 `${applicationId}.inspector`，受 `android.permission.DUMP`、调用 UID 和可调试包校验保护，不开放网络端口。
 
-同一 Android 14 真机，动态样例新增子项后父自身图保持不变、变化的文字和新控件均各有自身图。业务 Debug App 的 10 个文字层也通过逐张/批量图片摘要对照；运行 `bun scripts/sdk-batch-probe.ts DEVICE_SERIAL com.smile.gifmaker` 可复测。业务页批量三轮调用约 2.3/4.4/3.2 秒，逐张 10 次约 17.8 秒；读图还需约 1–1.3 秒。当前只验证 10 张，尚未替代桌面 170+ 张图的完整采集。
+<a id="capabilities"></a>
 
-混合模式的 Debug Provider 使用 `android.permission.DUMP` 和 shell UID 校验，没有开放网络端口。桌面从 App 私有目录读取按需生成的树，仅在进程、窗口、节点身份和几何全部匹配时与独立画面合并；失败就保留旧快照并提示。整树 JSON 在主线程只做视图遍历与对象构建，字符串化与写盘在调用线程；业务页 1204 节点实测不再触发 ≥1 秒的主线程长任务（2026-10-01）。加入不透明子项后，样例真机上 14/14 个 View 匹配（另有 1 个合成根）、9 张独立图，无警告。
+## 能力和限制
 
-Debug 构建中可调用 `DebugNames.set(view, "业务名称")` 为没有文本/ID 的控件加显示名；Release 构建请沿用样例的无操作包装，不引入 SDK。混合快照保留真实类名、ID、文本，同时读取 `LayoutParams` 类型、宽高和真实 margin；没有 margin 的参数类型不伪造 0。Android 14 真机样例已验证两处名称及负 margin；Release APK 无 SDK 类或 Provider。
+- **范围**：SDK 最低 API 21，自身图接口要求 API 26+；样例最低 API 26。现有真机证据主要来自一台 Android 14 设备，不能扩大为所有 Android/OEM、自绘、多窗口或长期内存验收。
+- **画面来源**：普通 View 抓自身图；SurfaceView／TextureView 走专用缓冲路径。受保护内容明确失败，不绕过保护；空画面与采集失败分别表示。折叠整组图按需读取，无法忠实取得时保留有来源说明的本地合成。
+- **一致性**：保留请求 nonce、进程实例、根窗口、控件身份、尺寸、图片摘要及几何核对。单控件绘制前后校验不保证整页同帧；完整父链、矩阵和裁剪证据不足时不能假装精确放置。
+- **资源与发布**：`CapturePipeline` 共用 2 个编码线程、在途深度 4；`RefCaptureSelection` 管未提交及迟到位图，`CaptureOutput.LayerFile` 管图片流与原子发布。图片流的原子发布不等于图片和几何文件的跨文件事务。
+- **调试隔离**：`DebugCaptureProbe` 仅位于 SDK 的 `src/debug`，不进入 SDK Release AAR；样例 Release 不包含 SDK 和故障探针。样例实验及新增源码不会自动更新已安装业务包。
+- **模式与实验**：只有开启 SDK 增强后才进入 SDK 路径；单节点取图、排队和短父链等实验开关不能越过模式选择。增强模式内，小页面是否采用 SDK 图片仍取决于已声明能力和证据，不以旧文档中的单一节点阈值概括。
 
-SDK 还按实际 Java 父类返回去重的类继承表；属性栏仅在查看选中控件时展示。Android 14 的 20×20 样例中，435 个真实 View 均有继承链，SDK 树约 231 KB；旧 SDK 快照无此字段时仍可读取。
+<a id="business-sdk-update"></a>
 
-交互卡读取 View 的可长按、上下文点击、标准点击监听器、按下与激活标志。动态样例已验证长按和标准点击监听器可分别识别；未安装标准监听器不代表控件或子项不能响应自定义手势。旧 SDK 无此数据时不会显示该卡。
+## 业务 SDK 保留数据更新
 
-原生布局规则读取系统 `FrameLayout.LayoutParams.gravity`、`LinearLayout.LayoutParams.gravity/weight`、`RelativeLayout.LayoutParams` 的相对/父容器对齐规则，以及 ConstraintLayout `LayoutParams` 的锚点、偏置、环绕和宽高比。ConstraintLayout 通过读取其公开布局参数字段，不增加 SDK 对 ConstraintLayout 的编译依赖。Android 14 样例已验证 gravity/weight；业务 Debug App 的 1211 节点真机快照已与独立 Debug View 树严格匹配，358 个 RelativeLayout/ConstraintLayout 规则节点全量通过桥接，并在新版桌面属性栏截图确认两类规则可见。其他布局不按控件位置猜测约束。
+以下是每次更新的核对流程，不是安装指令或当前授权。源码构建、安装产物、运行身份、成功采集、冷启动问题、像素一致性及性能分别验收，不能互相替代。
 
-新版 Debug SDK 的 `capture-style(ref)` 只按需读取一个控件的背景 Drawable 类型、可确定的纯色源色，以及 TextView 当前文字色和 px 字号；桌面属性栏点击“读取实时样式”后才调用。Android 14 样例已验纯色父层和文字层。渐变、自绘或 tint 不推断最终显示色；业务 App 需重新构建并接入新版 SDK 才能使用。
+1. **固定输入。** 保留旧业务 APK、SDK AAR、来源指纹、二进制 SHA-256 和签名基线；构建输出会覆盖旧文件，先保存独立副本。缺少来源资产或身份查询能力的旧 APK 不能充当新 AAR 的配对 APK，不伪造资产补过门禁。
+2. **准备 SDK。** 显式构建 `:inspector-sdk:assembleDebug`，核对当前源码指纹、编译类和身份查询实现。AAR 复制到独立目录并记录完整 SHA；业务构建引用该固定副本，不跟随可变输出。仅有“构建成功／任务跳过”不能证明 SDK 已更新。
+3. **构建业务 Debug 包。** 沿用业务已核验的工具链、Debug 任务、内存预算及依赖配置。已有业务接入可用 `-PinspectorSdkAar=/absolute/frozen/inspector-sdk-debug.aar` 指向固定 AAR；这是业务工程提供的参数，不是通用 Gradle 功能。依赖仅放 `debugImplementation`，保留兼容的 HiddenApiBypass 6.0。
+4. **安装前核验。** 包名正确、Debug 为真、版本不低于设备版本、新旧签名一致。`verifyLocalQueueBuild` 核对 APK/AAR 完整 SHA 和唯一来源资产；另外核对实际 DEX 的身份查询校验、BuildConfig 指纹和会话路由，不只搜字符串。不得混入 sample／hold 组件，固定 AAR 的 SHA 在构建前后必须一致；任一不符即停。
+5. **明确范围后安装。** 安装前重新读取设备包路径和完整 SHA；设备字节变化则重新取得安装包并验签，不继承旧证明。仅用 `adb -s SERIAL install -r -t --no-streaming /absolute/verified/app.apk` 保留数据覆盖；不自动卸载、降级、清数据或重装。失败保留原错误；覆盖安装可能结束 App 进程，不能继承安装前状态。
+6. **安装后核验。** 重新检查实际安装路径、包名、Debug、版本和完整 SHA，必须与可信新 APK 一致；split APK 另做完整分包核对。APK、AAR、源码指纹、签名、新旧进程证据分别留存，不继承旧 PID、实例、样例结果或性能数字。
+7. **业务观察另定范围。** 冷启动观察只在明确授权后执行：有界读取新主进程 PID／startTicks，再发一次诊断请求。PID 出现不等于 UI／SDK 就绪；只读进程观察最多 1 秒／10 次，不扩大入口 15 秒、250ms 通知或 32 帧预算。不预读树、不人工 hold，不在失败后重复启动或补跑到成功。恢复验证另定范围。
 
-样例支持 `--es mode stress`（10×10 控件网格）、`--es mode stress-large`（20×20）、`--es mode dynamic`（点击红色文字后修改文本并新增控件）、`--es mode resize`（点击后只改变父子尺寸和文字，保持对象及树结构）、`--es mode surface`（纯绿色 SurfaceView）及 `--es mode partial-failure`（单层超出 400 万像素预算）。Android 14 真机上分别验证了 125 节点/108 张图、435 节点/408 张图，以及动态模式从 14 到 15 节点的重新匹配。`partial-failure` 验证超预算层明确失败、其余层继续采集，不再整批回退。若在旧画面与 SDK 树采集之间改变页面，桌面会拒绝合并并提示；下一轮可恢复。435 节点三轮中位耗时：旧通道约 24.7 秒，混合通道约 25.5 秒，尚无速度收益。
+`sdk-source-v1` 是 SDK 源码和构建配置的关联指纹，写入 BuildConfig 与 AAR/APK 的 `assets/inspector-sdk-build.json`；它**不是二进制摘要或安全认证**。签名校验器的未保护 ZIP 条目警告必须保留，设备包与可信 APK 的完整 SHA 仍单独核对。
 
-局部刷新回归已在同一 Android 14 真机验证：`resize` 模式刷新后父子尺寸与文字同步更新；`surface` 模式分支刷新得到三张互不串色的独立图（父蓝底、Surface 绿色缓冲、透明红字）。Surface 色值相对绘制值存在小幅色彩转换，不能用逐通道完全相等作为画面正确性的断言。单控件刷新与完整采集的物理拔线/重连已在当前 Android 14 设备验证；其他系统和更多断线时点仍待验。
+业务诊断还要求实际进程、实例和可信安装包匹配。Provider 尚未发布时，锁外 SDK 标量查询不能替代系统侧早期观察。单次身份引导、启动取证的限制见 [排队与身份协议](../docs/archive/SDK_REFERENCE_HISTORY_2026-10-15.md#queue-identity) 和 [启动失败复盘](../docs/archive/STARTUP_FAILURE_REVIEW.md)。旧安装与冷启动失败记录见 [业务更新历史](../docs/archive/SDK_REFERENCE_HISTORY_2026-10-15.md#business-update-history)，不得回填或覆盖。
 
-当前已验证原生 View 样例及一款接入 SDK 的业务 Debug App；其他 App 仍需添加 Debug 专用依赖并重新构建，SDK 尚未发布到 Maven。多窗口、更多 Android/OEM、复杂自绘及长期内存未通用验收；上述历史小样例耗时不代表最新全页路径。
+<a id="business-debug-metadata"></a>
+
+## 业务名称与分组信息
+
+Debug 构建可用 `DebugNames.set(view, "业务名称")` 给没有文本或 ID 的控件加显示名。分组业务信息通过 `DebugMetadata` 在主线程登记；桌面启用 SDK 增强并重新采集后读取。属性栏支持按组展示、搜索和复制，快照、历史及调试报告保留采集时的值，关闭增强不删除已有数据。App 在状态变化时重新登记，控件复用前清除；它不会持续监听业务状态。
+
+```java
+import com.androiduiinspector.sdk.DebugMetadata;
+
+DebugMetadata.setGroup(card, "component", "组件信息",
+    DebugMetadata.text("name", "组件名", "SampleCard"),
+    DebugMetadata.text("owner", "归属", "Feed"));
+DebugMetadata.setGroup(card, "state", "页面状态",
+    DebugMetadata.flag("loading", "加载中", false),
+    DebugMetadata.number("retryCount", "重试次数", 0),
+    DebugMetadata.text("error", "错误信息", ""));
+// 再登记同一组会整体替换该组；清理时按需使用：
+DebugMetadata.removeGroup(card, "state");
+DebugMetadata.clear(card);
+```
+
+分层值使用 `tree()` 和 `treeText()`／`treeNumber()`／`treeFlag()`／`treeNull()`；标量空值使用 `nullValue()`。例如：
+
+```java
+DebugMetadata.setGroup(card, "state", "页面状态",
+    DebugMetadata.nullValue("pending", "未获取"),
+    DebugMetadata.tree("detail", "业务详情",
+        DebugMetadata.treeNull("request", "请求",
+            DebugMetadata.treeFlag("loading", "加载中", false),
+            DebugMetadata.treeNumber("retryCount", "重试次数", 0),
+            DebugMetadata.treeText("error", "错误信息", ""))));
+```
+
+- 文字、数字、布尔值保留协议 v1；树或 null 使用 v2。桌面兼容两版，快照只有含 v2 信息才写 v2；`false`、`0`、空字符串与 null 含义不同。
+- 组／字段 key 为字母开头的 ASCII 标识，后续可含数字、下划线、点、短横线，最多 64 字符；显示名最多 64 字符、文字值最多 512 字符。数字必须有限，绝对值不超过 `9,007,199,254,740,991`。
+- 每控件最多 4 组、每组 16 项、序列化预算 16KiB；每树字段最多 128 节点、8 层，根节点计第 1 层。同级 key 不重复，跨父节点可重复；路径用 `/` 分隔，key 不含斜杠。
+- 登记保存数组副本；无效或超限登记抛出异常并保留原登记。每次整树业务值预算 256KiB，超出返回明确未保存标记，原控件树仍可用。
+- SDK 只读控件私有 tag 中显式登记的值，不保留控件全局引用、不反射任意业务对象或执行回调。未登记、已清除或旧 SDK 缺项时不显示卡片。
+
+更多展示说明见 [分层业务信息](../docs/FIRST_USE.md#structured-values)，实现与构建证据见 [业务信息验收](../docs/archive/ACCEPTANCE_HISTORY_2026-10-15.md#business-debug-metadata-acceptance)。接入新接口需要重新构建业务 Debug 包，不能把本地源码验收当成设备版本已更新。
+
+<a id="verification"></a>
+
+## 样例与专项验证
+
+| 模块 | 用途 | 约束 |
+| --- | --- | --- |
+| `sample-app` | 自身图、动态几何、Surface／Texture、取消与失败恢复 | Debug 引入当前 SDK，Release 无 SDK |
+| `sdk-free-sample` | 完全无 SDK 的兼容采集 | 不依赖 SDK／绕过库 |
+| `legacy-window-sample` | 固定旧 SDK 的硬件／软件窗口兼容 | Debug 构建必须传 `-PlegacySdkAar=<核验过的旧AAR绝对路径>`，不引用当前 SDK 项目 |
+| `recognition-sample` | fast／Helper 控件识别对照 | 最低 API 30，无 SDK／绕过库／网络权限 |
+
+本地回归入口、设备范围和隔离约定见 [测试计划](../docs/TEST_PLAN.md)。调用整页或局部采集 API 的 SDK 专项探针显式选择 `sdk-enhanced`；小页面探针的 `--default-route` 指增强模式内的自动图片路由，不是应用默认标准模式。设备采集探针必须串行：现有图片路径由请求共享，并行会覆盖或清理彼此文件。安装、重启、导航和故障注入须符合本轮已明确的对象和范围，历史记录不构成重复操作授权。
+
+计时必须区分 SDK 内部累计值、主机往返、文件与像素核验和物理上屏。嵌套阶段及并行线程累计值不能直接相加；未执行或未知字段不补零。失败保留原报告，只清理本次资源；后续成功不覆盖先前失败。详细命令、模式互斥和证据按主题查阅：
+
+- [会话建立与计时](../docs/archive/SDK_REFERENCE_HISTORY_2026-10-15.md#session-timing)
+- [父分支恢复与模式互斥](../docs/archive/SDK_REFERENCE_HISTORY_2026-10-15.md#branch-recovery)
+- [超时、晚到结果和失败清理](../docs/archive/SDK_REFERENCE_HISTORY_2026-10-15.md#timeout-diagnostics)
+- [轻量几何与输出流水线](../docs/archive/SDK_REFERENCE_HISTORY_2026-10-15.md#immutable-geometry)
+- [性能实验及反例](../docs/archive/SDK_REFERENCE_HISTORY_2026-10-15.md#timing-experiments)
+- [矩形放置、图片流与会话协议](../docs/archive/SDK_REFERENCE_HISTORY_2026-10-15.md#geometry-contracts)

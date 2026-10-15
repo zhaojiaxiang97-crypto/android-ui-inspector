@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { adoptSdkTree, joinSdkTreeAndDebugImages, sdkGroupBranchMatches, verifySdkTreeBeforeImages } from "../electron/sdk-hybrid";
+import { adoptSdkTree, joinSdkRefreshEvidence, joinSdkTreeAndDebugImages, sdkGroupBranchMatches, verifySdkTreeBeforeImages } from "../electron/sdk/sdk-hybrid";
 import { makeNode } from "../benchmarks/fixtures";
 import type { UiNode, UiSnapshot } from "../shared/types";
 
@@ -34,6 +34,37 @@ test("SDK-only happy path adopts the SDK tree and fails closed on dump mismatche
   assert.equal(root.children[0].children[0].attributes?.["alpha"], "1");
   assert.equal(root.children[0].children[0].attributes?.["effective-alpha"], "1");
   assert.equal(root.attributes?.["sdk-process-instance"], sdk.processInstance);
+  const wake = donors();
+  adoptSdkTree(wake, { ...sdk, uiWakeVersion: 1 }, "sample.app", 42);
+  assert.equal(wake.attributes?.["sdk-ui-wake-version"], "1");
+  adoptSdkTree(wake, sdk, "sample.app", 42);
+  assert.equal(wake.attributes?.["sdk-ui-wake-version"], "", "old SDK cannot inherit a wake capability");
+  assert.throws(() => adoptSdkTree(donors(), { ...sdk, uiWakeVersion: 2 }, "sample.app", 42), /唤醒协议/);
+  const hardware = donors();
+  adoptSdkTree(hardware, { ...sdk, root: { ...sdk.root, children: [{ ...child, hardwareAccelerated: true }] } }, "sample.app", 42);
+  assert.equal(hardware.children[0].children[0].attributes?.["sdk-hardwareAccelerated"], "true");
+  const unknownHardware = donors();
+  unknownHardware.children[0].children[0].attributes!["sdk-hardwareAccelerated"] = "true";
+  adoptSdkTree(unknownHardware, sdk, "sample.app", 42);
+  assert.equal(unknownHardware.children[0].children[0].attributes?.["sdk-hardwareAccelerated"], undefined, "missing SDK evidence cannot inherit donor evidence");
+  assert.throws(() => adoptSdkTree(donors(), { ...sdk, root: { ...sdk.root, children: [{ ...child, hardwareAccelerated: "true" }] } }, "sample.app", 42), /hardwareAccelerated/);
+  const clipping = donors();
+  const clippingTree = { ...sdk, root: { ...sdk.root, clipChildren: true, clipToPadding: false } };
+  adoptSdkTree(clipping, clippingTree, "sample.app", 42);
+  assert.equal(clipping.children[0].attributes?.["clip-children"], "true");
+  assert.equal(clipping.children[0].attributes?.["clip-to-padding"], "false");
+  const changedClipping = joinSdkRefreshEvidence({ serial: "fixture", root: clipping, nodeCount: 3, inspectionSource: "debug-view", error: null } as UiSnapshot,
+    { ...sdk, root: { ...sdk.root, clipChildren: false, clipToPadding: true } }, "sample.app", 42, sdk.processInstance);
+  assert.equal(changedClipping.root!.children[0].attributes?.["clip-children"], "false", "fresh clipping flags replace old values, including false");
+  assert.equal(changedClipping.root!.children[0].attributes?.["clip-to-padding"], "true");
+  for (const key of ["clipChildren", "clipToPadding"]) {
+    assert.throws(() => adoptSdkTree(donors(), { ...sdk, root: { ...sdk.root, [key]: "false" } }, "sample.app", 42), new RegExp(key));
+  }
+  const live = { serial: "fixture", root: hardware, nodeCount: 3, inspectionSource: "debug-view", error: null } as UiSnapshot;
+  const renewed = joinSdkRefreshEvidence(live, { ...sdk, root: { ...sdk.root, children: [{ ...child, hardwareAccelerated: false }] } }, "sample.app", 42, sdk.processInstance);
+  assert.equal(renewed.root!.children[0].children[0].attributes?.["sdk-hardwareAccelerated"], "false", "fresh evidence must replace the old true flag");
+  assert.throws(() => joinSdkRefreshEvidence(live, { ...sdk, processInstance: "22222222-2222-2222-2222-222222222222" }, "sample.app", 42, sdk.processInstance), /进程身份/);
+  assert.throws(() => joinSdkRefreshEvidence(live, { ...sdk, root: { ...sdk.root, children: [{ ...child, width: 31 }] } }, "sample.app", 42, sdk.processInstance), /尺寸不一致/);
   assert.doesNotThrow(() => verifySdkTreeBeforeImages(root, 3, sdk, "sample.app", 42), "the adopted tree satisfies the normal merger");
   const faded = donors();
   adoptSdkTree(faded, { ...sdk, root: { ...sdk.root, alpha: 0.5, children: [{ ...child, alpha: 0 }] } }, "sample.app", 42);
@@ -61,6 +92,31 @@ test("SDK-only happy path adopts the SDK tree and fails closed on dump mismatche
   assert.throws(() => adoptSdkTree(misplaced, sdk, "sample.app", 42), /父子关系/);
   assert.throws(() => adoptSdkTree(donors(), { ...sdk, root: { ...sdk.root, ref: "android.widget.FrameLayout@c" } }, "sample.app", 42), /窗口/);
   assert.throws(() => adoptSdkTree(donors(), sdk, "sample.app", 43), /进程/);
+
+  const replaced = donors();
+  replaced.children[0].children[0].attributes!["clip-to-outline"] = "true";
+  replaced.children[0].children[0].layerImageDataUrl = "data:image/png;base64,stale";
+  const fresh = { ...sdk, root: { ...sdk.root, children: [{ ...child, ref: "android.widget.TextView@f", width: 42, text: "NEW CHILD" }] } };
+  assert.throws(() => adoptSdkTree(replaced, fresh, "sample.app", 42), /不在 SDK 树中/);
+  adoptSdkTree(replaced, fresh, "sample.app", 42, "merged-capture");
+  const newChild = replaced.children[0].children[0];
+  assert.equal(newChild.attributes?.["view-ref"], "android.widget.TextView@f");
+  assert.equal(newChild.text, "NEW CHILD");
+  assert.equal(newChild.bounds!.right - newChild.bounds!.left, 42);
+  assert.equal(newChild.layerImageDataUrl, undefined);
+  assert.equal(newChild.attributes?.["clip-to-outline"], undefined);
+  const unchanged = donors();
+  const saved = JSON.stringify(unchanged);
+  for (const invalid of [
+    { ...fresh, pid: 43 }, { ...fresh, packageName: "other.app" },
+    { ...fresh, processInstance: "invalid" },
+    { ...fresh, root: { ...fresh.root, ref: "android.widget.FrameLayout@ff" } },
+    { ...fresh, root: { ...fresh.root, children: [{ ...child, className: "android.widget.ImageView" }] } },
+    { ...fresh, root: { ...fresh.root, children: [{ ...child, paddingLeft: "invalid" }] } },
+  ]) {
+    assert.throws(() => adoptSdkTree(unchanged, invalid, "sample.app", 42, "merged-capture"));
+    assert.equal(JSON.stringify(unchanged), saved, "a rejected tree leaves the original unchanged");
+  }
 });
 
 test("SDK tree joins only the same process, view identities and geometry", () => {
@@ -98,6 +154,10 @@ test("SDK tree joins only the same process, view identities and geometry", () =>
     { ...sdk, root: { ...sdk.root, children: [] } }, "sample.app", 42), /父子关系/,
   "a changing page must not merge stale SDK properties");
   assert.equal(joined.inspectionSource, "debug-hybrid");
+  assert.equal(joined.root?.attributes?.["sdk-ref-debug-canvas-version"], undefined);
+  assert.equal(joinSdkTreeAndDebugImages(snapshot, { ...sdk, refDebugCanvasVersion: 1 }, "sample.app", 42)
+    .root?.attributes?.["sdk-ref-debug-canvas-version"], "1");
+  assert.throws(() => joinSdkTreeAndDebugImages(snapshot, { ...sdk, refDebugCanvasVersion: 2 }, "sample.app", 42));
   assert.equal(joined.root?.attributes?.["sdk-style-version"], "1");
   assert.equal(joinSdkTreeAndDebugImages(snapshot, { ...sdk, styleVersion: undefined }, "sample.app", 42).root?.attributes?.["sdk-style-version"], undefined);
   assert.equal(joined.root?.children[0].children[0].text, "RED CHILD");
