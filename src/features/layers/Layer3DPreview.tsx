@@ -6,6 +6,7 @@ import { layerImageProvenance, layerImagePresentation } from "../../../shared/la
 import { nodePresentationStatus } from "../../../shared/node-presentation-status";
 import { nodeCaptureFacts } from "../../../shared/node-capture-facts";
 import { emptyLayerIds } from "../../../shared/empty-layers";
+import { deferredLayerIds } from "../../../shared/deferred-layers";
 import { type Rect, type LayerCamera, type LayerSceneHandle, type LayerMeasurementState, type Point } from "./types";
 import { indexLayerTree, subtreeHasHidden, groupImageFor, hasOwnVisualStyle, outlineAncestors, nativeTextureKey, textureImageVersions, subtreeTextureVersions, collapsedTextureKey, layerPlaneRoles, usesTextOnlyTexture, visualFor } from "./presentation";
 import { pickProjectedPlane } from "./projection";
@@ -18,7 +19,7 @@ import { resolveVisibleHoverId } from "../../../shared/node-hover";
 import { useNodeHover } from "../inspection/NodeHoverContext";
 import { candidateOnPaintedPlane, filterQuickSelectResult, findQuickSelectCandidates, pointOnPaintedPlane, quickSelectMessage, type QuickSelectCandidate, type QuickSelectResult } from "./quick-select";
 import { findPositionCandidates } from "./position-select";
-import { buildSceneLayout, overflowSceneSelection, buildBaseScenePlanes, buildSceneHighlights, buildSceneFraming, buildScenePresentation } from "./scene-model";
+import { buildSceneLayout, overflowSceneSelection, buildBaseScenePlanes, buildSceneHighlights, buildSceneFraming, buildScenePresentation, deferredGroupCandidates } from "./scene-model";
 import { MAX_LAYER_TEXTURE_PIXELS } from "./scene-texture-runtime";
 import { useLayerSceneRuntime } from "./useLayerSceneRuntime";
 
@@ -81,18 +82,22 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
   const groupContextMatches = groupData.context.root === root && groupData.context.src === src && groupData.context.sessionKey === sessionKey
     && groupData.context.capture === onCaptureGroup && groupData.context.savedGroups === savedGroups;
   const groupImages = groupContextMatches ? groupData.images : savedGroups;
+  // Focus can expose a clipped branch without changing the saved preference.
+  const showOffscreen = appearance.showOffscreen || Boolean(focusedNode);
   const emptyNodeIds = useMemo(() => emptyLayerIds(root, expandedNodeIds, new Set(groupImages.keys())), [root, expandedNodeIds, groupImages]);
   const emptyVisibilityKey = useMemo(() => appearance.showEmpty ? "[]" : JSON.stringify([...emptyNodeIds].sort()), [appearance.showEmpty, emptyNodeIds]);
+  const deferredNodeIds = useMemo(() => deferredLayerIds(root, expandedNodeIds, new Set(groupImages.keys()), hiddenNodeIds, showOffscreen), [root, expandedNodeIds, groupImages, hiddenNodeIds, showOffscreen]);
+  const showDeferredStructure = appearance.showEmpty && appearance.structureMode === "complete";
+  const deferredVisibilityKey = useMemo(() => showDeferredStructure ? "[]" : JSON.stringify([...deferredNodeIds].sort()), [showDeferredStructure, deferredNodeIds]);
   // Stable membership prevents a late group image from rebuilding unchanged
   // geometry. This is a canvas filter; manual hiding and the tree stay separate.
-  const layoutHiddenIds = useMemo(() => new Set<string>([...hiddenNodeIds, ...(JSON.parse(emptyVisibilityKey) as string[])]), [hiddenNodeIds, emptyVisibilityKey]);
+  const layoutHiddenIds = useMemo(() => new Set<string>([...hiddenNodeIds, ...(JSON.parse(emptyVisibilityKey) as string[]),
+    ...(JSON.parse(deferredVisibilityKey) as string[])]), [hiddenNodeIds, emptyVisibilityKey, deferredVisibilityKey]);
   const selectedEmptyHidden = Boolean(selectedNode && !appearance.showEmpty && emptyNodeIds.has(selectedNode.id) && !hiddenNodeIds.has(selectedNode.id));
+  const selectedDeferredHidden = Boolean(selectedNode && !showDeferredStructure && deferredNodeIds.has(selectedNode.id) && !hiddenNodeIds.has(selectedNode.id));
   const groupRequestStates = groupContextMatches ? groupData.requests : new Map();
   const savedImages = useMemo(() => new Set(savedGroupImages.map(group => group.image)), [savedGroupImages]);
   const treeIndex = useMemo(() => indexLayerTree(root), [root]);
-  // A focused offscreen branch is inspectable on its own, without exposing every
-  // other offscreen page or changing the user's saved global preference.
-  const showOffscreen = appearance.showOffscreen || Boolean(focusedNode);
   const geometryRevision = useRef(0);
   const buildLayout = useMemo(() => (selection: UiNode | null) => {
     geometryRevision.current++;
@@ -108,9 +113,12 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
   const records = useMemo(() => layout.records.filter((record) => !hiddenNodeIds.has(record.id)), [layout.records, hiddenNodeIds]);
   const parent = layout.parent && !hiddenNodeIds.has(layout.parent.id) ? layout.parent : null;
   const visibilityKey = useMemo(() => JSON.stringify([...hiddenNodeIds].sort()), [hiddenNodeIds]);
-  const quickContext = useMemo(() => ({}), [root, src, sessionKey, visibilityKey, emptyVisibilityKey, expandedNodeIds, focusedNode, focusKind, appearance.showInvisible, showOffscreen, framingScope, displayMode, appearance.structureMode]);
+  const quickContext = useMemo(() => ({}), [root, src, sessionKey, visibilityKey, emptyVisibilityKey, deferredVisibilityKey, expandedNodeIds, focusedNode, focusKind, appearance.showInvisible, showOffscreen, framingScope, displayMode, appearance.structureMode]);
   const collapsedRecords = [parent, ...records].filter((record): record is LayerRecord => Boolean(record?.isCollapsed && !record.isDeviceInvisible && !subtreeHasHidden(record.node, hiddenNodeIds)
     && (record.node.attributes?.["inspection-source"] === "debug-qml" || root.attributes?.["tree-source"] === "debug-sdk")));
+  const pendingGroups = useMemo(() => deferredGroupCandidates({ root, size, expandedNodeIds, focusedNode, focusKind, showOffscreen },
+    deferredNodeIds, hiddenNodeIds, selectedNode?.id), [root, size, expandedNodeIds, focusedNode, focusKind, showOffscreen, deferredNodeIds, hiddenNodeIds, selectedNode?.id]);
+  const groupCandidates = new Map([...collapsedRecords.map(record => [record.id, record.node] as const), ...pendingGroups.map(node => [node.id, node] as const)]);
   const shownGroupImages = collapsedRecords.map(record => groupImageFor(record, groupImages, hiddenNodeIds)).filter((image): image is QmlGroupImage => Boolean(image));
   const textureRecords = useMemo(() => [parent, ...records].filter((record): record is LayerRecord => Boolean(record && !record.isDeviceInvisible && hasOwnVisualStyle(record, size, hiddenNodeIds, groupImages) && (record.isCollapsed || record.node.layerImageDataUrl))), [groupImages, hiddenNodeIds, parent, records, size]);
   // Full-layout inspection exposes each own image outside its ancestors. Keep
@@ -148,7 +156,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
   const provenanceFor = (record: LayerRecord) => {
     const provenance = layerImageProvenance({ collapsed: record.isCollapsed,
       hasGroup: Boolean(groupImageFor(record, groupImages, hiddenNodeIds)), hiddenDescendants: subtreeHasHidden(record.node, hiddenNodeIds),
-      canRequestGroup: Boolean(onCaptureGroup && collapsedRecords.some(item => item.id === record.id)),
+      canRequestGroup: Boolean(onCaptureGroup && groupCandidates.has(record.id)),
       requestState: groupRequestStates.get(record.id), ownSource: nodeCaptureFacts(record.node).captureSource });
     const role = record === parent ? parentRole : roles.get(record.id);
     return { ...provenance, source: role === "surface" ? provenance.source : "none" };
@@ -220,7 +228,7 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
   useLayoutEffect(() => {
     const scene = runtime.current;
     if (!scene) return;
-    scene.setDemand({ textures: textureDemands, groups: new Map(collapsedRecords.map(record => [record.id, record.node])),
+    scene.setDemand({ textures: textureDemands, groups: groupCandidates, pendingGroupIds: pendingGroups.map(node => node.id),
       selectedId: selectedNode?.id, visibility: visibilityKey, viewport: viewportRef.current ?? { left: 0, top: 0,
         width: canvasRef.current?.clientWidth || size.width * renderScale, height: canvasRef.current?.clientHeight || size.height * renderScale } });
     scene.setFrame({ target: { planes: scenePlanes, presentation: targetPresentation }, motionContext, expanded: expandedNodeIds,
@@ -396,8 +404,9 @@ export const Layer3DPreview = forwardRef<LayerSceneHandle, Props>(function Layer
         测距已固定：{summary}。按原始外框测量，不含 3D 展开层距。
       </span>}
       {rendererStatus === "fallback" && <span className="layer-webgl-fallback">{focusedNode ? "WebGL 不可用，请退出聚焦查看截图。" : "WebGL 不可用，已回退到截图预览。"}</span>}
-      {(displayMode === "wireframe" || invisibleCount > 0 || selectedEmptyHidden || selectedImagePresentation || layout.truncated || textureWarning || shownGroupImages.length > 0 || localCompositeCount > 0) && <span className="layer-resource-note" role="status">{[
+      {(displayMode === "wireframe" || invisibleCount > 0 || selectedEmptyHidden || selectedDeferredHidden || selectedImagePresentation || layout.truncated || textureWarning || shownGroupImages.length > 0 || localCompositeCount > 0) && <span className="layer-resource-note" role="status">{[
         selectedEmptyHidden ? "所选控件为空图层，已从画布隐藏；可在 3D 设置中开启“显示空图层”查看边界" : null,
+        selectedDeferredHidden ? "所选控件的独立画面尚未读取；读取后显示，也可开启完整结构查看边界" : null,
         displayMode === "wireframe" ? "仅边框：只显示当前平面边界；折叠分支保留父平面，内部空白不参与点选" : null,
         invisibleCount ? `${invisibleCount} 个不可见控件仅显示虚线边界` : null,
         selectedImagePresentation ? `${nodeDisplayLabel(selectedRecord!.node)}：${selectedImagePresentation.label}。${selectedImagePresentation.detail}` : null,

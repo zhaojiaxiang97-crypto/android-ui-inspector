@@ -2,11 +2,11 @@ import { isLayerCapturePlacement } from "../../../shared/capture-transform";
 import { buildLayerLayout, buildLayerOverview, layerPath, type LayerOverviewResult, type LayerRecord } from "../../../shared/layer-layout";
 import { isQuietStructure } from "../../../shared/layer-structure";
 import { layerPlaneOpacity } from "../../../shared/layer-textures";
-import { clipBounds } from "../../../shared/screen-coordinates";
+import { clipBounds, validBounds } from "../../../shared/screen-coordinates";
 import type { PixelSize, UiNode } from "../../../shared/types";
 import type { LayerAppearance } from "./appearance";
 import { layerFraming, type LayerFramingScope } from "./framing";
-import { scaledRect, sourceRect } from "./presentation";
+import { scaledRect, sourceRect, subtreeHasHidden } from "./presentation";
 import { layerOutlinePolicy } from "./scene-planes";
 import type { LayerPlaneRole, LayerPresentation, Rect, ScenePivot, ScenePlane } from "./types";
 
@@ -22,6 +22,32 @@ export type SceneLayoutOptions = {
   showOffscreen: boolean;
   structureMode: LayerAppearance["structureMode"];
 };
+
+// Pending folded branches have no plane yet, but must still be able to acquire
+// their first group image. These candidates never enter depth/fit/picking.
+export function deferredGroupCandidates(options: Pick<SceneLayoutOptions, "root" | "size" | "expandedNodeIds" | "focusedNode" | "focusKind" | "showOffscreen">,
+  deferredIds: ReadonlySet<string>, hiddenIds: ReadonlySet<string>, selectedId?: string): UiNode[] {
+  if (!deferredIds.size) return [];
+  const { root, size, expandedNodeIds, focusedNode, focusKind, showOffscreen } = options;
+  const { entries } = layerPath(root, focusedNode?.id ?? root.id, showOffscreen);
+  const pending = [focusedNode ?? root], candidates: UiNode[] = [];
+  while (pending.length) {
+    const node = pending.pop()!, entry = entries.get(node.id);
+    if (!entry || entry.isDeviceInvisible) continue;
+    const folded = node.children.length > 0 && !expandedNodeIds.has(node.id);
+    if (folded && deferredIds.has(node.id) && node.bounds && validBounds(node.bounds) && (showOffscreen || clipBounds(node.bounds, size))
+      && !subtreeHasHidden(node, hiddenIds)
+      && (node.attributes?.["inspection-source"] === "debug-qml" || root.attributes?.["tree-source"] === "debug-sdk")) {
+      // Match the scene's bounded working set while retaining an explicitly
+      // selected branch beyond the cap, including after earlier group failures.
+      if (candidates.length < 512) candidates.push(node);
+      else if (node.id === selectedId) candidates[candidates.length - 1] = node;
+    }
+    if (!folded && (!focusedNode || focusKind === "branch"))
+      for (let index = node.children.length - 1; index >= 0; index--) pending.push(node.children[index]);
+  }
+  return candidates;
+}
 
 // Selection only enters layout when it must retain a node beyond the cap.
 // Ordinary selection and hover consume the same geometry through highlights.

@@ -2,12 +2,15 @@ import { z } from "zod";
 import type { DebugReportStep, DebugSessionReport, DebugSnapshotEvidence } from "./debug-report";
 import type { DebugTaskAssessment, DebugTaskCheckResult, DebugTaskRecord } from "./debug-task";
 import type { UiSnapshot } from "./types";
+import { helperObservationDiagnosticsSchema } from "./helper-observation-diagnostics";
+import { helperRecoveryDiagnosticsSchema } from "./helper-recovery-diagnostics";
 
 const text = z.string().max(16000);
 const id = z.string().min(1).max(2048);
 const status = z.enum(["passed", "failed", "timedout", "interrupted", "skipped", "flaky", "blocked", "running", "pending"]);
 const source = z.object({ file: text, line: z.number().int().positive().optional(), column: z.number().int().nonnegative().optional() }).nullable();
 const error = z.object({ category: text.optional(), code: text.optional(), message: text.optional(), phase: text.optional(),
+  helperDiagnostics: helperObservationDiagnosticsSchema.optional(), helperRecoveryDiagnostics: helperRecoveryDiagnosticsSchema.optional(),
   source: source.optional(), details: z.unknown().optional() }).nullable();
 const artifact = z.object({ id, kind: z.enum(["screenshot", "trace", "video", "download", "log"]), stepId: id.nullable(),
   failureEvidence: z.boolean(), availability: text, href: text.nullable(), sha256: text.nullable(), stepReferenceMissing: z.boolean().optional() });

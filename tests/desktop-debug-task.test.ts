@@ -52,7 +52,8 @@ function harness() {
   scope.runtime = { get quitting() { return scope.quitting; }, operations: createWindowOperationScope() };
   scope.awaitDialogSelection = awaitDialogSelection;
   scope.inspectionService = { hasInspections: () => scope.inspections.size > 0, hasGroupCaptures: () => scope.groupCaptures.size > 0,
-    hasViewRefreshes: () => scope.viewRefreshes.size > 0 };
+    hasViewRefreshes: () => scope.viewRefreshes.size > 0,
+    hasActivity: () => scope.inspections.size > 0 || scope.groupCaptures.size > 0 || scope.viewRefreshes.size > 0 };
   scope.requireDesktopOwner = requireDesktopOwner;
   scope.requireDesktopSender = mainFunction("requireDesktopSender", scope);
   scope.withPreviewHeld = mainFunction("withPreviewHeld", scope);

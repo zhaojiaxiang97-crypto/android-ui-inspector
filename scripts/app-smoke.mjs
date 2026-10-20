@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,8 @@ const deviceLifecycle = process.argv.includes("--device-capture-lifecycle");
 const dragOutside = process.argv.includes("--drag-outside");
 const homeOnly = process.argv.includes("--home-only");
 const workbenchOnly = process.argv.includes("--workbench-only");
+const navigationGuard = process.argv.includes("--check-navigation-guard");
+const snapshotDelete = process.argv.includes("--check-snapshot-delete");
 const fixtureStateArgument = process.argv.find((value) => value.startsWith("--fixture-state="))?.slice("--fixture-state=".length);
 const fixtureState = fixtureStateArgument ?? "connected";
 const viewportArgument = process.argv.find((value) => value.startsWith("--viewport="))?.slice("--viewport=".length);
@@ -29,7 +31,8 @@ const viewportMatch = viewportArgument?.match(/^(\d+)x(\d+)$/i);
 const requestedViewport = viewportMatch ? { width: Number(viewportMatch[1]), height: Number(viewportMatch[2]) } : null;
 const scaleArgument = process.argv.find((value) => value.startsWith("--scale-factor="))?.slice("--scale-factor=".length);
 const requestedScaleFactor = scaleArgument ? Number(scaleArgument) : null;
-const supportedOptions = ["--packaged", "--require-device", "--require-live-style", "--expect-landscape", "--reduced-motion", "--fixture", "--fixture-capture-lifecycle", "--device-capture-lifecycle", "--drag-outside", "--home-only", "--workbench-only"];
+const supportedOptions = ["--packaged", "--require-device", "--require-live-style", "--expect-landscape", "--reduced-motion", "--fixture", "--fixture-capture-lifecycle", "--device-capture-lifecycle", "--drag-outside", "--home-only", "--workbench-only", "--check-navigation-guard", "--check-snapshot-delete"];
+if (snapshotDelete && (!fixture || packaged)) throw new Error("Snapshot deletion check requires an isolated fixture");
 if (deviceLifecycle && (!requireDevice || fixture || homeOnly || workbenchOnly || requireLiveStyle)) throw new Error("Device lifecycle requires a real authorized device only");
 if (fixtureLifecycle && (!fixture || packaged || requireDevice || homeOnly || workbenchOnly || fixtureState !== "connected")) throw new Error("Capture lifecycle requires only the connected development fixture");
 if (process.argv.slice(2).some((value) => !supportedOptions.includes(value) && !value.startsWith("--viewport=") && !value.startsWith("--scale-factor=") && !value.startsWith("--fixture-state="))) throw new Error("Supported options: --packaged --require-device --require-live-style --expect-landscape --reduced-motion --fixture --drag-outside --home-only --workbench-only --viewport=WxH --scale-factor=N --fixture-state=connected|loading|unauthorized|empty|adb-missing");
@@ -176,6 +179,41 @@ try {
   }
   if (requestedScaleFactor !== null) assert.ok(Math.abs(runtime.devicePixelRatio - requestedScaleFactor) < 0.06, `Requested scale factor ${requestedScaleFactor} was not applied`);
   recordCheck("sandboxed React window and preload");
+  if (snapshotDelete && homeOnly) {
+    const before = await evaluate("window.electronApi.loadSnapshots().then(result => result.snapshots.length)");
+    assert.equal(before, 0, "The fixture profile unexpectedly contains user history");
+    const created = await evaluate(`window.electronApi.saveSnapshot({
+      capturedAt: new Date().toISOString(), snapshot: {
+        serial: "local-fixture", root: null, nodeCount: 0, xmlSize: 0, rawXml: null,
+        screenshotDataUrl: null, warning: null, error: null
+      }
+    }).then(result => ({ error: result.error, id: result.snapshots.at(-1)?.id }))`);
+    assert.equal(created.error, null, "The isolated snapshot was not saved");
+    assert.ok(created.id, "Saved snapshot is missing its ID");
+    assert.equal(await evaluate("window.electronApi.loadSnapshots().then(result => result.snapshots.length)"), 1);
+    if (process.platform !== "win32") {
+      const access = statSync(join(output, "profile", "snapshots.json")).mode & 0o777;
+      assert.equal(access, 0o600, "Snapshot history must be readable only by its owner");
+    }
+    assert.ok(await evaluate("window.electronApi.deleteSnapshot('bad-id').then(result => Boolean(result.error))"),
+      "An invalid snapshot ID was accepted");
+    assert.equal(await evaluate(`window.electronApi.deleteSnapshot(${JSON.stringify(created.id)}).then(result => result.snapshots.length)`), 0,
+      "Deleting a specific snapshot failed");
+    assert.equal(await evaluate("window.electronApi.loadSnapshots().then(result => result.snapshots.length)"), 0);
+    recordCheck("isolated preload snapshot save/delete preserves unrelated state and rejects invalid IDs");
+  }
+  if (navigationGuard) {
+    const initialUrl = await evaluate("location.href");
+    assert.ok(initialUrl.startsWith("file:") || initialUrl.startsWith("http://127.0.0.1:"));
+    const popup = await connection.send("Runtime.evaluate", {
+      expression: "window.open('about:blank', '_blank') === null", returnByValue: true, userGesture: true,
+    });
+    assert.equal(popup.result?.value, true, "An untrusted new window was opened");
+    await evaluate("location.assign('http://127.0.0.1:1/untrusted'); true");
+    await delay(350);
+    assert.equal(await evaluate("location.href"), initialUrl, "Renderer navigated outside its document");
+    recordCheck("native Electron denies renderer navigation and new windows");
+  }
   const loadingFixture = homeOnly && fixtureState === "loading";
   if (loadingFixture) {
     await delay(120);
@@ -248,6 +286,7 @@ try {
         oldMetrics: Boolean(document.querySelector('.metrics-grid')),
         oldStatus: Boolean(document.querySelector('.status-banner')),
         oldContentGrid: Boolean(document.querySelector('.content-grid')),
+        redundantHomeCopy: Boolean(document.querySelector('.home-launch-heading, .home-check-time')),
         captureButtons: document.querySelectorAll('.capture-button').length,
         captureVisible: Boolean(document.querySelector('.home-primary-action.capture-button')?.getClientRects().length),
         overflowX: document.documentElement.scrollWidth - innerWidth,
@@ -256,12 +295,12 @@ try {
     assert.ok(homeState.view?.width > 0 && homeState.state?.width > 0, "Reference home state is not visible");
     assert.ok(homeState.art?.width > 0 && homeState.primaryAction?.width > 0, "Home device preview or primary action is missing");
     assert.ok(homeState.help?.width > 0, "Home help affordance is missing");
-    assert.ok(Number.parseFloat(homeState.heading?.fontSize ?? "0") >= 18, "Home device heading is unreadable");
+    assert.equal(homeState.redundantHomeCopy, false, "Redundant home heading or check time remains");
     const expectedHomeState = fixtureState === "empty" ? "no-device" : fixtureState;
     assert.ok(homeState.stateClass.includes(`state-${expectedHomeState}`), `Home state class does not expose ${expectedHomeState}`);
     if (fixtureState === "connected") {
-      assert.ok(Number.parseFloat(homeState.platform?.fontSize ?? "0") >= 12, "Home device version is unreadable");
-      assert.equal(homeState.platformText, "Android 15", "Connected home did not expose the Android version");
+      assert.equal(homeState.heading, null, "Connected home should omit the device model heading");
+      assert.equal(homeState.platform, null, "Connected home should omit the Android version");
       assert.ok(homeState.secondaryAction?.width > 0, "Connected home switch-device action is missing");
       assert.equal(homeState.secondaryText, "刷新设备, 切换设备");
       await evaluate("document.querySelector('.home-secondary-actions button[aria-haspopup=dialog]').click()");
@@ -270,6 +309,7 @@ try {
       await evaluate("document.querySelector('.home-device-switcher-close').click()");
       await until(() => evaluate("!document.querySelector('.home-device-switcher')"), "close home device switcher");
     } else {
+      assert.ok(Number.parseFloat(homeState.heading?.fontSize ?? "0") >= 18, "Home recovery heading is unreadable");
       assert.equal(homeState.platform, null, "Empty home state should not render a stale Android version");
       assert.equal(homeState.secondaryText, fixtureState === "unauthorized" ? "切换设备" : "", "Unavailable home state exposed an incorrect secondary action");
       assert.equal(homeState.primaryText, fixtureState === "loading" ? "正在检查…" : "刷新设备");
@@ -380,6 +420,10 @@ try {
       await evaluate("document.querySelector('.workbench-scene-tools > .snapshot-drawer').open = true");
       await evaluate("Array.from(document.querySelectorAll('.workbench-scene-tools > .snapshot-drawer .snapshot-actions button')).find(button => button.textContent === '保存快照').click()");
       await until(() => evaluate("document.querySelectorAll('.workbench-scene-tools > .snapshot-drawer .snapshot-history-item').length === 1"), "save capture before interaction assertions");
+      assert.equal(await evaluate("document.querySelectorAll('.workbench-scene-tools > .snapshot-drawer .snapshot-history-export').length"), 1, "Saved history has no full export action");
+      assert.equal(await evaluate("document.querySelectorAll('.workbench-scene-tools > .snapshot-drawer .snapshot-history-delete').length"), 1, "Saved history has no selective delete action");
+      assert.match(await evaluate("document.querySelector('.workbench-scene-tools > .snapshot-drawer .snapshot-history-heading')?.textContent || ''"), /磁盘.*MiB.*200 MiB/);
+      recordCheck("saved history exposes export, selective deletion and on-disk usage");
       report.captureSavedBeforeInteractions = true;
       await evaluate("document.querySelector('.workbench-scene-tools > .snapshot-drawer').open = false");
     }
@@ -439,6 +483,8 @@ try {
       await until(() => evaluate("document.querySelector('.layer-webgl-canvas')?.dataset.layerRenderer === 'webgl'"), "WebGL scene renderer");
       if (!await evaluate("Boolean(document.querySelector('.layer-plane.selected'))")) await evaluate("document.querySelector('.layer-plane')?.click()");
       await until(() => evaluate("Boolean(document.querySelector('.layer-plane.selected') && document.querySelector('.tree-row.selected') && document.querySelector('.layer-plane.selected').dataset.layerNodeId === document.querySelector('.tree-row.selected').dataset.treeId)"), "3D selection synchronization");
+      await evaluate("document.querySelector('summary[aria-label=\"连续缩放\"]')?.click()");
+      await until(() => evaluate("document.querySelectorAll('.zoom-preset-select option').length === 7"), "continuous zoom preset popup");
       const layerState = await evaluate(`(() => {
         const canvas = document.querySelector('.layer-webgl-canvas');
         const selectedPlane = document.querySelector('.layer-plane.selected');
@@ -491,6 +537,7 @@ try {
         animationDuration: (() => { const canvas = document.querySelector('.layer-webgl-canvas'); return canvas ? getComputedStyle(canvas).animationDuration : null; })(),
       };
       })()`);
+      report.layerState = layerState;
       assert.equal(layerState.mode, "layers3d");
       assert.equal(layerState.renderer, "webgl", `3D scene did not initialize WebGL: ${layerState.rendererError || 'unknown error'}`);
       if (!report.inspectionSummary.includes("QML Debug")) assert.equal(layerState.expandedParentNonNativeCount, 0, "Expanded parent layers must only use their own native image");
@@ -513,10 +560,14 @@ try {
       assert.equal(layerState.selectedLayerId, layerState.selectedTreeId, "3D selected plane does not follow tree selection");
       assert.equal(layerState.hasZoomToolbar, true);
       assert.equal(layerState.zoomPresetCount, 7, "Zoom presets do not cover custom plus 50/100/200/400/800/1600");
-      assert.equal(layerState.hasLayerOptions, true);
+      await evaluate("document.querySelector('summary[aria-label=\"连续缩放\"]')?.click()");
+      await evaluate("document.querySelector('summary[aria-label=\"3D 层级设置\"]')?.click()");
+      await until(() => evaluate("Boolean(document.querySelector('.layer-options') && document.querySelector('.orbit-readout') && document.querySelector('.window-stack-label'))"), "3D settings popup");
+      const orbitText = await evaluate("document.querySelector('.orbit-readout').textContent.trim()");
+      assert.match(orbitText, /水平.*俯仰/);
+      await evaluate("document.querySelector('summary[aria-label=\"3D 层级设置\"]')?.click()");
       assert.equal(layerState.hasNodeProperties, true);
       assert.equal(layerState.hasBoxModel, true);
-      assert.match(layerState.orbitReadout, /Yaw/);
       assert.ok(layerState.pivotZ < 0, "3D camera still orbits around the front layer instead of the layer stack center");
       await until(() => evaluate(`(() => {
         const panel = document.querySelector('.floating-inspector')?.getBoundingClientRect();
@@ -547,7 +598,6 @@ try {
           properties: box('.inspector-geometry'),
           grid: box('.viewport-grid'),
           gizmo: box('.viewport-gizmo'),
-          windowStack: box('.window-stack-label'),
           documentOverflowX: document.documentElement.scrollWidth - window.innerWidth,
         };
       })()`);
@@ -558,7 +608,6 @@ try {
       assert.ok(workspaceLayout.properties?.width > 0 && workspaceLayout.properties?.height > 0, "Compact geometry has no visible layout box");
       assert.ok(workspaceLayout.details.left >= workspaceLayout.frame.left && workspaceLayout.details.bottom <= workspaceLayout.frame.bottom, "Floating inspector is outside the canvas");
       assert.ok(workspaceLayout.grid?.width > 0 && workspaceLayout.gizmo?.width > 0, "3D viewport decorations are missing");
-      assert.ok(workspaceLayout.windowStack?.width > 0, "3D low-frequency options are missing from the overflow menu");
       assert.ok(workspaceLayout.header?.height >= 56 && workspaceLayout.toolbarHost?.height >= 32, "Workbench toolbar has no reserved header space");
       assert.ok(workspaceLayout.toolbarHost.left >= workspaceLayout.deviceTools.right
         && workspaceLayout.toolbarHost.right <= workspaceLayout.header.right
@@ -636,7 +685,8 @@ try {
       writeFileSync(join(output, "inspector-groups.png"), Buffer.from(inspectorScreenshot.data, "base64"));
       await evaluate("document.querySelector('.inspector-type > summary').focus()");
       for (const key of [{ key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" }, { key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " " }]) {
-        for (const open of [false, true]) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const open = !await evaluate("document.querySelector('.inspector-type').open");
           await connection.send("Input.dispatchKeyEvent", { type: "keyDown", ...key });
           await connection.send("Input.dispatchKeyEvent", { type: "keyUp", ...key, text: undefined });
           await until(() => evaluate(`document.querySelector('.inspector-type').open === ${open}`), "keyboard property group toggle");
@@ -681,7 +731,8 @@ try {
       let hoverResult = null;
       for (const point of await hoverPoints()) {
         // Keep this hit-test assertion in browser CSS pixels at every forced DPR.
-        await evaluate(`document.querySelector('.layer-webgl-canvas')?.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: ${point.x}, clientY: ${point.y}, pointerId: 1, pointerType: 'mouse', isPrimary: true }))`);
+        if (!await evaluate(`document.elementFromPoint(${point.x}, ${point.y}) === document.querySelector('.layer-webgl-canvas')`)) continue;
+        await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "none", buttons: 0 });
         await delay(80);
         const hoveredId = await evaluate("document.querySelector('.layer-scene')?.dataset.layerHoveredId || null");
         if (hoveredId) {
@@ -737,6 +788,11 @@ try {
         assert.ok(candidate, "Real pointer hover did not offer a measurable target");
         await evaluate("document.querySelector('.screenshot-frame').focus({ preventScroll: true })");
         await measurementKey("m", "KeyM", 77);
+        if ((await readMeasurement())?.pinned !== "true") {
+          await connection.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: candidate.point.x, y: candidate.point.y, button: "none", buttons: 0 });
+          await delay(90);
+          await measurementKey("m", "KeyM", 77);
+        }
         const measurement = { ...await until(async () => {
           const state = await readMeasurement();
           return state?.pinned === "true" && state.values ? state : null;
@@ -1054,10 +1110,15 @@ try {
         report.wheelZoom = { before: zoomBeforeWheel, after: zoomAfterWheel };
         recordCheck("mouse wheel zooms the screenshot workspace");
       }
+      await evaluate("document.querySelector('summary[aria-label=\"连续缩放\"]')?.click()");
+      await until(() => evaluate("Boolean(document.querySelector('.zoom-reset'))"), "zoom reset popup");
       await evaluate("document.querySelector('.zoom-reset').click()");
+      await evaluate("document.querySelector('summary[aria-label=\"连续缩放\"]')?.click()");
       await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '100%'"), "zoom reset before toolbar controls");
       await evaluate("document.querySelector('[aria-label=\"放大截图\"]').click()");
       await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '125%'"), "screenshot zoom in");
+      await evaluate("document.querySelector('summary[aria-label=\"连续缩放\"]')?.click()");
+      await until(() => evaluate("Boolean(document.querySelector('.zoom-preset-select'))"), "zoom preset popup");
       await evaluate(`(() => {
         const select = document.querySelector('.zoom-preset-select');
         if (!select) return false;
@@ -1067,6 +1128,7 @@ try {
       })()`);
       await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '800%'"), "high screenshot zoom preset");
       await evaluate("document.querySelector('.zoom-reset').click()");
+      await evaluate("document.querySelector('summary[aria-label=\"连续缩放\"]')?.click()");
       await until(() => evaluate("document.querySelector('.zoom-readout')?.textContent === '100%'"), "screenshot fit zoom");
       await delay(500);
       const layersScreenshot = await connection.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
@@ -1359,6 +1421,19 @@ try {
     }
 
     await evaluate("document.querySelector('.inspector-panel').scrollIntoView({block:'start', behavior:'instant'})");
+    if (snapshotDelete) {
+      const before = await evaluate("window.electronApi.loadSnapshots().then(result => { if (result.error) throw Error(result.error); return result.snapshots.length; })");
+      assert.ok(before >= 1, "Fixture did not save a snapshot");
+      const selector = ".workbench-scene-tools > .snapshot-drawer .snapshot-history-delete";
+      assert.ok(await evaluate(`Boolean(document.querySelector(${JSON.stringify(selector)}))`), "History has no per-snapshot delete action");
+      await evaluate(`(() => { window.confirm = () => false; document.querySelector(${JSON.stringify(selector)}).click(); return true; })()`);
+      assert.equal(await evaluate("window.electronApi.loadSnapshots().then(result => result.snapshots.length)"), before,
+        "Canceling deletion changed the stored history");
+      await evaluate(`(() => { window.confirm = () => true; document.querySelector(${JSON.stringify(selector)}).click(); return true; })()`);
+      await until(() => evaluate(`window.electronApi.loadSnapshots().then(result => !result.error && result.snapshots.length === ${before - 1})`),
+        "save and delete isolated history entry");
+      recordCheck("single history deletion requires confirmation and preserves all other entries");
+    }
   } else {
     assert.equal(expectLandscape, false, "Landscape check requires an authorized device");
     report.deviceChecks = "skipped: no authorized device";

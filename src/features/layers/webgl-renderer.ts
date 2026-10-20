@@ -195,12 +195,13 @@ function resizeRenderer(renderer: Renderer) {
   renderer.canvas.height = backingHeight;
 }
 
-export function uploadTexture(renderer: Renderer, image: HTMLImageElement) {
+export function uploadTexture(renderer: Renderer, image: HTMLImageElement | null) {
   const { gl } = renderer;
   gl.bindTexture(gl.TEXTURE_2D, renderer.texture);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 0);
   while (gl.getError() !== gl.NO_ERROR) { /* clear setup errors before texture upload */ }
-  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  if (image) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
   const error = gl.getError();
   renderer.textureReady = error === gl.NO_ERROR;
   if (!renderer.textureReady) renderer.canvas.dataset.layerWebglError = `texture-${error}`;

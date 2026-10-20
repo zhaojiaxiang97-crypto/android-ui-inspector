@@ -1,10 +1,10 @@
 import type { DesktopApi } from "../../shared/desktop-api";
 
 export type SnapshotPort = Pick<DesktopApi,
-  "exportSnapshot" | "importSnapshotFile" | "loadSnapshots" | "saveSnapshot" | "clearSnapshots">;
+  "exportSnapshot" | "importSnapshotFile" | "loadSnapshots" | "saveSnapshot" | "deleteSnapshot" | "clearSnapshots">;
 export type MenuPort = Pick<DesktopApi, "runtime" | "updateAppMenu" | "onAppMenuAction" | "setWindowMode">;
 export type InspectionPort = Pick<DesktopApi,
-  "inspectDevice" | "cancelInspection" | "captureGroup" | "refreshViewNode" |
+  "inspectDevice" | "cancelInspection" | "captureGroup" | "refreshViewNode" | "captureLayerImages" | "cancelLayerImages" |
   "showLayerMenu" | "onInspectionProgress" | "onInspectionPreview">;
 export type DiagnosisPort = Required<Pick<DesktopApi, "diagnoseConnection" | "cancelConnectionDiagnosis">>;
 export type InspectionModePort = Required<Pick<DesktopApi, "getInspectionMode" | "setInspectionMode" | "onInspectionMode">>;

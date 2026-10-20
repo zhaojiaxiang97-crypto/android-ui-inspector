@@ -1,9 +1,11 @@
 import type { DebugReportStep, DebugSessionReport, DebugSnapshotEvidence, DebugSnapshotReference } from "../../../shared/debug-report";
+import { debugInputMayHaveDispatched } from "../../../shared/debug-input-state";
 import type { LoadedTestReport, TestReportStep } from "../../../shared/test-report";
 import type { DebugTaskAssessment, DebugTaskCheckResult, DebugTaskCondition, DebugTaskRecord, DebugTaskStatus } from "../../../shared/debug-task";
 import type { DebugInputAction, DebugStep, PixelSize, UiNode, UiSnapshot } from "../../../shared/types";
 import { compareDebugSnapshots, debugDiffSnapshotIdentity, type DebugDiffObservation } from "../../../shared/debug-snapshot-diff";
 import type { DebugTaskObservation } from "../../../shared/debug-task";
+import type { DebugScrollProgress, DebugScrollStopReason } from "../../../shared/debug-scroll";
 
 export type DebugReportData = {
   session: DebugSessionReport["session"];
@@ -20,7 +22,7 @@ export function debugTaskStatusLabel(status: DebugTaskStatus) {
 export function debugTaskConditionLabel(condition: DebugTaskCondition) {
   const states = { visible: "应屏内可见", absent: "应无屏内可见匹配", enabled: "应已启用", disabled: "应未启用" };
   const fields: Record<string, string> = { resourceId: "资源ID", text: "文本", contentDesc: "描述", className: "类名" };
-  return `${Object.entries(condition.selector).map(([key, value]) => `${fields[key] ?? key}=${JSON.stringify(value)}`).join("，")} · ${states[condition.state]}`;
+  return `${Object.entries(condition.selector).map(([key, value]) => `${fields[key] ?? key}=${JSON.stringify(value)}`).join("，")} · ${condition.visibility === "partial" ? "应有稳定露出区域（只读）" : states[condition.state]}`;
 }
 
 const unavailableTaskCheck = (check: DebugTaskCheckResult): DebugTaskAssessment => ({ status: "insufficient_evidence",
@@ -49,8 +51,8 @@ export function debugTaskView(data: DebugReportData) {
     ...finalAssessment, status: "insufficient_evidence", reason: "缺少全部阶段的有效通过证据，不能确认最终通过。",
   };
   const laterInputs = finalCheck ? data.steps.filter(record => record.step.id > finalCheck.stepId
-    && ["tap_node", "scroll_node", "press_back"].includes(record.step.action)
-    && (record.step.dispatchState !== "not_sent" || record.step.inputEvidence?.spawned)) : [];
+    && ["tap_node", "scroll_node", "press_back", "perform_ui_step", "scroll_until"].includes(record.step.action)
+    && (record.step.dispatchState !== "not_sent" || debugInputMayHaveDispatched(record.step.inputEvidence))) : [];
   const laterInput = laterInputs[laterInputs.length - 1] ?? null;
   const earliestStep = data.steps[0]?.step.id ?? data.session.totalSteps + 1;
   const laterHistoryMissing = Boolean(finalCheck && data.session.droppedSteps > 0
@@ -60,7 +62,8 @@ export function debugTaskView(data: DebugReportData) {
 }
 
 export function debugVerificationState(record: DebugReportStep): "passed" | "failed" | "unverified" {
-  if (record.step.action !== "wait_for_ui") return "unverified";
+  if (!["wait_for_ui", "perform_ui_step", "resume_ui_step", "scroll_until"].includes(record.step.action)) return "unverified";
+  if (record.step.scrollTask && !["target_found", "end_reached"].includes(record.step.scrollTask.stopReason)) return "unverified";
   if (record.step.status === "done" && record.verified === true) return "passed";
   if (record.step.status === "failed" && record.verified === false && record.step.error?.phase === "verify") return "failed";
   return "unverified";
@@ -90,22 +93,41 @@ export function debugStepMatches(record: DebugReportStep, query: string, indexed
   const text = query.trim().toLocaleLowerCase();
   return !text || [String(record.step.id), `#${record.step.id}`, record.step.action, record.step.message, JSON.stringify(record.step.input),
     record.step.dispatchState, record.step.inputEvidence?.classification, debugStepOutcomeLabel(record, data),
+    record.step.scrollTask ? `${debugScrollStopLabel(record.step.scrollTask.stopReason)} ${JSON.stringify(record.step.scrollTask)}` : "",
     record.step.taskCheck ? JSON.stringify(debugTaskCheckAssessment(data, record.step.taskCheck)) : "",
     indexedStep?.error ? JSON.stringify(indexedStep.error) : ""]
     .filter(Boolean).join(" ").toLocaleLowerCase().includes(text);
 }
 
-export function confirmedDebugInput(step: DebugStep) {
+export function confirmedDebugInput(step: Pick<DebugStep, "inputEvidence" | "dispatchState">) {
   const receipt = step.inputEvidence;
   return step.dispatchState === "sent" && Boolean(receipt?.classification === "accepted"
-    && receipt.spawned && receipt.closed && receipt.exitCode === 0 && receipt.signal === null);
+    && (receipt.transport === "accessibility-helper"
+      ? receipt.helperInput?.dispatchState === "sent" && receipt.helperInput.receipt?.status === "completed"
+      : receipt.spawned && receipt.closed && receipt.exitCode === 0 && receipt.signal === null));
 }
 
 export function debugDispatchLabel(step: DebugStep) {
+  if (step.scrollTask) {
+    const count = debugScrollInputCounts(step.scrollTask);
+    return `已确认 ${count.confirmed} 次 · 派发未确认 ${count.unknown} 次 · 未发送 ${count.notSent} 次${step.dispatchState === "unknown" ? " · 请求派发仍未确认" : ""}${step.action === "resume_ui_step" ? "（原请求记录，本次只读恢复）" : ""}`;
+  }
   if (confirmedDebugInput(step)) return "已发送（回执确认）";
   if (step.dispatchState === "not_sent") return "未发送";
   if (step.dispatchState === "unknown" || step.dispatchState === "sent") return "派发未确认";
   return "没有输入派发记录";
+}
+
+export function debugScrollStopLabel(reason: DebugScrollStopReason) {
+  return { running: "滚动中", target_found: "已找到目标", end_reached: "已确认终点标记", empty: "已确认空列表",
+    no_progress: "连续观察无变化，未确认到底", scroll_limit: "已到滚动次数上限", timeout: "等待超时",
+    cancelled: "已取消", container_missing: "滚动容器不可用", interrupted: "已中断" }[reason];
+}
+
+export function debugScrollInputCounts(progress: DebugScrollProgress) {
+  const confirmed = progress.iterations.filter(confirmedDebugInput).length;
+  const notSent = progress.iterations.filter(item => item.dispatchState === "not_sent").length;
+  return { confirmed, notSent, unknown: progress.iterations.length - confirmed - notSent };
 }
 
 export function debugObservationLabel(side: "before" | "after", reference: DebugSnapshotReference, taskCheck = false) {
@@ -171,14 +193,14 @@ export function debugStepSnapshotDiff(data: DebugReportData, record: DebugReport
     expectedSerial: data.session.serial, expectedPackageName: data.session.packageName });
 }
 
-export type DebugInputMarker = { action: Exclude<DebugInputAction, { kind: "back" }>; label: string; confirmed: boolean };
+export type DebugInputMarker = { action: Exclude<DebugInputAction, { kind: "back" | "scroll" }>; label: string; confirmed: boolean };
 
 // Coordinates only belong on the fresh pre-action image, after its real pixel size
 // has been checked. A command receipt confirms dispatch, never the business goal.
 export function debugInputMarker(record: DebugReportStep, side: "before" | "after", imageSize: PixelSize | null): { marker: DebugInputMarker | null; reason: string | null } {
   const resolved = record.step.resolvedInput;
   if (record.step.action === "check_debug_task") return { marker: null, reason: null };
-  if (side !== "before" || !resolved || resolved.action.kind === "back") return { marker: null, reason: null };
+  if (side !== "before" || !resolved || resolved.action.kind === "back" || resolved.action.kind === "scroll") return { marker: null, reason: null };
   if (record.before.freshness !== "current" || !record.before.snapshotId) return { marker: null, reason: "此图不是本次操作前的新观察，不标记操作位置。" };
   if (!imageSize) return { marker: null, reason: "图片尺寸尚未确认，暂不标记位置。" };
   const { action, frame } = resolved;

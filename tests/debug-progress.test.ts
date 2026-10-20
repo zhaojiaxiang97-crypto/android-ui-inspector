@@ -72,6 +72,21 @@ test("real session phases bind their own step and increasing revision through fa
   } finally { session.stop(); await session.settled(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("compound scroll input invalidates an earlier task verdict while observation recovery does not", () => {
+  const current = state();
+  current.task = { id: "task", definedAt: current.startedAt!, definedStepId: 1,
+    definition: { goal: "测试", finalConditions: [{ id: "ready", selector: { text: "ready" }, state: "visible" }], checkpoints: [] },
+    checks: [{ taskId: "task", checkpointId: null, stepId: 2, checkedAt: current.startedAt!, status: "passed", reason: "已确认",
+      conditions: [], observations: { first: null, second: null } }] };
+  for (const action of ["scroll_until", "perform_ui_step", "resume_ui_step"]) {
+    current.progress!.action = action;
+    current.steps = [{ id: 3, time: current.startedAt!, action, input: {}, status: "done", message: "完成", dispatchState: "sent" }];
+    const html = renderToStaticMarkup(createElement(DebugSessionProgress, { state: current }));
+    assert.equal(html.includes("页面已操作，需重新验收"), action !== "resume_ui_step");
+    if (action === "scroll_until") assert.ok(html.includes("连续滚动查找"));
+  }
+});
+
 test("legacy, missing, truncated and cancelled log states are visible on the same historical step", () => {
   const current = state(), time = current.startedAt!;
   const record: DebugReportStep = { step: { id: 3, action: "capture_ui", time, input: {}, status: "failed", message: "failed" },

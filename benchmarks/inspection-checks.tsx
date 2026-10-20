@@ -24,6 +24,10 @@ import { verifyInspectorLayout } from "./inspector-layout-checks";
 import { verifyTreeRound3 } from "./tree-round3-checks";
 import { verifySubtreeClipping } from "./layer-clipping-checks";
 import { verifyInspectionPortReplacement } from "./inspection-port-checks";
+import { verifyDemandLayerCapture } from "./demand-layer-checks";
+import { verifyTextStyleProperties } from "./text-style-checks";
+import { verifyFontProperties } from "./font-properties-checks";
+import { verifyFontDemandRace } from "./font-demand-race-checks";
 
 async function verifyInspectorGroupPreferences() {
   const previousApi = window.electronApi;
@@ -271,6 +275,10 @@ async function verifyLayerClippingPixels() {
 }
 
 export async function verifyInspectionBehavior() {
+  console.info("Text style checks:", JSON.stringify(await verifyTextStyleProperties()));
+  console.info("Font checks:", JSON.stringify(await verifyFontProperties()));
+  console.info("Font demand race checks:", JSON.stringify(await verifyFontDemandRace()));
+  console.info("Demand layer checks:", JSON.stringify(await verifyDemandLayerCapture()));
   const portReplacement = await verifyInspectionPortReplacement();
   const treeRound3 = await verifyTreeRound3();
   const treePresentation = await verifyTreePresentation();
@@ -374,6 +382,8 @@ export async function verifyInspectionBehavior() {
       const snapshot = structuredClone(value);
       previewImages.set(index, layerImageBaseline(snapshot.root!));
       preview?.({ requestId: requests[index].id, phase, snapshot });
+    } else if (phase === "screen") {
+      preview?.({ requestId: requests[index].id, phase, screen: { screenshotDataUrl: value.screenshotDataUrl, captureGeometry: value.captureGeometry } });
     } else {
       preview?.({ requestId: requests[index].id, phase, updates: changedLayerImages(value.root!, previewImages.get(index)!)! });
     }
@@ -433,13 +443,14 @@ export async function verifyInspectionBehavior() {
     styled.attributes = { "inspection-source": "debug-qml", "border-width": "0", "border-status": "已读取" };
     measured.root!.children = [partial, unknown, styled];
     sendPreview(1, "tree", measured);
+    sendPreview(1, "screen", measured);
     check(!host.querySelector(".ui-tree-scroll"), "stale preview replaced the current capture");
-    sendPreview(2, "tree", measured);
+    sendPreview(2, "tree", { ...measured, screenshotDataUrl: null });
     check(Boolean(host.querySelector('.tree-row[data-tree-id="latest/partial"]')), "tree was not available before images completed");
+    check(!host.querySelector(".home-view"), "tree preview retained the device welcome screen");
+    check(host.querySelector(".no-screenshot")?.textContent === "正在读取截图和图层…", "tree-only preview showed a screenshot failure");
     const save = () => [...host.querySelectorAll<HTMLButtonElement>(".snapshot-actions button")].find(button => button.textContent === "保存快照");
     check(Boolean(save()?.disabled), "incomplete snapshot can be saved");
-    await until(() => host.querySelector<HTMLButtonElement>(".view-mode-toggle button:last-child")?.disabled === false);
-    click(".view-mode-toggle button:last-child");
     click('.tree-row[data-tree-id="latest/partial"]');
     partial.layerImageStatus = "captured";
     partial.layerImageEmpty = false;
@@ -450,6 +461,18 @@ export async function verifyInspectionBehavior() {
     check(host.querySelector('.tree-row[data-tree-id="latest/partial"]')?.getAttribute("aria-selected") === "true", "image update lost tree selection");
     check(host.querySelector('.inspector-image-state')?.getAttribute("data-state") === "captured", "image-only preview did not update the selected node");
     check([...host.querySelectorAll('.inspector-image-note')].some(note => note.textContent?.includes("来源：独立采集")), "image-only preview lost source metadata");
+    await until(() => host.querySelector<HTMLButtonElement>(".view-mode-toggle button:last-child")?.disabled === false, "3D availability before screen");
+    click(".view-mode-toggle button:last-child");
+    await until(() => Number(host.querySelector('.layer-scene')?.getAttribute("data-layer-native-texture-count")) > 0, "independent layers before screen");
+    check(!host.querySelector('img[alt="Android screen snapshot"]'), "3D fixture unexpectedly acquired a screen before its event");
+    const treeBeforeScreen = host.querySelector('.tree-row[data-tree-id="latest"]');
+    const expandedBeforeScreen = treeBeforeScreen?.getAttribute("aria-expanded");
+    sendPreview(2, "screen", { ...measured, root: makeNode("outdated-screen-tree") });
+    check(host.querySelector('.tree-row[data-tree-id="latest"]') === treeBeforeScreen, "screen update replaced the tree DOM");
+    check(treeBeforeScreen?.getAttribute("aria-expanded") === expandedBeforeScreen, "screen update changed tree expansion");
+    check(host.querySelector('.tree-row[data-tree-id="latest/partial"]')?.getAttribute("aria-selected") === "true", "screen update lost tree selection");
+    check(host.querySelector('.inspector-image-state')?.getAttribute("data-state") === "captured", "screen update discarded current layer images");
+    check(host.querySelector<HTMLButtonElement>(".view-mode-toggle button:last-child")?.classList.contains("active"), "screen update reset 3D mode");
     measured.screenshotDataUrl += "?final=1";
     requests[2].resolve(measured);
     await until(() => !host.querySelector(".inspector-heading-meta .tree-clear"));
@@ -676,6 +699,7 @@ export async function verifyInspectionBehavior() {
     requests[5].resolve(snapshot("b", 55));
     await until(() => Boolean(host.querySelector(".snapshot-summary")?.textContent?.startsWith("55 nodes")));
     check(!host.querySelector(".snapshot-warning"), "successful capture retained the old warning");
+    check(host.querySelector(".no-screenshot")?.textContent === "截图不可用；节点树仍可使用。", "completed capture without pixels remained in a loading state");
     sendMenu({ type: "capture" });
     const qml = snapshot("b", 2);
     qml.inspectionSource = "debug-qml";

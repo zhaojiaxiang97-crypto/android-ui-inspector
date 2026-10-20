@@ -37,7 +37,7 @@ function demand(item: UiNode, key = item.id, group: QmlGroupImage | null = null)
   return { key, record: { id: item.id, node: item, isCollapsed: Boolean(group), renderBounds: item.bounds } as unknown as LayerRecord,
     group, clips: [], hidden: new Set(), maxPixels: 2_000_000 };
 }
-function harness() {
+function harness(src = "screen") {
   let now = 0, next = 1, reduced = false;
   const frames = new Map<number, () => void>(), timers = new Map<number, () => void>(), canceled = new Set<number>();
   const scheduler: SceneScheduler = {
@@ -75,7 +75,7 @@ function harness() {
   };
   const scene = new LayerSceneRuntime(canvas, ports, { status: value => states.push(value), warning: value => warnings.push(value), groups: value => groups.push(value), painted: () => paints++ });
   const root = node("root"), scope = {};
-  const context = { root, src: "screen", savedGroups: new Map<string, QmlGroupImage>() };
+  const context = { root, src, savedGroups: new Map<string, QmlGroupImage>() };
   scene.setContext(context); scene.setFrame(input([plane(root)], scope), camera);
   scene.setDemand({ textures: new Map(), groups: new Map(), visibility: "[]", viewport: { left: 0, top: 0, width: 100, height: 100 } });
   const ready = () => screenshots.at(-1)!.ready({} as HTMLImageElement);
@@ -84,6 +84,18 @@ function harness() {
 }
 
 describe("scene renderer lifetime", () => {
+  test("independent layers render without requesting a missing screen and accept a later screen", async () => {
+    const h = harness("");
+    assert.equal(h.screenshots.length, 0); assert.equal(h.states.at(-1), "webgl");
+    h.scene.setDemand({ textures: new Map([[h.root.id, demand(h.root)]]), groups: new Map(), visibility: "[]", viewport: { left: 0, top: 0, width: 100, height: 100 } });
+    h.scene.draw(); await tick();
+    assert.ok(h.uploaded.includes(h.root.id)); assert.ok(h.scene.painted);
+    const renderer = h.renderers[0];
+    h.scene.setContext({ ...h.context, src: "late-screen" });
+    assert.equal(h.screenshots.length, 1); h.ready();
+    assert.equal(h.renderers[0], renderer); assert.equal(h.states.at(-1), "webgl");
+    h.scene.dispose();
+  });
   test("root and session replacement reuse an unchanged full screenshot", () => {
     const h = harness(); h.ready();
     h.scene.setContext({ ...h.context, root: node("replacement"), sessionKey: "new-session" }); h.scene.draw();
@@ -210,6 +222,20 @@ describe("painted frame ownership", () => {
 });
 
 describe("group capture scope", () => {
+  test("pending groups can acquire their first image without any drawn or selectable plane", async () => {
+    const h = harness(), selected = node("selected"), other = node("other"), calls: string[] = [];
+    h.scene.setContext({ ...h.context, capture: async node => { calls.push(node.id); return null; } });
+    h.scene.setFrame(input([], h.scope), camera);
+    h.scene.setDemand({ textures: new Map(), groups: new Map([[other.id, other], [selected.id, selected]]),
+      pendingGroupIds: [other.id, selected.id], selectedId: selected.id, visibility: "[]", viewport: { left: 0, top: 0, width: 100, height: 100 } });
+    h.ready(); await tick();
+    assert.deepEqual(calls, [selected.id, other.id]);
+    assert.deepEqual(h.scene.painted?.frame.planes, []);
+    assert.deepEqual(h.scene.painted?.projected, []);
+    h.scene.draw(); await tick(); assert.equal(calls.length, 2);
+    h.scene.dispose();
+  });
+
   test("groups are demanded while the screenshot is pending and when WebGL is unavailable", async () => {
     for (const fallback of [false, true]) {
       const h = harness(); h.scene.dispose(); let captures = 0;

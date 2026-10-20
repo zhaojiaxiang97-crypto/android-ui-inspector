@@ -1,7 +1,7 @@
 import type { UiNode } from "../../shared/types";
 import { withCommandSignal } from "../device/command-context";
 import { captureSignal } from "../device/runtime";
-import { notifyViewTreeReady, type CaptureRunContext } from "./run-context";
+import { notifyViewTreeReady, usesOnDemandLayers, type CaptureRunContext } from "./run-context";
 import type { InspectionPreview } from "./types";
 import { applyViewProperties } from "./native-tree";
 import { captureViewLayers } from "./view-debug";
@@ -29,13 +29,23 @@ export async function readDebugPropertiesAndImages(input: PropertyHandoff,
     onHierarchy: async (dump, name) => {
       ports.applyViewProperties(root, dump, true); windowName = name;
       root.attributes = { ...root.attributes, "debug-window-name": name };
+      if (usesOnDemandLayers(context)) {
+        root.attributes["layer-capture-mode"] = "on-demand";
+        const pending = [...root.children];
+        for (let cursor = 0; cursor < pending.length; cursor++) {
+          const node = pending[cursor], bounds = node.bounds;
+          node.layerImageStatus = !node.visibleToUser ? "hidden" : node.attributes?.["view-ref"] && bounds
+            && bounds.right > bounds.left && bounds.bottom > bounds.top ? "deferred" : "unavailable";
+          pending.push(...node.children);
+        }
+      }
       await preview?.("tree");
       if (context.plan.allowsSdk) stage("核对 SDK 控件树");
       await notifyViewTreeReady(context, packageName, root);
-      stage(context.plan.imageRoute === "sdk" ? "SDK 抓取独立画面" : "DDMS 批量抓图");
+      stage(usesOnDemandLayers(context) ? "控件树已就绪，图层按需读取" : context.plan.imageRoute === "sdk" ? "SDK 抓取独立画面" : "DDMS 批量抓图");
     },
     onBatchTiming: input.onBatchTiming,
-    skipImages: () => context.plan.imageRoute === "sdk",
+    skipImages: () => usesOnDemandLayers(context) || context.plan.imageRoute === "sdk",
     signal: context.signal,
   });
   return { layers, windowName };

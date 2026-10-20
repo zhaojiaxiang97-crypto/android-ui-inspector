@@ -71,8 +71,15 @@ function reportBytes(document: DebugSessionReport, files: Map<string, Buffer>) {
 
 function downgradeChecks(document: DebugSessionReport, loaded: LoadedTestReport, omissions: Omission[]) {
   const effective = new Map(loaded.debug?.taskAssessment?.checks.map(value => [value.recorded.stepId, value.effective]) ?? []);
+  const loadedSteps = new Map(loaded.debug?.steps.map(value => [value.step.id, value]) ?? []);
   const changed = new Set<number>();
   for (const entry of document.steps) {
+    if (entry.step.assertionConfirmation && entry.verified === true && loadedSteps.get(entry.step.id)?.verified !== true) {
+      entry.verified = entry.step.verified = false;
+      entry.step.message = "导出副本缺少完整双帧断言证据，部分可见条件保留为未验证。";
+      changed.add(entry.step.id);
+      omissions.push({ stepId: entry.step.id, snapshotId: null, kind: "task", reason: entry.step.message });
+    }
     const result = entry.step.taskCheck, assessment = effective.get(entry.step.id);
     if (!result || !assessment || assessment.status === "passed" || result.status === assessment.status && result.reason === assessment.reason) continue;
     Object.assign(result, { status: assessment.status, reason: assessment.reason, conditions: structuredClone(assessment.conditions) });
@@ -106,7 +113,7 @@ export async function exportDebugReportEvidence(source: { filePath: string; repo
     const file = resolve(source.filePath);
     if (basename(file) !== "report.json") throw new Error("只能导出已加载的原始调试 report.json。");
     const original = await readVerified(file, source.reportSha256, undefined, signal);
-    const loaded = await loadTestReport(file);
+    const loaded = await loadTestReport(file, { preferredDebugStepIds: request.stepIds === "all" ? undefined : new Set(request.stepIds) });
     if (!loaded.debug || loaded.index.reportSha256 !== source.reportSha256) throw new Error("原始调试报告已改变，请重新读取后导出。");
     check(signal);
     const document = JSON.parse(original.bytes.toString("utf8")) as DebugSessionReport;
@@ -122,7 +129,14 @@ export async function exportDebugReportEvidence(source: { filePath: string; repo
         throw new Error(`所选步骤需要任务定义步骤 #${document.task.definedStepId}，请一并选择该步骤或导出全部步骤。`);
       document.task.checks = document.task.checks.filter(result => selectedIds.has(result.stepId));
     }
-    const snapshotIds = new Set(document.steps.flatMap(entry => [entry.before.snapshotId, entry.after.snapshotId]).filter(Boolean));
+    const snapshotIds = new Set(document.steps.flatMap(entry => [entry.before.snapshotId, entry.after.snapshotId,
+      entry.step.beforeId, entry.step.afterId, entry.step.resolvedInput?.visualConfirmation?.referenceSnapshotId,
+      entry.step.resolvedInput?.visualConfirmation?.currentSnapshotId,
+      entry.step.assertionConfirmation?.first.snapshotId, entry.step.assertionConfirmation?.second.snapshotId,
+      entry.step.scrollTask?.confirmation?.firstSnapshotId, entry.step.scrollTask?.confirmation?.secondSnapshotId,
+      ...(entry.step.scrollTask?.iterations ?? []).flatMap(iteration => [iteration.beforeId, iteration.afterId,
+        iteration.resolvedInput?.visualConfirmation?.referenceSnapshotId, iteration.resolvedInput?.visualConfirmation?.currentSnapshotId]),
+      ...entry.step.scrollTask?.observationIds ?? []]).filter(Boolean));
     document.snapshots = document.snapshots.filter(snapshot => snapshotIds.has(snapshot.snapshotId));
     const omissions: Omission[] = [], files = new Map<string, Buffer>();
     const originals = new Map<string, { file: DebugReportFile; info: Stats }>();

@@ -13,6 +13,127 @@ import { exportDigest, makeDebugReportExportFixture } from "./fixtures/debug-rep
 
 const options = { appVersion: "0.1.2" };
 const contents = (directory: string) => readdirSync(directory).filter(value => value !== ".DS_Store");
+function addVisualConfirmation(f: Awaited<ReturnType<typeof makeDebugReportExportFixture>>) {
+  const entry = f.report.steps[2], referenceSnapshotId = f.report.snapshots[1].snapshotId, currentSnapshotId = f.report.snapshots[2].snapshotId;
+  const visual = { referenceSnapshotId, currentSnapshotId, description: "整屏中收藏入口可见，位于赞右侧",
+    region: { left: 0, top: 1, width: 4, height: 5 }, sha256: exportDigest("fixture-region-pixels"), overlapNodeIds: ["0/1", "0/2"] };
+  entry.step.action = "tap_node";
+  entry.step.input = { sessionId: f.report.session.id, snapshotId: referenceSnapshotId, nodeId: "0", visualConfirmation: { description: visual.description } };
+  entry.step.beforeId = currentSnapshotId;
+  entry.before = { snapshotId: currentSnapshotId, freshness: "current", reason: null };
+  entry.step.dispatchState = "sent";
+  entry.step.resolvedInput = { action: { kind: "tap", x: 2, y: 3 }, frame: { width: 4, height: 6, rotation: 0 }, targetNodeId: "0", anchorNodeId: "0",
+    visualConfirmation: visual };
+  return visual;
+}
+
+test("visual confirmation evidence survives report export and import without changing its observations", async () => {
+  const f = await makeDebugReportExportFixture();
+  try {
+    const expected = structuredClone(addVisualConfirmation(f)); f.save();
+    const loadedSource = await loadTestReport(f.file);
+    assert.deepEqual(loadedSource.debug!.steps[2].step.resolvedInput!.visualConfirmation, expected);
+    for (const includeAttachments of [true, false]) {
+      const result = await exportDebugReportEvidence(f.source(), { ...f.request(), stepIds: [3], includeTrees: includeAttachments,
+        includeScreenshots: includeAttachments, includeLogs: false }, f.parent, options);
+      assert.equal(result.error, null);
+      const file = join(result.directory!, "report.json"), loaded = await loadTestReport(file);
+      assert.deepEqual(loaded.debug!.steps[0].step.resolvedInput!.visualConfirmation, expected);
+      const raw = JSON.parse(readFileSync(file, "utf8")) as DebugSessionReport;
+      assert.deepEqual(raw.steps[0].step.resolvedInput!.visualConfirmation, expected);
+      assert.equal(raw.steps[0].step.verified, undefined);
+      assert.equal(raw.steps[0].step.dispatchState, "sent");
+      for (const id of [expected.referenceSnapshotId, expected.currentSnapshotId]) {
+        const evidence = raw.snapshots.find(item => item.snapshotId === id);
+        assert.ok(evidence, "visual confirmation keeps both referenced snapshots");
+        assert.equal(Boolean(evidence.tree), includeAttachments); assert.equal(Boolean(evidence.screenshot), includeAttachments);
+      }
+    }
+  } finally { f.cleanup(); }
+});
+
+test("scroll viewport and corridor evidence roundtrips and rejects paths outside the recorded region", async () => {
+  const f = await makeDebugReportExportFixture();
+  try {
+    const visual = addVisualConfirmation(f), entry = f.report.steps[2];
+    entry.step.action = "scroll_node";
+    entry.step.input = { ...entry.step.input, direction: "down" };
+    entry.step.resolvedInput!.action = { kind: "swipe", fromX: 2, fromY: 5, toX: 2, toY: 2, durationMs: 350 };
+    const expected = { viewport: { left: 0, top: 0, right: 4, bottom: 6 },
+      confirmationBounds: { left: 0, top: 1, right: 4, bottom: 6 }, excludedNavigationBounds: [] };
+    entry.step.resolvedInput!.scrollRegion = expected; f.save();
+    assert.deepEqual((await loadTestReport(f.file)).debug!.steps[2].step.resolvedInput!.scrollRegion, expected);
+    const result = await exportDebugReportEvidence(f.source(), { ...f.request(), stepIds: [3], includeLogs: false }, f.parent, options);
+    assert.equal(result.error, null);
+    const imported = await loadTestReport(join(result.directory!, "report.json"));
+    assert.deepEqual(imported.debug!.steps[0].step.resolvedInput!.scrollRegion, expected);
+    for (const change of ["path", "viewport", "visual", "action", "excluded"]) {
+      const valid = structuredClone(entry.step.resolvedInput!);
+      if (change === "path") (entry.step.resolvedInput!.action as { fromY: number }).fromY = 0;
+      if (change === "viewport") entry.step.resolvedInput!.scrollRegion!.viewport.bottom = 3;
+      if (change === "visual") entry.step.resolvedInput!.visualConfirmation!.region.top = 0;
+      if (change === "action") entry.step.resolvedInput!.action = { kind: "tap", x: 2, y: 3 };
+      if (change === "excluded") entry.step.resolvedInput!.scrollRegion!.excludedNavigationBounds.push({ left: 0, top: 0, right: 4, bottom: 2 });
+      f.save(); await assert.rejects(loadTestReport(f.file), change);
+      entry.step.resolvedInput = valid;
+    }
+    assert.equal(visual.description, entry.step.resolvedInput!.visualConfirmation!.description);
+  } finally { f.cleanup(); }
+});
+
+test("malformed visual evidence cannot be imported or exported as a confirmed action", async () => {
+  const f = await makeDebugReportExportFixture();
+  try {
+    const visual = addVisualConfirmation(f), validEntry = structuredClone(f.report.steps[2]);
+    const invalidVisuals: Array<[string, unknown]> = [
+      ["null", null], ["unknown field", { ...visual, force: true }],
+      ["reference UUID", { ...visual, referenceSnapshotId: "not-a-uuid" }],
+      ["current UUID", { ...visual, currentSnapshotId: "not-a-uuid" }],
+      ["reference identity", { ...visual, referenceSnapshotId: f.report.session.id }],
+      ["current identity", { ...visual, currentSnapshotId: f.report.session.id }],
+      ["empty description", { ...visual, description: "" }], ["blank description", { ...visual, description: " \n " }],
+      ["long description", { ...visual, description: "字".repeat(513) }],
+      ["mismatched description", { ...visual, description: "其他控件" }],
+      ["short hash", { ...visual, sha256: "a".repeat(63) }], ["invalid hash", { ...visual, sha256: "G".repeat(64) }],
+      ["negative region", { ...visual, region: { ...visual.region, left: -1 } }],
+      ["fractional region", { ...visual, region: { ...visual.region, top: 0.5 } }],
+      ["zero region", { ...visual, region: { ...visual.region, width: 0 } }],
+      ["unsafe region", { ...visual, region: { ...visual.region, height: Number.MAX_SAFE_INTEGER + 1 } }],
+      ["outside frame", { ...visual, region: { ...visual.region, top: 2 } }],
+      ["unknown region field", { ...visual, region: { ...visual.region, raw: "bounds" } }],
+      ["missing region field", { ...visual, region: { left: 0, top: 0, width: 1 } }],
+      ["invalid node type", { ...visual, overlapNodeIds: [1] }], ["blank node", { ...visual, overlapNodeIds: [""] }],
+      ["whitespace node", { ...visual, overlapNodeIds: ["  "] }],
+      ["long node", { ...visual, overlapNodeIds: ["0".repeat(2049)] }],
+      ["duplicate node", { ...visual, overlapNodeIds: ["0/1", "0/1"] }],
+      ["node count budget", { ...visual, overlapNodeIds: Array.from({ length: 101 }, (_, i) => `0/${i}`) }],
+      ["node text budget", { ...visual, overlapNodeIds: Array.from({ length: 9 }, (_, i) => `${i}/${"0".repeat(2046)}`) }],
+      ["UTF-8 node budget", { ...visual, overlapNodeIds: Array.from({ length: 3 }, (_, i) => `${i}/${"字".repeat(2046)}`) }],
+    ];
+    for (const [label, invalid] of invalidVisuals) {
+      f.report.steps[2] = structuredClone(validEntry);
+      (f.report.steps[2].step.resolvedInput as unknown as Record<string, unknown>).visualConfirmation = invalid;
+      f.save();
+      await assert.rejects(loadTestReport(f.file), label);
+      const exported = await exportDebugReportEvidence(f.source(), f.request(), f.parent, options);
+      assert.ok(exported.error, label); assert.deepEqual(contents(f.parent), []);
+    }
+    for (const invalid of ["back", "missing target", "oversized pixels"] as const) {
+      const entry = f.report.steps[2] = structuredClone(validEntry);
+      if (invalid === "back") {
+        entry.step.action = "press_back"; entry.step.input = { sessionId: f.report.session.id, snapshotId: visual.referenceSnapshotId };
+        entry.step.resolvedInput!.action = { kind: "back" };
+      }
+      if (invalid === "missing target") delete entry.step.resolvedInput!.targetNodeId;
+      if (invalid === "oversized pixels") {
+        entry.step.resolvedInput!.frame = { width: 5000, height: 5000, rotation: 0 };
+        entry.step.resolvedInput!.visualConfirmation!.region = { left: 0, top: 0, width: 5000, height: 5000 };
+      }
+      f.save(); await assert.rejects(loadTestReport(f.file), invalid);
+    }
+  } finally { f.cleanup(); }
+});
+
 test("all selected evidence roundtrips after moving the folder, retains exact identities and redacts logs", async () => {
   const f = await makeDebugReportExportFixture();
   try {
@@ -267,6 +388,11 @@ test("selected Checker exports keep fixed definitions and downgrade missing tree
     const request = { ...f.request(), reportSha256: source.reportSha256 };
     const complete = await exportDebugReportEvidence(source, request, f.parent, options);
     assert.equal(complete.error, null); assert.equal((await loadTestReport(join(complete.directory!, "report.json"))).debug!.taskAssessment!.final!.status, "passed");
+    const checkpointOnly = await exportDebugReportEvidence(source, { ...request, stepIds: [3] }, f.parent, options);
+    assert.equal(checkpointOnly.error, null);
+    const checkpointReport = await loadTestReport(join(checkpointOnly.directory!, "report.json"));
+    assert.equal(checkpointReport.debug!.taskAssessment!.checks[0].effective.status, "passed");
+    assert.equal(checkpointReport.debug!.taskAssessment!.final, null);
     for (const partial of [{ ...request, includeTrees: false }, { ...request, stepIds: [4] }]) {
       const result = await exportDebugReportEvidence(source, partial, f.parent, options); assert.equal(result.error, null);
       const raw = JSON.parse(readFileSync(join(result.directory!, "report.json"), "utf8")) as DebugSessionReport;

@@ -59,6 +59,10 @@ test("desktop requests require a current authorized idle session and freeze defi
   assert.match(debugTaskSessionBlockedReason({ ...current, busy: true })!, /等待/);
   current.steps = [{ id: 1, time: "2026-10-12T01:00:00Z", action: "tap_node", input: {}, status: "failed", dispatchState: "not_sent", message: "被拒绝" }];
   assert.match(debugTaskDefinitionBlockedReason(current)!, /首次输入前/);
+  for (const action of ["perform_ui_step", "scroll_until"]) {
+    current.steps[0].action = action;
+    assert.match(debugTaskDefinitionBlockedReason(current)!, /首次输入前/);
+  }
   assert.equal(debugTaskSessionBlockedReason(current), null);
   current.task = { id: randomUUID(), definedAt: "2026-10-12T01:00:00Z", definedStepId: 1, definition, checks: [] };
   assert.match(debugTaskDefinitionBlockedReason(current)!, /不能改写/);

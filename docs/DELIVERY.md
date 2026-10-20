@@ -1,5 +1,7 @@
 # Mac arm64 本机交付
 
+2026-10-19 身份核验：下方 2026-10-12 的 `d6341d0a…` 是当时记录的历史包摘要；目前 `release/mac-arm64/Android UI Inspector.app` 实测 `app.asar` 为 `15d22923f2413147f6d5bdc01d0844612a18ba53cf868ec9b4fbf734e43b23bc`，**二者不一致**，不能只凭 `0.1.0` 认作同一版本。现已另行冻结并构建 `diagnosis-handoff-20261019-eacd168e`，包内带候选 ID，`app.asar` 摘要为 `6f5472efe5e0345f3edfa74544165c24faf94bb0db4ec36b943a18b66c557c24`，CLI/MCP 与冻结构建核对通过。该候选**尚未签名或替换当前安装包**。版本身份及旧历史升级边界见[产品级风险验收](PRODUCT_RISK_ACCEPTANCE_20261019.md#2026-10-19-冻结候选与旧历史兼容补验)。
+
 2026-10-15 的 [R0–R8 架构重构](ARCHITECTURE_REFACTOR_PLAN.md#architecture-closeout)已完成源码同步和验收。桌面安装候选、签名及升级记录保持本页原版本；R8 仅更新自有 Android Debug sample 做对照，未更新业务 App 或桌面安装包。构建通过与实际安装分开记录。
 
 2026-10-13 的[首轮7项](archive/LOOKIN_UI_DESIGN_2026-10-13.md#round1)、[第二轮6项](archive/LOOKIN_UI_DESIGN_2026-10-13.md#round2-results)、[第三轮6项](archive/LOOKIN_UI_DESIGN_2026-10-13.md#round3-results)、[第四轮6项](archive/LOOKIN_UI_DESIGN_2026-10-13.md#round4-results)及[第五轮5项 UI 与交互优化](archive/LOOKIN_UI_DESIGN_2026-10-13.md#round5-results)，共30项已完成源码与独立工作树构建验证。原目录只同步确认的源码、验证和文档；本页安装候选、签名和升级记录保持原版本。本轮没有替换安装包或手机包。
@@ -62,6 +64,8 @@ node_modules/.bin/electron-builder --mac --arm64 --dir --publish never \
 
 Helper 单独安装在 Android 上，桌面不会代为安装、启用或配对。下列手机步骤仅在明确选定设备并授权后执行；不使用 Helper 时可直接按[普通 CLI/MCP 流程](MCP.md#使用)工作。
 
+当前 P3 源码要求观察 v1 Helper（Android 11 及以上），实时采集不会退回旧 `/dump`。下方步骤适用于源码构建；本页上方的历史桌面安装候选仍仅支持当时的只读能力。使用 P3 操作能力需同时运行新桌面源码和新 Helper，具体范围见[验收清单](CORE_ACCEPTANCE.md)。
+
 1. 准备 Java 17、Android SDK 36、Gradle及 `ANDROID_HOME` / `JAVA_HOME`，运行[固定源码准备入口](../scripts/prepare-recognition-helper.ts)：
 
    ```sh
@@ -86,7 +90,7 @@ Helper 单独安装在 Android 上，桌面不会代为安装、启用或配对�
 
    令牌仅在 Helper 进程内存中保存。服务进程结束或重建后须显式重新配对；HTTP 401 不会触发自动配对或重试。
 
-## 桌面配置与只读使用
+## 桌面配置与使用
 
 先退出桌面，再从终端启动实际交付 App，将令牌文件路径传给**桌面主进程**：
 
@@ -106,7 +110,7 @@ android-ui tree --snapshot '<新快照ID>' --pretty
 android-ui capture --session '<会话ID>' --mode fast --backend uiautomator
 ```
 
-Helper 仅提供语义树及整屏截图，独立返回 `hint / error / stateDescription`；不能操作或等待验证。需要点击、滚动、返回或 `wait` 时，先显式采集 UIAutomator 并重新定位。切换来源即撤销旧 ID，失败不换源。完整字段、权限和限制见[MCP](MCP.md#可选-helper源码已接入仅只读)及[CLI](CLI.md#可选-helper-只读采集)。
+Helper 提供语义树及整屏截图，独立返回 `hint / error / stateDescription`。当前 P3 源码可用完整 v1 观察执行点击、滚动、返回及结果验证，输入仍通过受控 ADB；旧快照或缺少证据时只读。切换来源即撤销旧 ID，失败不自动换源。完整字段、权限和限制见[MCP](MCP.md#helper-observation)及[CLI](CLI.md#可选-helper-观察与操作)。
 
 ## 停止与移除 Helper
 

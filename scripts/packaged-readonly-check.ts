@@ -35,12 +35,14 @@ try {
   assert.deepEqual(tools.map(tool => tool.name).sort(), [
     "get_snapshot", "search_nodes", "get_node", "get_image", "measure_nodes", "get_tree",
     "get_debug_session", "capture_ui", "define_debug_task", "check_debug_task", "tap_node",
-    "scroll_node", "press_back", "wait_for_ui", "stop_debug_session",
+    "scroll_node", "press_back", "wait_for_ui", "stop_debug_session", "diagnose_connection",
+    "start_debug_plan", "get_debug_plan", "cancel_debug_plan", "get_ui_step",
+    "perform_ui_step", "resume_ui_step", "scroll_until",
   ].sort());
   for (const name of ["define_debug_task", "check_debug_task"]) {
     assert.equal(tools.find(tool => tool.name === name)?.annotations?.readOnlyHint, true);
   }
-  report.checks.push("MCP 15 named tools; task definition/check annotated read-only");
+  report.checks.push("MCP 23 named tools; task definition/check annotated read-only");
   assert.equal((await call("get_snapshot")).isError, true);
   assert.equal((await call("get_debug_session")).isError, true);
   report.checks.push("private missing share/live endpoint refused");

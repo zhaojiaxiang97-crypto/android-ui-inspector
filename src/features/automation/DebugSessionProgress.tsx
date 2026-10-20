@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { debugInputMayHaveDispatched } from "../../../shared/debug-input-state";
 import type { DebugSessionState } from "../../../shared/types";
 import { debugProgressElapsed, debugProgressPhaseLabel } from "../../../shared/debug-progress";
 import "./debug-session-progress.css";
@@ -7,6 +8,7 @@ type Props = { state: DebugSessionState | null; onStop?: () => void; androidLogs
   onAndroidLogsChange?: (enabled: boolean) => void; disabled?: boolean };
 const duration = (value: number) => `${Math.floor(value / 1000)} 秒`;
 const actions: Record<string, string> = { capture_ui: "采集页面", tap_node: "点击控件", scroll_node: "滚动控件", press_back: "返回",
+  perform_ui_step: "定位并操作", scroll_until: "连续滚动查找", resume_ui_step: "恢复结果观察",
   wait_for_ui: "等待页面条件", define_debug_task: "固定任务条件", check_debug_task: "检查任务条件" };
 
 export function DebugSessionProgress({ state, onStop, androidLogsEnabled = false, onAndroidLogsChange, disabled }: Props) {
@@ -21,8 +23,8 @@ export function DebugSessionProgress({ state, onStop, androidLogsEnabled = false
   const elapsed = progress ? debugProgressElapsed(progress, now) : null;
   const last = state?.steps.at(-1);
   const check = state?.task?.checks.find(item => item.checkpointId === null);
-  const laterInput = Boolean(check && state?.steps.some(step => step.id > check.stepId && ["tap_node", "scroll_node", "press_back"].includes(step.action)
-    && (step.dispatchState !== "not_sent" || step.inputEvidence?.spawned)));
+  const laterInput = Boolean(check && state?.steps.some(step => step.id > check.stepId && ["tap_node", "scroll_node", "press_back", "perform_ui_step", "scroll_until"].includes(step.action)
+    && (step.dispatchState !== "not_sent" || debugInputMayHaveDispatched(step.inputEvidence))));
   const verdict = !state?.task ? "未声明任务" : !check ? "尚未检查" : laterInput ? "页面已操作，需重新验收"
     : { passed: "通过", failed: "失败", insufficient_evidence: "证据不足" }[check.status];
   return <section className="debug-session-progress" aria-label="自动调试进度">

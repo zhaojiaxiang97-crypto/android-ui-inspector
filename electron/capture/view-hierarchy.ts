@@ -62,6 +62,10 @@ export function decodeViewHierarchy(data: Buffer): string {
     "padding:paddingLeft": "padding:mPaddingLeft", "padding:paddingTop": "padding:mPaddingTop",
     "padding:paddingRight": "padding:mPaddingRight", "padding:paddingBottom": "padding:mPaddingBottom",
     "text:text": "text:mText", "accessibility:contentDescription": "accessibility:getContentDescription()",
+    "text:textSize": "text:textSize", "text:typefaceStyle": "text:typefaceStyle",
+    "text:curTextColor": "text:curTextColor", "text:gravity": "text:gravity",
+    "text:ellipsize": "text:ellipsize", "text:textAlignment": "text:textAlignment",
+    "text:textDirection": "text:textDirection", "layout:layoutDirection": "layout:layoutDirection",
   };
   const lines: string[] = [], identities = new Set<string>();
   // Map the local origin through every parent's matrix and scroll, as

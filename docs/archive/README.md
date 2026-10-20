@@ -2,10 +2,11 @@
 
 架构记录区分两轮：2026-10-08 的六批结构整理保留在本目录；2026-10-14 至 15 日的 R0–R8 已完成，最新状态以[收尾总表](../ARCHITECTURE_REFACTOR_PLAN.md#architecture-closeout)为准。
 
-更新：2026-10-15。这里保留已完成方案、逐轮结果与失败反例，不作为当前待办或授权来源。当前安排看[计划](../LOOKIN_ALIGNMENT_PLAN.md#下一步)，能力和暂停项看[状态](../PROJECT_STATUS.md)，门禁看[测试计划](../TEST_PLAN.md)。
+目录更新：2026-10-19。这里保留已完成方案、逐轮结果与失败反例，不作为当前待办或授权来源。当前安排看[计划](../LOOKIN_ALIGNMENT_PLAN.md#下一步)，能力和暂停项看[状态](../PROJECT_STATUS.md)，门禁看[测试计划](../TEST_PLAN.md)。自动调试的 A–C 和 D1–D23 记录在 [`automation/`](automation/README.md)，当前 D24 留在根目录；[专题索引](../AUTOMATION_INDEX.md)保留各轮导航。
 
 | 记录 | 内容 |
 | --- | --- |
+| [自动调试逐轮历史](automation/README.md) | A–C 功能闭环、D1–D23 实测、撤回方案、早期性能计划和失败证据；D24 仍见[当前记录](../AUTOMATION_BUSINESS_REGRESSION_D24.md) |
 | [2026-10-11至15日验收](ACCEPTANCE_HISTORY_2026-10-15.md) | 架构前七轮、UI、自动调试、Helper、安装与设备的详细结果、失败和证据；最新结果见[当前验收](../CORE_ACCEPTANCE.md) |
 | [UI五轮设计](LOOKIN_UI_DESIGN_2026-10-13.md) | 原五份完成计划合为30项设计；保留固定上游来源与最终取舍，删除重复分工和实施套话 |
 | [SDK专项与实验](SDK_REFERENCE_HISTORY_2026-10-15.md) | 从SDK接入页分离的有效协议、诊断限制、历史实验和失败；当前接入见[Android说明](../../android/README.md) |

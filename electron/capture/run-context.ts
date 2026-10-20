@@ -12,6 +12,10 @@ export type CaptureRunContext = {
   readonly treeVerifier?: (stageContext: CaptureRunContext, ...args: TreeReadyArguments) => Promise<void>;
 };
 
+export function usesOnDemandLayers(context: CaptureRunContext): boolean {
+  return !context.plan.allowsSdk && context.options.layerCapture === "on-demand";
+}
+
 export function createCaptureRunContext(options: InspectionOptions = {}): CaptureRunContext {
   const { signal, pinFirstComponent, ...policy } = options;
   return { signal, options: policy, request: { pinFirstComponent },

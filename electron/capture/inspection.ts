@@ -5,9 +5,10 @@ import { recordCaptureAttempt } from "../../shared/capture-attempts";
 import { createCaptureReadiness } from "../../shared/capture-readiness";
 import { adoptSdkTree, joinSdkTreeAndDebugImages } from "../sdk/sdk-hybrid";
 import { StartupRetryBudgetError, startupRetryBudget } from "./startup-retry-budget";
-import { type InspectionOptions, type InspectionPreview } from "./types";
+import { type InspectionOptions } from "./types";
+import { createSnapshotPreview } from "./snapshot-preview";
 import { runDeviceAdb, findAdbPath, commandError, captureSignal } from "../device/runtime";
-import { automationAdb, checkedDebugTarget, singleAppPid, foregroundTarget, targetActivitySection, sameActivityInstance, type DebugTarget, readDebugFocus, FocusUnavailableError } from "../device/target";
+import { automationAdb, checkedDebugTarget, singleAppPid, foregroundTarget, targetActivitySection, sameActivityInstance, type DebugTarget, readDebugFocus, FocusUnavailableError, ForegroundUnavailableError } from "../device/target";
 import { readSdkCapture } from "./sdk-images";
 import { countNodes, hasActivityHierarchy, activityTreeReadinessReason, appBounds, debugViewTree } from "./native-tree";
 import { applyVerifiedSdkViewTypes, layerCaptureFailureWarning } from "./layer-images";
@@ -18,7 +19,7 @@ import { qmlDebugTree, qmlUiTree } from "./qt";
 import { STARTUP_IMAGE_TIMEOUT_MS, IMAGE_TIMEOUT_MS, PREVIEW_SCREEN_TIMEOUT_MS, captureDebugViewImages, FINAL_SCREEN_TIMEOUT_MS } from "./debug-images";
 
 import { withCommandSignal } from "../device/command-context";
-import { createCaptureRunContext, createCaptureAttemptContext, withCaptureSignal, type CaptureRunContext } from "./run-context";
+import { createCaptureRunContext, createCaptureAttemptContext, withCaptureSignal, usesOnDemandLayers, type CaptureRunContext } from "./run-context";
 import { CaptureError, classifyCaptureFailure, shouldRetryCapture, startupImageFailure, type CaptureFailure } from "./capture-errors";
 import { verifySdkTreeIdentity, type VerifiedSdkTree } from "./sdk-tree-verification";
 
@@ -268,6 +269,7 @@ async function readDeviceSnapshot(provider: ProviderClient, serial: string, cont
       return /(?:^|\n)[ \t]*ACTIVITY[ \t]+/.test(text) ? targetActivitySection(text, target) : "";
     };
     let section = "";
+    let captureWindowId = "";
     {
       // System focus is cheap to query; never ask the App UI thread for a tree (or
       // open its SDK Provider) before its authorized foreground window is ready.
@@ -287,7 +289,8 @@ async function readDeviceSnapshot(provider: ProviderClient, serial: string, cont
       try {
         while (performance.now() < deadline) {
           context.signal?.throwIfAborted();
-          if (polls++ > 0) {
+          const firstPoll = polls++ === 0;
+          if (!firstPoll) {
             startupWaited = true;
             await readiness.observe("poll-wait", () => measure("就绪等待：轮询间隔", () => wait(Math.min(500, Math.max(1, deadline - performance.now())), undefined, { signal: context.signal })), () => ({ result: "waited" }));
           }
@@ -296,33 +299,40 @@ async function readDeviceSnapshot(provider: ProviderClient, serial: string, cont
           // retrying while reads still have a realistic budget.
           if (deadline - performance.now() < APP_READY_MIN_READ_MS) { readiness.budgetStop(); break; }
           pendingRead = "foreground";
-          readiness.phase("foreground");
-          const foreground = await readiness.observe("foreground", () => measure("就绪等待：前台读取", () => runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"], Math.max(APP_READY_MIN_READ_MS, Math.ceil(deadline - performance.now())))), result => {
-            const observed = foregroundTarget(result.stdout.toString("utf8"));
-            return { result: result.code !== 0 ? "error" : sameActivityInstance(target, observed) ? "match" : "changed", component: observed?.component };
-          });
-          if (foreground.code !== 0) throw new Error(commandError("等待控件树时无法确认前台 App", foreground));
-          if (!sameActivityInstance(target, foregroundTarget(foreground.stdout.toString("utf8")))) throw new Error("等待控件树时前台 App 已变化，已停止采集。");
-          if (deadline - performance.now() < APP_READY_MIN_READ_MS) { readiness.budgetStop(); break; }
+          if (!firstPoll) {
+            readiness.phase("foreground");
+            const foreground = await readiness.observe("foreground", () => measure("就绪等待：前台读取", () => runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"], Math.max(APP_READY_MIN_READ_MS, Math.ceil(deadline - performance.now())))), result => {
+              const observed = foregroundTarget(result.stdout.toString("utf8"));
+              return { result: result.code !== 0 ? "error" : sameActivityInstance(target, observed) ? "match" : "changed", component: observed?.component };
+            });
+            if (foreground.code !== 0) throw new Error(commandError("等待控件树时无法确认前台 App", foreground));
+            if (!sameActivityInstance(target, foregroundTarget(foreground.stdout.toString("utf8")))) throw new Error("等待控件树时前台 App 已变化，已停止采集。");
+            if (deadline - performance.now() < APP_READY_MIN_READ_MS) { readiness.budgetStop(); break; }
+          }
           let beforeFocus: DebugTarget;
           readiness.phase("focus-before");
           try {
-            // A missing system focus needs no repeated run-as or second foreground query.
-            // This cheap observation never authorizes a tree: a candidate still receives
-            // the full fresh permission/Activity/window check below and after the dump.
-            const timeout = AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now())));
-            const signal = context.signal ? AbortSignal.any([context.signal, timeout]) : timeout;
-            const candidate = await readiness.observe("focus-candidate", () => measure("就绪等待：窗口观察", () => withCommandSignal(signal,
-              () => readDebugFocus(adbPath, serial))), value => ({ result: value.packageName === target.packageName ? "match" : "changed", windowId: value.id }),
-              error => error instanceof FocusUnavailableError ? { result: "unavailable", focusReason: error.focusReason } : "error");
-            if (candidate.packageName !== target.packageName) throw new Error("焦点窗口不属于授权 App；请关闭系统弹窗后重试。");
-            if (deadline - performance.now() < APP_READY_MIN_READ_MS) { readiness.budgetStop(); break; }
+            // A stable first poll needs only the full fresh check. Once waiting, use
+            // cheap focus observations to avoid repeated run-as while no window exists.
+            // A candidate never authorizes a tree; both strict dump brackets remain.
+            if (!firstPoll) {
+              const timeout = AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now())));
+              const signal = context.signal ? AbortSignal.any([context.signal, timeout]) : timeout;
+              const candidate = await readiness.observe("focus-candidate", () => measure("就绪等待：窗口观察", () => withCommandSignal(signal,
+                () => readDebugFocus(adbPath, serial))), value => ({ result: value.packageName === target.packageName ? "match" : "changed", windowId: value.id }),
+                error => error instanceof FocusUnavailableError ? { result: "unavailable", focusReason: error.focusReason } : "error");
+              if (candidate.packageName !== target.packageName) throw new Error("焦点窗口不属于授权 App；请关闭系统弹窗后重试。");
+              if (deadline - performance.now() < APP_READY_MIN_READ_MS) { readiness.budgetStop(); break; }
+            }
             beforeFocus = await readiness.observe("focus-confirm-before", () => measure("就绪等待：窗口确认", confirmFocus),
               value => ({ result: sameActivityInstance(target, value) ? "match" : "changed", component: value.component, windowId: value.windowId }),
               error => error instanceof FocusUnavailableError ? { result: "unavailable", focusReason: error.focusReason } : "error");
           }
           catch (error) {
             context.signal?.throwIfAborted();
+            // checkedDebugTarget owns the first foreground read now. Its legacy
+            // identity failures must still stop the attempt, not become focus waits.
+            if (firstPoll && error instanceof ForegroundUnavailableError) throw error;
             focusRejection = error instanceof Error ? error.message : "焦点窗口查询失败";
             continue;
           }
@@ -344,7 +354,7 @@ async function readDeviceSnapshot(provider: ProviderClient, serial: string, cont
                 value => ({ result: sameActivityInstance(target, value) && value.windowId === beforeFocus.windowId ? "match" : "changed", component: value.component, windowId: value.windowId }),
                 error => error instanceof FocusUnavailableError ? { result: "unavailable", focusReason: error.focusReason } : "error");
               focusReady = sameActivityInstance(target, afterFocus) && afterFocus.windowId === beforeFocus.windowId;
-              if (focusReady) readiness.focused(afterFocus);
+              if (focusReady) { readiness.focused(afterFocus); captureWindowId = afterFocus.windowId; }
               if (!focusReady) focusRejection = "读取控件树前后焦点窗口或 Activity 已变化";
             }
             catch (error) {
@@ -397,46 +407,35 @@ async function readDeviceSnapshot(provider: ProviderClient, serial: string, cont
     } else {
       root = debugViewTree(section, target);
       diagnosticRoot = root;
-      root.attributes = { ...root.attributes, "debug-component": target.component };
+      root.attributes = { ...root.attributes, "debug-component": target.component, "debug-window-id": captureWindowId };
       inspectionSource = "debug-view";
       rawHierarchy = section;
       stage("读取完整控件属性");
       const imageSignal = captureSignal(context.signal, startupWaited ? STARTUP_IMAGE_TIMEOUT_MS : IMAGE_TIMEOUT_MS);
+      const previews = options.onPreview ? createSnapshotPreview({
+        signal: imageSignal, progressive: !context.plan.allowsSdk, screenTimeoutMs: PREVIEW_SCREEN_TIMEOUT_MS,
+        readScreen: () => captureScreen(adbPath, serial),
+        verifyForeground: async () => {
+          const foreground = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]);
+          return foreground.code === 0 && sameActivityInstance(target, foregroundTarget(foreground.stdout.toString("utf8")));
+        },
+        snapshot: screen => ({
+          serial, root, nodeCount: countNodes(root), xmlSize: Buffer.byteLength(rawHierarchy, "utf8"), rawXml: null,
+          screenshotDataUrl: screen?.screenshotDataUrl ?? null, captureGeometry: screen?.captureGeometry,
+          error: null, warning: null, inspectionSource: "debug-view",
+          layerCapture: usesOnDemandLayers(context) ? "on-demand" : "full",
+          captureDurationMs: Math.round(performance.now() - started),
+        }),
+        publish: options.onPreview, timings, beforeBlockingScreen: () => stage("读取首屏预览"),
+      }) : null;
       try {
-        let previewScreen: Awaited<ReturnType<typeof captureScreen>> | null = null;
-        let previewScreenTask: Promise<void> | null = null;
-        const beginTreeScreen = () => previewScreenTask ??= (async () => {
-          try {
-            const signal = captureSignal(imageSignal, PREVIEW_SCREEN_TIMEOUT_MS);
-            const screen = await withCommandSignal(signal, () => captureScreen(adbPath, serial));
-            if (screen.screenshotDataUrl && screen.captureGeometry && assessCaptureGeometry(screen.captureGeometry).status === "checked") previewScreen = screen;
-          } catch { context.signal?.throwIfAborted(); }
-        })();
-        const preview: InspectionPreview | undefined = options.onPreview ? Object.assign(async (phase: "tree" | "layers") => {
-          try {
-            if (phase === "tree") {
-              stage("读取首屏预览");
-              await beginTreeScreen();
-            }
-            const previewCheckStarted = performance.now();
-            const foreground = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]);
-            if (phase === "tree") timings["树预览前台校验"] = Math.round(performance.now() - previewCheckStarted);
-            if (foreground.code !== 0 || !sameActivityInstance(target, foregroundTarget(foreground.stdout.toString("utf8")))) return;
-            context.signal?.throwIfAborted();
-            options.onPreview?.(phase, {
-              serial, root, nodeCount: countNodes(root), xmlSize: Buffer.byteLength(rawHierarchy, "utf8"), rawXml: null,
-              screenshotDataUrl: previewScreen?.screenshotDataUrl ?? null, captureGeometry: previewScreen?.captureGeometry,
-              error: null, warning: null, inspectionSource: "debug-view",
-              captureDurationMs: Math.round(performance.now() - started),
-            });
-          } catch {
-            context.signal?.throwIfAborted();
-          }
-        }, { beginTreeScreen }) : undefined;
-        const images = await withCommandSignal(imageSignal, () => captureDebugViewImages(provider, adbPath, serial, target.packageName, root, stage, preview, timings, withCaptureSignal(context, imageSignal)));
+        // The tree's focused window is verified above. Overlap the optional screenshot with
+        // process/property preparation; publication still checks the foreground and geometry.
+        if (!context.plan.allowsSdk) void previews?.preview.beginTreeScreen?.();
+        const images = await withCommandSignal(imageSignal, () => captureDebugViewImages(provider, adbPath, serial, target.packageName, root, stage, previews?.preview, timings, withCaptureSignal(context, imageSignal)));
         const imageCount = images.imageCount;
         prestartedScreen = images.finalScreen;
-        if (imageCount === 0) warning = "未读取到独立 View 画面，缺失画面的控件仅显示边框。";
+        if (imageCount === 0 && !usesOnDemandLayers(context)) warning = "未读取到独立 View 画面，缺失画面的控件仅显示边框。";
       } catch (error) {
         context.signal?.throwIfAborted();
         if (imageSignal.aborted) throw new Error(startupWaited
@@ -458,7 +457,7 @@ async function readDeviceSnapshot(provider: ProviderClient, serial: string, cont
           pending.push(...node.children);
         }
         warning = `独立 View 画面抓取失败，缺失画面的控件仅显示边框。${error instanceof Error ? error.message : ""}`;
-      }
+      } finally { await previews?.close(); }
       const pending = [...root.children];
       let ambiguous = 0, outsideWindow = 0;
       while (pending.length) {
@@ -488,6 +487,12 @@ async function readDeviceSnapshot(provider: ProviderClient, serial: string, cont
     if (after.code !== 0 || !sameActivityInstance(target, foregroundTarget(after.stdout.toString("utf8")))) {
       throw new Error("采集期间前台窗口发生变化或无法校验，请保持页面稳定后重新采集。");
     }
+    if (!qmlIdentity && usesOnDemandLayers(context)) {
+      const confirmed = await checkedDebugTarget(adbPath, serial, target.packageName);
+      if (confirmed.windowId !== captureWindowId || Number(root.attributes?.["debug-process-id"]) !== await singleAppPid(adbPath, serial, target.packageName)) {
+        throw new Error("控件树采集期间进程或窗口已变化，请重新采集。");
+      }
+    }
     if (qmlIdentity) {
       const confirmed = await checkedDebugTarget(adbPath, serial, target.packageName);
       if (confirmed.windowId !== qmlIdentity.windowId || qmlIdentity.processId !== await singleAppPid(adbPath, serial, target.packageName)) {
@@ -515,6 +520,7 @@ async function readDeviceSnapshot(provider: ProviderClient, serial: string, cont
       error: null,
       warning,
       inspectionSource,
+      layerCapture: inspectionSource === "debug-view" && usesOnDemandLayers(context) ? "on-demand" : "full",
       captureTimings: timings,
       captureDurationMs: Math.round(performance.now() - started),
       captureReadiness: readiness.snapshot(),

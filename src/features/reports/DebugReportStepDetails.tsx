@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { DebugReportStepLogs } from "./DebugReportStepLogs";
 import { DebugReportStepDiff } from "./DebugReportStepDiff";
+import { DebugReportStepTimings } from "./DebugReportStepTimings";
+import { DebugReportScrollProgress } from "./DebugReportScrollProgress";
 import type { DebugReportStep } from "../../../shared/debug-report";
 import type { LoadedTestReport, TestReportStep } from "../../../shared/test-report";
 import type { DebugTaskCheckResult } from "../../../shared/debug-task";
@@ -137,6 +139,13 @@ export function DebugReportStepDetails({ data, images, record, step }: Props) {
     <h3>#{record.step.id} · {record.step.action}</h3>
     <p>{debugStepOutcomeLabel(record, data)} · {record.durationMs} ms · {taskCheck ? "只读验收，不派发输入" : `输入派发：${debugDispatchLabel(record.step)}`}</p>
     <p>开始 {record.step.time} · 结束 {record.finishedAt}</p>
+    <DebugReportStepTimings timings={record.step.timings} />
+    {record.step.observationFailures?.length ? <details className="debug-report-properties">
+      <summary>观察恢复记录 · {record.step.observationFailures.length} 次读取失败</summary>
+      <p>这些记录只涉及重新读取页面，不会重复发送操作。成功状态仍以预期条件验证为准。</p>
+      <pre>{JSON.stringify(record.step.observationFailures, null, 2)}</pre>
+    </details> : null}
+    {record.step.scrollTask && <DebugReportScrollProgress progress={record.step.scrollTask} data={data} resumed={record.step.action === "resume_ui_step"} />}
     <p>{debugStepDisplayMessage(record, data)}</p>
     {taskCheck ? record.step.taskCheck ? <TaskCheckDetails data={data} check={record.step.taskCheck} /> : <p className="debug-report-verdict" data-task-status="insufficient_evidence">没有可复核的任务验收结果；证据不足。</p>
       : <p className="debug-report-verdict">{verification === "passed" ? data.task ? "此步骤的页面断言通过；不改变独立任务验收结果。" : "此步骤的页面断言通过；整体业务目标仍未验收。"
@@ -145,7 +154,9 @@ export function DebugReportStepDetails({ data, images, record, step }: Props) {
     {record.step.recordingErrors?.length ? <details className="debug-report-recording-errors" open><summary>此步骤的留证缺失或错误</summary><pre>{JSON.stringify(record.step.recordingErrors, null, 2)}</pre></details> : null}
     {!taskCheck && receipt && <details className="debug-report-receipt" open={receipt.classification !== "accepted"}>
       <summary>输入回执 · {receipt.classification}</summary>
-      <p>进程已启动：{receipt.spawned ? "是" : "否"} · 退出已确认：{receipt.closed ? "是" : "否"} · 退出码：{receipt.exitCode ?? "未知"} · {receipt.durationMs} ms</p>
+      {receipt.transport === "accessibility-helper"
+        ? <p>Helper 动作 · {receipt.helperInput?.receipt?.method === "accessibility-click" ? "控件点击" : receipt.helperInput?.receipt?.method === "accessibility-scroll" ? "无障碍滚动" : receipt.helperInput?.receipt?.method === "global-back" ? "系统返回" : receipt.helperInput?.receipt?.method === "gesture" ? "触摸手势" : "执行方式未确认"} · 派发：{receipt.helperInput?.dispatchState ?? "未知"} · 回执：{receipt.helperInput?.receipt?.status ?? "未确认"} · {receipt.durationMs} ms</p>
+        : <p>进程已启动：{receipt.spawned ? "是" : "否"} · 退出已确认：{receipt.closed ? "是" : "否"} · 退出码：{receipt.exitCode ?? "未知"} · {receipt.durationMs} ms</p>}
       <pre>{JSON.stringify(receipt, null, 2)}</pre>
     </details>}
     <details className="debug-report-request"><summary>请求和解析后的目标</summary><pre>{JSON.stringify({ input: record.step.input, resolvedInput: record.step.resolvedInput ?? null }, null, 2)}</pre></details>

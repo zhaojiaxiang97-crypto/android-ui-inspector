@@ -46,7 +46,7 @@ test("offline debug report retains explicitly registered typed business values",
     observe: async () => ({ snapshot: source, target }), input: async () => { throw new Error("This read-only check cannot dispatch inputs"); },
   });
   try {
-    await session.request({ name: "capture_ui", input: { sessionId: session.state.id } });
+    await session.request({ name: "capture_ui", input: { sessionId: session.state.id, mode: "deep" } });
     session.stop("Offline business metadata check"); await session.settled();
     const loaded = await loadTestReport(session.state.reportPath!);
     assert.deepEqual(loaded.debug!.snapshots[0].snapshot?.root!.children[0].debugMetadata, businessMetadataFixture);

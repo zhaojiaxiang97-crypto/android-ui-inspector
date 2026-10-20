@@ -180,7 +180,7 @@ test("MCP packaged stdio entry speaks to an official client without Electron or 
   try {
     await client.connect(transport);
     const tools = (await client.listTools()).tools;
-    assert.equal(tools.length, 16);
+    assert.equal(tools.length, 23);
     for (const name of ["define_debug_task", "check_debug_task"]) {
       assert.ok(tools.some(tool => tool.name === name && tool.annotations?.readOnlyHint === true));
     }

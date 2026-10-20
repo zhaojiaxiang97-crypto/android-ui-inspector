@@ -13,7 +13,6 @@ type Props = {
   inspectionLoading: boolean;
   canSelectDevice: boolean;
   error: string | null;
-  checkedAt: Date | null;
   preview?: { dataUrl: string; capturedAt: string } | null;
   onDiagnose?: () => void;
   onStart: () => void;
@@ -45,7 +44,7 @@ function deviceStateLabel(state: DeviceInfo["state"]) {
   return "离线";
 }
 
-export function DeviceHomeView({ state, device, devices, loading, inspectionLoading, canSelectDevice, error, checkedAt, preview, onDiagnose, onStart, onRefresh, onSelectDevice }: Props) {
+export function DeviceHomeView({ state, device, devices, loading, inspectionLoading, canSelectDevice, error, preview, onDiagnose, onStart, onRefresh, onSelectDevice }: Props) {
   const [switchOpen, setSwitchOpen] = useState(false);
   const connected = state === "connected" && Boolean(device);
   const copy = emptyStateCopy(state);
@@ -59,7 +58,6 @@ export function DeviceHomeView({ state, device, devices, loading, inspectionLoad
   return (
     <section className="home-view" aria-label="设备连接" data-state={state} aria-busy={loading}>
       <div className="home-launchpad">
-      <p className="home-launch-heading">{connected ? "选择设备，开始检查" : "连接设备，开始检查"}</p>
       <div className={`home-center-state state-${state} ${connected ? "is-connected" : "is-empty"}`}>
         {connected ? <figure className={`home-target-preview ${showPreview ? "has-image" : ""}`}>
           {showPreview ? <img src={preview.dataUrl} alt="这台设备上次保存的画面" onError={() => setFailedPreview(preview.dataUrl)} />
@@ -73,10 +71,6 @@ export function DeviceHomeView({ state, device, devices, loading, inspectionLoad
 
         {connected ? (
           <>
-            <h2 title={device?.model || device?.serial || "Android 设备"}>{device?.model || device?.serial || "Android 设备"}</h2>
-            <p className="home-device-platform">
-              {device?.androidVersion ? `Android ${device.androidVersion}` : "Android"}
-            </p>
             <div className="home-connection-status" role="status">
               <span className="home-status-dot ready" aria-hidden="true" />
               <span>设备已连接</span>
@@ -105,7 +99,6 @@ export function DeviceHomeView({ state, device, devices, loading, inspectionLoad
           </div>
         </div>
         {error && !loading && <details className="home-connection-detail"><summary>连接详情</summary><p>{error}</p></details>}
-        {checkedAt && !loading && <p className="home-check-time">最近检查 {checkedAt.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</p>}
       </div>
       <details className="home-connection-help" onKeyDown={event => {
         if (event.key !== "Escape") return;

@@ -11,6 +11,7 @@ import { useContextHints } from "./features/inspection/useContextHints";
 import { NodeHoverProvider } from "./features/inspection/NodeHoverContext";
 import { useDebugSession } from "./features/automation/useDebugSession";
 import { DebugSessionProgress } from "./features/automation/DebugSessionProgress";
+import { DebugPlanRunner } from "./features/automation/DebugPlanRunner";
 import { DebugTaskEditor, type DebugTaskEditorApi } from "./features/automation/DebugTaskEditor";
 import { uniqueSnapshotNode } from "./features/automation/selector-match-diagnostics";
 import { ConnectionDiagnosticsPanel } from "./features/diagnostics/ConnectionDiagnosticsPanel";
@@ -71,6 +72,7 @@ function inspectionSourceLabel(snapshot: UiSnapshot) {
 
 function App() {
   const services = useMemo(() => createDesktopServices(window.electronApi), []);
+  const [preparing3d, setPreparing3d] = useState<{ screenshot: string | null } | null>(null);
   const imageMenuCallbacks = useRef<{ onImageAction?: (action: LayerImageAction, node: UiNode) => void; imageScopesForNode?: (node: UiNode) => LayerImageScopeOption[]; refreshBlocked?: boolean }>({});
   const inspection = useInspectionWorkspace({
     api: services.inspection,
@@ -97,11 +99,11 @@ function App() {
     treeCollapsePreference, setTreeCollapsePreference, applyTreeCollapsePreference, canApplyTreeCollapse,
     nodeHistory, nodeHistoryView, viewingScope, treeSearchNavigation,
   } = inspection;
+  useEffect(() => { if (!inspectionLoading) setPreparing3d(null); }, [inspectionLoading]);
   const contextHints = useContextHints(treeSession, inspectionLoading || Boolean(viewRefreshingNodeId));
   const [probe, setProbe] = useState<AdbProbeResult | null>(null);
   const probeRequest = useRef(0);
   const probePending = useRef(false);
-  const [checkedAt, setCheckedAt] = useState<Date | null>(null);
   // The first render happens before the probe effect runs. Start in loading so
   // the home state never flashes an error while the bridge is being queried.
   const [loading, setLoading] = useState(true);
@@ -136,10 +138,10 @@ function App() {
   const clearCopyStatus = useCallback(() => setCopyStatus(null), []);
   const library = useSnapshotLibrary({ api: snapshotApi, snapshot, treeCapturedAt, snapshotForStorage, showSnapshot,
     beforeOpen: async () => { setLivePreviewSerial(null); await stopMcpSharing("history"); }, clearCopyStatus });
-  const { savedSnapshots, snapshotsLoading, snapshotStoreError, snapshotStatus, snapshotOrigin, diffExportStatus,
+  const { savedSnapshots, snapshotFileBytes, snapshotsLoading, snapshotStoreError, snapshotStatus, snapshotOrigin, diffExportStatus,
     latestDiff, diffExpanded, setDiffExpanded, exportStatus, openingSnapshot, snapshotFileStatus, dismissSnapshotFileStatus,
     invalidateSnapshotFile, resetForCapture, resetForHome, showLiveSnapshot,
-    exportCurrentSnapshot, exportLatestDiff, saveCurrentSnapshot, clearSavedSnapshots, viewSavedSnapshot, openSnapshotFile } = library;
+    exportCurrentSnapshot, exportLatestDiff, exportSavedSnapshot, saveCurrentSnapshot, clearSavedSnapshots, deleteSavedSnapshot, viewSavedSnapshot, openSnapshotFile } = library;
   const { mcpSharing, mcpBusy, debugState, debugStatus, setDebugStatus,
     stopMcpSharing, shareMcpSnapshot, copyMcpConfig, androidLogsEnabled, setAndroidLogsEnabled, startDebugSession: startDebug } = useDebugSession({
       snapshot, selectedNode, inspectionLoading, showSnapshot: showLiveSnapshot,
@@ -166,7 +168,6 @@ function App() {
       const result = await window.electronApi.probeAdb();
       if (probeRequest.current !== request) return;
       setProbe(result);
-      setCheckedAt(new Date());
     } catch (error) {
       if (probeRequest.current !== request) return;
       setRuntimeError(
@@ -174,7 +175,6 @@ function App() {
           ? error
           : error instanceof Error ? error.message : "无法连接到 Electron 后端，请使用桌面应用启动。",
       );
-      setCheckedAt(new Date());
     } finally {
       if (probeRequest.current === request) {
         probePending.current = false;
@@ -183,13 +183,15 @@ function App() {
     }
   }, []);
 
-  const inspectDevice = useCallback((serial: string, priorityViewRef?: string | null, diagnostic?: { expectedPackage: string; requestId: string }) => {
+  const inspectDevice = useCallback((serial: string, priorityViewRef?: string | null, diagnostic?: { expectedPackage: string; requestId: string }, layerCapture: "on-demand" | "full" = "on-demand") => {
+    if (layerCapture !== "full" || diagnostic) setPreparing3d(null);
     resetForCapture();
     setCopyStatus(null);
-    return inspection.inspectDevice(serial, priorityViewRef, diagnostic);
+    return inspection.inspectDevice(serial, priorityViewRef, diagnostic, diagnostic ? "full" : layerCapture);
   }, [inspection.inspectDevice, resetForCapture]);
 
   const closeInspector = useCallback(() => {
+    setPreparing3d(null);
     setLivePreviewSerial(null);
     resetForHome();
     clearInspection();
@@ -208,6 +210,17 @@ function App() {
     [devices],
   );
   const detailNode = selectedNode ?? snapshot?.root ?? null;
+  const fontApi = window.electronApi;
+  const canReadSelectedFont = Boolean(fontApi.readViewFont && viewLiveRequestId && selectedNode?.attributes?.["view-ref"]
+    && (snapshot?.inspectionSource === "debug-view" || snapshot?.inspectionSource === "debug-hybrid")
+    && !inspectionLoading && !debugState?.active && !viewRefreshingNodeId);
+  const readSelectedFont = useCallback(() => {
+    if (!canReadSelectedFont || !fontApi.readViewFont || !viewLiveRequestId || !selectedNode) return Promise.reject(new Error("当前快照不能读取字体，请重新采集。"));
+    // An explicit font read takes priority over this visit's delayed/background pixels.
+    inspection.demandImages.invalidate();
+    return fontApi.readViewFont(viewLiveRequestId, selectedNode.id);
+  }, [canReadSelectedFont, fontApi.readViewFont, viewLiveRequestId, selectedNode, inspection.demandImages.invalidate]);
+  const cancelFont = useCallback((requestId: string) => fontApi.cancelViewFont?.(requestId) ?? Promise.resolve(), [fontApi.cancelViewFont]);
   const detailGroupImage = detailNode ? availableGroupImages.find(group => group.nodeId === detailNode.id)?.image ?? null : null;
   const imageActions = useNodeImageActionController({ root: snapshot?.root ?? null, node: detailNode, sessionKey: treeSession, groupImage: detailGroupImage });
   imageMenuCallbacks.current = {
@@ -317,6 +330,13 @@ function App() {
     const priorityViewRef = snapshot?.serial === captureSerial ? selectedNode?.attributes?.["view-ref"] ?? null : null;
     void inspectDevice(captureSerial, priorityViewRef);
   }, [captureSerial, inspectDevice, selectedNode, snapshot?.serial]);
+  const captureComplete = useCallback(() => {
+    if (!captureSerial || inspectionLoading) return;
+    const intent = { screenshot: snapshot?.screenshotDataUrl ?? null };
+    setPreparing3d(intent);
+    const finish = () => setPreparing3d(current => current === intent ? null : current);
+    void inspectDevice(captureSerial, null, undefined, "full").then(finish, finish);
+  }, [captureSerial, inspectionLoading, snapshot?.screenshotDataUrl, inspectDevice]);
   const startDebugSession = useCallback(() => captureSerial ? startDebug(captureSerial) : Promise.resolve(), [captureSerial, startDebug]);
 
   const appMenuState = useMemo<AppMenuState>(() => ({
@@ -361,6 +381,8 @@ function App() {
   // Stop remains outside collapsed tool menus while automation is authorized.
   const debugStopControl = (debugState?.active || mcpSharing) && <button className="close-button debug-stop" type="button" onClick={() => dispatchMenuAction({ type: "mcp-stop" })}>立即停止</button>;
   const observationControls = <>
+    <button type="button" className="close-button" data-command="capture-complete" disabled={!captureSerial || inspectionLoading}
+      onClick={captureComplete}>完整采集所有图层</button>
     <button type="button" className="close-button" data-command="debug-task-template" disabled={!debugTaskEditorApi}
       onClick={() => setDebugTaskEditorVisibility("open")}>任务模板</button>
     <button type="button" className="close-button" data-command="connection-diagnosis" disabled={!connectionDiagnosticApi}
@@ -376,6 +398,7 @@ function App() {
       <div className="snapshot-drawer-body">
         <strong>{debugState?.active ? debugState.packageName : "自动 UI 调试"}</strong>
         <p>{debugState?.active ? `设备 ${debugState.serial} · ${new Date(debugState.expiresAt).toLocaleTimeString()} 到期` : "只授权指定 Debug App；支持观察、点击、滚动、返回和结果验证。"}</p>
+        <DebugPlanRunner state={debugState} command={window.electronApi.debugPlanCommand} disabled={inspectionLoading || mcpBusy} />
         <DebugSessionProgress state={debugState} onStop={() => dispatchMenuAction({ type: "mcp-stop" })}
           androidLogsEnabled={androidLogsEnabled} onAndroidLogsChange={setAndroidLogsEnabled} disabled={inspectionLoading || mcpBusy} />
         <div className="snapshot-actions">
@@ -479,8 +502,13 @@ function App() {
           <button className="entry-dialog-close" type="button" aria-label="关闭快照历史" onClick={() => setHomeHistoryOpen(false)} autoFocus><AppIcon name="close" size={14} /></button>
         </div>
         <p>本地快照 · {savedSnapshots.length} 份</p>
-        {snapshotsLoading ? <p role="status">正在读取本地快照…</p> : snapshotStoreError ? <p role="alert">{snapshotStoreError}</p>
-          : savedSnapshots.length ? <SnapshotHistory entries={savedSnapshots} onSelect={entry => { setHomeHistoryOpen(false); viewSavedSnapshot(entry); }} /> : <p>还没有本地快照。采集后可以保存，之后无需连接设备即可查看。</p>}
+        {snapshotsLoading && <p role="status">正在读取本地快照…</p>}
+        {snapshotStoreError && <p role="alert">{snapshotStoreError}</p>}
+        {snapshotStatus && <p role="status">{snapshotStatus}</p>}
+        {!snapshotsLoading && (savedSnapshots.length ? <SnapshotHistory entries={savedSnapshots} fileBytes={snapshotFileBytes}
+          onSelect={entry => { setHomeHistoryOpen(false); viewSavedSnapshot(entry); }}
+          onExport={exportSavedSnapshot} onDelete={snapshotApi.deleteSnapshot ? entry => void deleteSavedSnapshot(entry.id) : undefined} />
+          : !snapshotStoreError && <p>还没有本地快照。采集后可以保存，之后无需连接设备即可查看。</p>)}
       </EntryDialog>}
       <ConnectionDiagnosticsPanel open={connectionDiagnosticsOpen} onClose={() => setConnectionDiagnosticsOpen(false)}
         serial={toolbarSerial || null} packageName={debugState?.active && debugState.serial === toolbarSerial ? debugState.packageName : undefined}
@@ -526,7 +554,7 @@ function App() {
       }} />
 
       <main className="workspace">
-        <DeviceHomeView
+        {!snapshot?.root && <DeviceHomeView
           state={homeState}
           device={toolbarDevice}
           devices={devices}
@@ -534,13 +562,12 @@ function App() {
           inspectionLoading={inspectionLoading}
           canSelectDevice={canSelectDevice}
           error={runtimeError || probe?.error || null}
-          checkedAt={checkedAt}
           preview={homeSnapshot ? { dataUrl: homeSnapshot.snapshot.screenshotDataUrl!, capturedAt: homeSnapshot.capturedAt } : null}
           onDiagnose={connectionDiagnosticApi ? () => setConnectionDiagnosticsOpen(true) : undefined}
           onStart={() => dispatchMenuAction({ type: "capture" })}
           onRefresh={() => dispatchMenuAction({ type: "refresh" })}
           onSelectDevice={serial => dispatchMenuAction({ type: "device", serial })}
-        />
+        />}
         {selectedSerial && (
           <section className="panel inspector-panel">
             <div className="inspector-heading">
@@ -575,9 +602,10 @@ function App() {
                     <span className="tree-hint">采集中</span>
                   </div>
                   <div className="workspace-empty-copy">
-                    <AppIcon name="camera" size={36} className="workspace-empty-icon" />
-                    <h4>等待采集结果</h4>
-                    <p>先确认窗口和控件树，再同步设备画面。</p>
+                    {preparing3d?.screenshot ? <img className="preparing-3d-preview" src={preparing3d.screenshot} alt="上次采集的 2D 截图" />
+                      : <AppIcon name="camera" size={36} className="workspace-empty-icon" />}
+                    <h4>{preparing3d ? "正在准备 3D 图层" : "等待采集结果"}</h4>
+                    <p>{preparing3d ? preparing3d.screenshot ? "暂时显示上次截图，完整图层就绪后进入 3D。" : "正在读取窗口和图层，完整图层就绪后进入 3D。" : "先确认窗口和控件树，再同步设备画面。"}</p>
                   </div>
                 </div>
               </div>
@@ -689,6 +717,16 @@ function App() {
                       <span>设备画面</span>
                       <span className="tree-hint">{selectedSerial}</span>
                     </div>
+                    {snapshot.layerCapture === "on-demand" && <div className="demand-layer-status" aria-label="按需图层读取">
+                      <span role="status">{inspection.demandImages.message ?? (inspection.demandImages.available
+                        ? "2D 预览已就绪；切换 3D 时会自动读取完整图层。"
+                        : inspectionLoading ? "先读取截图与控件树…" : "此快照仅保存已读取的图层；重新采集可继续按需读取。")}</span>
+                      <button className="close-button" type="button" disabled={!inspection.demandImages.available || inspection.demandImages.loading || !selectedNode || Boolean(viewRefreshingNodeId)}
+                        onClick={() => { if (selectedNode) inspection.demandImages.request(selectedNode.id, true); }}>
+                        {inspection.demandImages.loading ? "读取中…" : inspection.demandImages.failed ? "重试当前分支" : "读取当前分支"}
+                      </button>
+                      <button className="close-button" type="button" disabled={!captureSerial || inspectionLoading} onClick={captureComplete}>完整采集</button>
+                    </div>}
                     {sceneToolbarHost && createPortal(<details className="snapshot-drawer">
                       <summary aria-label="快照与历史" title={`快照与历史 · ${savedSnapshots.length} 份`}>
                         <AppIcon name="history" size={18} /><span>快照历史</span>
@@ -721,15 +759,18 @@ function App() {
                           </div>
                         </div>
                         {savedSnapshots.length > 0 && (
-                          <SnapshotHistory entries={savedSnapshots} onSelect={viewSavedSnapshot} />
+                          <SnapshotHistory entries={savedSnapshots} fileBytes={snapshotFileBytes} onSelect={viewSavedSnapshot} onExport={exportSavedSnapshot}
+                            onDelete={snapshotApi.deleteSnapshot ? entry => void deleteSavedSnapshot(entry.id) : undefined} />
                         )}
                         {latestDiff && diffExpanded && (
                           <SnapshotDiffDetails diff={latestDiff} onExport={exportLatestDiff} />
                         )}
                       </div>
                     </details>, sceneToolbarHost)}
-                    {snapshot.screenshotDataUrl ? (
-                      <ScreenshotPreview sessionKey={treeSession} src={snapshot.screenshotDataUrl} root={snapshot.root}
+                      <ScreenshotPreview sessionKey={treeSession} src={snapshot.screenshotDataUrl ?? ""} root={snapshot.root} capturePending={inspectionLoading} preferFlat={snapshot.layerCapture === "on-demand"}
+                        preparing3d={Boolean(preparing3d && inspectionLoading)}
+                        preparingScreenshot={preparing3d?.screenshot} enter3dWhenReady={snapshot.layerCapture === "full"}
+                        onPrepare3d={inspection.demandImages.available && snapshot.serial === captureSerial ? captureComplete : undefined}
                         toolsSuspended={preferencesOpen || Boolean(imageActions.preview) || connectionDiagnosticsOpen || testReportOpen || debugTaskEditorVisibility === "open"}
                         selectedNode={selectedNode} expandedNodeIds={treeExpandedIds} geometry={snapshot.captureGeometry} layersAvailable={snapshot.captureMode !== "fast"} onSelect={handleScreenshotSelect}
                         layerFocus={layerFocus} hiddenNodeIds={hiddenNodeIds} doubleClickAction={doubleClickAction} onDoubleClick={handleNodeDoubleClick}
@@ -740,7 +781,6 @@ function App() {
                         onNavigateNode={navigateToNode} navigationDisabled={inspectionLoading || Boolean(viewRefreshingNodeId)}
                         contextHints={contextHints}
                         onCaptureGroup={groupRequestId ? requestGroup : undefined} />
-                    ) : <div className="screenshot-frame"><div className="no-screenshot">截图不可用</div></div>}
                     {layerMenuError && <p className="screenshot-status mismatch" role="alert">{layerMenuError}</p>}
                     {detailNode && (
                       <NodePropertiesPanel
@@ -777,6 +817,8 @@ function App() {
                         onRefreshBranch={canRefreshDetailBranch ? () => void refreshViewNode(detailNode, "branch") : undefined}
                         onRefreshList={canRefreshDetail && (snapshot.inspectionSource === "debug-view" || snapshot.inspectionSource === "debug-hybrid") && (/(RecyclerView|AbsListView|ListView|GridView|ViewPager)$/.test(detailNode.className ?? "") || detailNode.children.length >= 12) ? () => void refreshViewNode(detailNode, "list") : undefined}
                         onReadStyle={snapshot.inspectionSource === "debug-hybrid" && snapshot.root.attributes?.["sdk-style-version"] === "1" && viewLiveRequestId && detailNode.attributes?.["view-ref"] && !inspectionLoading && !debugState?.active ? () => window.electronApi.readViewStyle(viewLiveRequestId, detailNode.id) : undefined}
+                        onReadFont={canReadSelectedFont ? readSelectedFont : undefined}
+                        onCancelFont={cancelFont} fontSessionKey={viewLiveRequestId}
                         refreshBusy={viewRefreshingNodeId !== null}
                         refreshStatus={viewRefreshStatus?.nodeId === detailNode.id ? viewRefreshStatus.message : null}
                       >

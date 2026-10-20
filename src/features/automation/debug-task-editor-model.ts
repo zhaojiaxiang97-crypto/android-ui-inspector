@@ -112,6 +112,6 @@ export function debugTaskSessionBlockedReason(state: DebugSessionState | null, n
 
 export function debugTaskDefinitionBlockedReason(state: DebugSessionState | null, now = Date.now()) {
   return debugTaskSessionBlockedReason(state, now) ?? (state?.task ? "当前会话已经固定任务，不能改写。可继续编辑本地模板。"
-    : state?.steps.some(step => ["tap_node", "scroll_node", "press_back"].includes(step.action))
+    : state?.steps.some(step => ["tap_node", "scroll_node", "press_back", "perform_ui_step", "scroll_until"].includes(step.action))
       ? "本会话已请求过手机输入；任务必须在首次输入前固定。可保存模板供下一会话使用。" : null);
 }

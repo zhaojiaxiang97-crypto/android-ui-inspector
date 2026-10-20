@@ -118,10 +118,12 @@ test("CLI binary: shared tree/search/attributes/images/measurement, validation, 
     revokeMcpSnapshot(path);
 
     let label = "打开设置", taps = 0, scrolls = 0, backs = 0, failAfterTap = false, holdCapture = false, cancelled = false, parentMode = false;
+    const observedBackends: string[] = [];
     let captureStarted: () => void = () => {};
     const target = { packageName, activityName: ".Main", component: `${packageName}/.Main`, windowId: "abcd" };
     session = new DebugSession({ serial: "cli-fixture", packageName, snapshotPath: path, directory, onEvent: () => {},
       observe: async (_serial, _package, mode, signal, backend = "uiautomator") => {
+        observedBackends.push(backend);
         if (failAfterTap && taps > 1) throw new Error("模拟输入已发送，但截图失败");
         if (holdCapture) await new Promise<void>((_resolve, reject) => {
           signal!.addEventListener("abort", () => { cancelled = true; reject(signal!.reason); }, { once: true });
@@ -152,6 +154,10 @@ test("CLI binary: shared tree/search/attributes/images/measurement, validation, 
     assert.equal(attached.id, session.state.id); assert.equal(attached.packageName, packageName);
     assert.equal((await json("doctor")).live.active, true);
     const auth = ["--session", attached.id];
+    await fails("wait", ...auth, "--backend", "unknown", "--text", "打开设置");
+    assert.equal(observedBackends.length, 0);
+    assert.equal((await json("wait", ...auth, "--backend", "uiautomator", "--text", "打开设置")).verified, true);
+    assert.deepEqual(observedBackends, ["uiautomator", "uiautomator"]);
     await fails("capture");
     await fails("capture", ...auth, "--mode", "unknown");
     const deep = await json("capture", ...auth, "--mode", "deep");
@@ -168,6 +174,8 @@ test("CLI binary: shared tree/search/attributes/images/measurement, validation, 
     assert.match((await fails("wait", ...auth, "--text", "设置")).message, /Helper/);
     assert.equal(taps, 0);
     const first = await json("capture", ...auth);
+    assert.match((await fails("wait", ...auth, "--text", "设置", "--visibility", "partial")).message, /Helper|helper/);
+    await fails("wait", ...auth, "--text", "设置", "--state", "absent", "--visibility", "partial");
     await fails("tap", ...auth, "--node", "0/0");
     assert.equal(taps, 0);
     const sent = await json("tap", ...auth, "--snapshot", first.snapshotId, "--node", "0/0");

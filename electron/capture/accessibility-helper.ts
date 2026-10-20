@@ -3,14 +3,44 @@ import { isAbsolute } from "node:path";
 import { XMLBuilder, XMLParser, XMLValidator } from "fast-xml-parser";
 import { z } from "zod";
 import type { DisplayFrame } from "../../shared/types";
+import { parseHelperObservationDiagnostics, type HelperObservationDiagnostics } from "../../shared/helper-observation-diagnostics";
+import { assessHelperRecoveryEvidence, type HelperRecoveryEvidence } from "../../shared/helper-observation";
+import { parseHelperRecoveryDiagnostics, type HelperRecoveryDiagnostics } from "../../shared/helper-recovery-diagnostics";
 import { MAX_UI_HIERARCHY_DEPTH, parseUiHierarchy } from "./xml-tree";
 import { withoutCommandSignal } from "../device/command-context";
 import { runCommand } from "../device/runtime";
 import { openOwnedDebugForward } from "../platform/owned-debug-forward";
 
 const MAX_BYTES = 8 * 1024 * 1024;
+function freezeEvidence<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value)) freezeEvidence(item);
+    Object.freeze(value);
+  }
+  return value;
+}
 export class HelperCaptureError extends Error {
-  constructor(readonly code: string, message: string) { super(message); }
+  readonly diagnostics?: HelperObservationDiagnostics;
+  readonly recoveryEvidence?: HelperRecoveryEvidence;
+  readonly recoveryDiagnostics?: HelperRecoveryDiagnostics;
+  constructor(readonly code: string, message: string,
+    detail?: { diagnostics?: HelperObservationDiagnostics; recoveryEvidence?: HelperRecoveryEvidence; recoveryDiagnostics?: HelperRecoveryDiagnostics }) {
+    super(message);
+    this.diagnostics = freezeEvidence(parseHelperObservationDiagnostics(detail?.diagnostics));
+    const proposed = detail?.recoveryEvidence;
+    const assessment = code === "helper-incomplete" && proposed
+      ? assessHelperRecoveryEvidence(proposed, proposed.packageName, proposed.displayAfter) : undefined;
+    const candidate = assessment?.evidence;
+    const sameDiagnostics = candidate && JSON.stringify(candidate.diagnostics) === JSON.stringify(this.diagnostics);
+    this.recoveryEvidence = sameDiagnostics
+      ? freezeEvidence(candidate) : undefined;
+    const recoveryDiagnostics = parseHelperRecoveryDiagnostics(detail?.recoveryDiagnostics) ?? assessment?.diagnostics;
+    this.recoveryDiagnostics = freezeEvidence(candidate && !sameDiagnostics
+      ? { version: 1, ...recoveryDiagnostics, candidate: "diagnostics_mismatch" } : recoveryDiagnostics);
+    Object.defineProperty(this, "diagnostics", { writable: false, configurable: false });
+    Object.defineProperty(this, "recoveryEvidence", { writable: false, configurable: false });
+    Object.defineProperty(this, "recoveryDiagnostics", { writable: false, configurable: false });
+  }
 }
 function reject(code: string, message: string): never { throw new HelperCaptureError(code, message); }
 const helperSchema = z.object({ success: z.literal(true), xml: z.string().min(1), truncated: z.literal(false),

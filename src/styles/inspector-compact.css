@@ -25,6 +25,9 @@
 .inspector-compact .inspector-geometry dd { display: flex; align-items: center; gap: 2px; order: initial; }
 .inspector-compact .inspector-geometry dd > span { min-width: 0; overflow-wrap: anywhere; }
 .inspector-compact .inspector-property-list > div { grid-template-columns: 64px minmax(0, 1fr); gap: 6px; padding: 3px 0; }
+.inspector-text-style-value { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
+.inspector-text-style-value > .long-text-content { min-width: 0; }
+.inspector-text-style-value > .inspector-field-copy { flex-shrink: 0; }
 .inspector-compact .inspector-summary-text .long-text-content { max-height: 4.8em; }
 .inspector-compact .inspector-summary-color { display: flex; align-items: center; gap: 6px; }
 .inspector-compact .inspector-summary-color > span:last-child { min-width: 0; overflow-wrap: anywhere; }

@@ -5,10 +5,10 @@ import { nodeCaptureFacts, type NodeCaptureFacts } from "../../../shared/node-ca
 export type LiveDiagnosisResult = {
   requestId: string; expectedPackage: string; serial: string; startedAt: string; finishedAt: string; snapshot: UiSnapshot;
 };
-export type DiagnosticImageState = "visible" | "transparent" | "captured" | "style" | "failed" | "ambiguous" | "hidden" | "unavailable" | "unknown";
+export type DiagnosticImageState = "visible" | "transparent" | "captured" | "style" | "failed" | "ambiguous" | "hidden" | "unavailable" | "deferred" | "unknown";
 export const diagnosticImageLabels: Record<DiagnosticImageState, string> = {
   visible: "有可见像素", transparent: "已测全透明", captured: "已取图 · 透明度未知", style: "样式重建",
-  failed: "取图失败", ambiguous: "匹配歧义", hidden: "不可见", unavailable: "缺少画面", unknown: "未采集",
+  failed: "取图失败", ambiguous: "匹配歧义", hidden: "不可见", unavailable: "缺少画面", deferred: "按需读取", unknown: "未采集",
 };
 
 function imageState(facts: NodeCaptureFacts): DiagnosticImageState {
@@ -44,7 +44,7 @@ export function summarizeLiveDiagnosis(result: LiveDiagnosisResult) {
       rows.push({ id: node.id, name: nodeDisplayLabel(node), className: node.className ?? "未知",
         bounds: node.bounds ? `${node.bounds.left}, ${node.bounds.top} · ${node.bounds.right - node.bounds.left} × ${node.bounds.bottom - node.bounds.top} px` : "未采集",
         state, source: facts.source || facts.captureSource || "来源未标注",
-        reason: facts.error || (facts.skipDraw ? "结构容器标记跳过自身绘制；不等于已测透明。"
+        reason: facts.error || (state === "deferred" ? "图层尚未读取；选择对应分支后按需采集。" : facts.skipDraw ? "结构容器标记跳过自身绘制；不等于已测透明。"
           : ["unknown", "unavailable", "failed", "ambiguous"].includes(state) ? "没有更具体的取图原因；不能判断为透明。" : "") });
       for (let i = node.children.length - 1; i >= 0; i--) stack.push(node.children[i]);
     }

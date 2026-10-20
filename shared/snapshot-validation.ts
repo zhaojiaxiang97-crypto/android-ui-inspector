@@ -4,6 +4,7 @@ import { isLayerCapturePlacement } from "./capture-transform";
 import { isCaptureRequestDiagnostics } from "./capture-attempts";
 import { isCaptureReadiness } from "./capture-readiness";
 import { isDebugMetadata } from "./debug-metadata";
+import { isHelperObservationEvidence, hasCompleteHelperTree } from "./helper-observation";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -53,6 +54,7 @@ function isUiNode(value: unknown, depth = 0, budget = { count: 0, bytes: 0 }): v
     && isNullableString(value.contentDesc)
     && (value.bounds === null || isUiBounds(value.bounds))
     && [value.clickable, value.enabled, value.focusable, value.focused, value.scrollable, value.selected, value.visibleToUser].every(flag => typeof flag === "boolean")
+    && (value.visibilityEvidence === undefined || ["visible", "hidden", "unknown"].includes(value.visibilityEvidence as string))
     && (value.layerImageDataUrl === undefined || typeof value.layerImageDataUrl === "string")
     && (value.layerCapturePlacement === undefined || isLayerCapturePlacement(value.layerCapturePlacement)
       && typeof value.layerImageDataUrl === "string" && isRecord(value.layerImageSize)
@@ -60,7 +62,7 @@ function isUiNode(value: unknown, depth = 0, budget = { count: 0, bytes: 0 }): v
         && value.layerCapturePlacement.source.left + value.layerCapturePlacement.source.width <= Number(value.layerImageSize.width) + 0.001
         && value.layerCapturePlacement.source.top + value.layerCapturePlacement.source.height <= Number(value.layerImageSize.height) + 0.001))
     && (value.layerImageEmpty === undefined || typeof value.layerImageEmpty === "boolean")
-    && (value.layerImageStatus === undefined || ["captured", "style", "unavailable", "ambiguous", "hidden", "failed"].includes(value.layerImageStatus as string))
+    && (value.layerImageStatus === undefined || ["captured", "style", "unavailable", "ambiguous", "hidden", "failed", "deferred"].includes(value.layerImageStatus as string))
     && (value.layerImageSize === undefined || (isRecord(value.layerImageSize) && [value.layerImageSize.width, value.layerImageSize.height].every(entry => typeof entry === "number" && Number.isFinite(entry) && entry > 0)))
     && (value.attributes === undefined || isStringMap(value.attributes))
     && (value.debugMetadata === undefined || isDebugMetadata(value.debugMetadata, budget))
@@ -80,7 +82,10 @@ export function isUiSnapshot(value: unknown): value is UiSnapshot {
     && isNullableString(value.warning)
     && (value.inspectionSource === undefined || ["uiautomator", "accessibility-helper", "debug-view", "debug-qml", "debug-hybrid"].includes(value.inspectionSource as string))
     && (value.captureMode === undefined || ["fast", "deep"].includes(value.captureMode as string))
+    && (value.layerCapture === undefined || ["on-demand", "full"].includes(value.layerCapture as string))
     && (value.inspectionSource !== "accessibility-helper" || value.captureMode === "fast")
+    && (value.helperObservation === undefined || isHelperObservationEvidence(value.helperObservation)
+      && value.inspectionSource === "accessibility-helper" && hasCompleteHelperTree(value as UiSnapshot))
     && (value.hierarchyDumpMode === undefined || ["full", "compressed"].includes(value.hierarchyDumpMode as string))
     && (value.captureDurationMs === undefined || (typeof value.captureDurationMs === "number" && Number.isFinite(value.captureDurationMs) && value.captureDurationMs >= 0))
     && (value.captureTimings === undefined || (isRecord(value.captureTimings) && Object.values(value.captureTimings).every(duration => typeof duration === "number" && Number.isFinite(duration) && duration >= 0)))

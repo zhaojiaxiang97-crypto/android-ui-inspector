@@ -56,6 +56,16 @@ test("capture token identity rejects an old promise even if a caller reuses its 
   h.captures[1].reply.resolve(snapshot("b")); await fresh;
   assert.equal(h.changes.at(-1), "complete:b"); h.session.dispose();
 });
+test("screen updates require the active request's tree and stop after completion", async () => {
+  const h = harness(); h.session.connect();
+  const done = h.session.inspectDevice("fixture"), requestId = h.captures[0].id;
+  const screen: InspectionPreview = { requestId, phase: "screen", screen: { screenshotDataUrl: "screen" } };
+  h.preview(screen); assert.deepEqual(h.changes, ["begin:fixture"]);
+  h.preview({ requestId, phase: "tree", snapshot: snapshot() });
+  h.preview(screen); assert.equal(h.changes.at(-1), "preview:screen");
+  h.captures[0].reply.resolve(snapshot()); await done;
+  h.preview(screen); assert.equal(h.changes.at(-1), "complete:fixture"); h.session.dispose();
+});
 test("external snapshot takeover revokes preview/result ownership before opening", async () => {
   const h = harness(); h.session.connect();
   const pending = h.session.inspectDevice("a"), id = h.captures[0].id;

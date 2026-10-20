@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { isDeepStrictEqual } from "node:util";
 import { legacyTestReportIndexSchema, type LoadedTestReport, type TestReportIndex } from "../../shared/test-report";
 import { DEBUG_REPORT_VERSION, LEGACY_DEBUG_REPORT_VERSION } from "../../shared/debug-report";
-import { loadDebugReport } from "./debug-report";
+import { loadDebugReport, type DebugReportLoadOptions } from "./debug-report";
 
 const sha = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 const inside = (root: string, file: string) => { const path = relative(root, file); return path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path); };
@@ -50,14 +50,14 @@ function verifySource(index: TestReportIndex, document: any) {
   }
 }
 
-export async function loadTestReport(file: string): Promise<LoadedTestReport> {
+export async function loadTestReport(file: string, options: DebugReportLoadOptions = {}): Promise<LoadedTestReport> {
   const actualFile = await realpath(file);
   const selectedReport = basename(file) === "report.json";
   const input = await readBounded(actualFile, (selectedReport ? 32 : 8) * 1024 * 1024);
   const document = JSON.parse(input.toString("utf8"));
   if (document?.schemaVersion === DEBUG_REPORT_VERSION || document?.schemaVersion === LEGACY_DEBUG_REPORT_VERSION) {
     if (!selectedReport || actualFile !== join(await realpath(dirname(resolve(file))), "report.json")) throw new Error("请直接选择原始调试 report.json，不能选择链接或派生索引。");
-    return loadDebugReport(dirname(actualFile), input, document);
+    return loadDebugReport(dirname(actualFile), input, document, options);
   }
   if (input.length > 8 * 1024 * 1024) throw new Error("旧报告索引过大，不能导入。");
   const index = legacyTestReportIndexSchema.parse(document);

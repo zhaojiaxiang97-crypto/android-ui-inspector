@@ -1,4 +1,5 @@
 import type { LayerRecord } from "../../../shared/layer-layout";
+import { deferredLayerIds } from "../../../shared/deferred-layers";
 import { nodePresentationStatus } from "../../../shared/node-presentation-status";
 import type { LayerDisplayMode } from "./appearance";
 import type { TextureAlphaMask } from "./texture-alpha";
@@ -6,6 +7,7 @@ import type { HitPolicy, OutlinePolicy, Rect, ScenePlane } from "./types";
 
 export function layerOutlinePolicy(record: LayerRecord, surface: boolean): OutlinePolicy {
   const state = nodePresentationStatus(record.node).ownImage.code;
+  if (state === "deferred" && (!record.isCollapsed || deferredLayerIds(record.node, new Set()).has(record.id))) return "normal";
   if (record.isCollapsed) return surface ? "normal" : "required";
   if (state === "failed" || state === "ambiguous") return "required";
   return surface || state === "empty" || state === "structural" || record.isDeviceInvisible ? "normal" : "required";

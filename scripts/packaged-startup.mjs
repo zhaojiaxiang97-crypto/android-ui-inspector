@@ -31,7 +31,7 @@ const child = spawn(executable, [
   "--remote-debugging-address=127.0.0.1",
   `--user-data-dir=${join(output, "profile")}`,
   "--enable-logging=stderr",
-], { cwd: project, env: environment, windowsHide: true });
+], { cwd: project, env: environment, windowsHide: true, detached: process.platform !== "win32" });
 
 let stderr = "";
 let stdout = "";
@@ -145,9 +145,25 @@ try {
   process.exitCode = 1;
 } finally {
   connection?.close();
-  if (!exited) {
-    child.kill();
-    await Promise.race([new Promise((resolve) => child.once("exit", resolve)), delay(2_000)]);
+  const signalGroup = (signal) => {
+    try {
+      if (process.platform !== "win32" && child.pid) process.kill(-child.pid, signal);
+      else child.kill(signal);
+    } catch (error) { if (error.code !== "ESRCH") throw error; }
+  };
+  const groupAlive = () => {
+    if (process.platform === "win32" || !child.pid) return !exited;
+    try { process.kill(-child.pid, 0); return true; }
+    catch (error) { return error.code !== "ESRCH"; }
+  };
+  signalGroup("SIGTERM");
+  await Promise.race([new Promise(resolve => exited ? resolve() : child.once("exit", resolve)), delay(1_500)]);
+  if (groupAlive()) { signalGroup("SIGKILL"); await delay(300); }
+  report.cleanupComplete = !groupAlive();
+  if (!report.cleanupComplete) {
+    report.success = false;
+    report.error = (report.error ? report.error + "；" : "") + "独立测试应用未能完整退出。";
+    process.exitCode = 1;
   }
   report.stderr = stderr.slice(-2000);
   report.stdout = stdout.slice(-2000);

@@ -4,10 +4,10 @@ import { COLOR_FORMAT_LABELS, DEFAULT_COLOR_FORMAT, inspectorColorDisplay, type 
 import type { ColorAliasPreference, InspectorColorEncoding } from "../../shared/inspector-colors";
 import "../styles/color-display.css";
 
-export function ColorProperty({ label, raw, encoding, aliases, onCopy, fallback = "—", format = DEFAULT_COLOR_FORMAT, search = "", revealRevision, scope }: {
+export function ColorProperty({ label, raw, encoding, aliases, onCopy, fallback = "—", format = DEFAULT_COLOR_FORMAT, search = "", searchTerms = "", revealRevision, scope }: {
   label: string; raw: string | null | undefined; encoding?: InspectorColorEncoding;
   aliases: ColorAliasPreference; onCopy?: (label: string, value: string) => void; fallback?: string;
-  format?: ColorDisplayFormat; search?: string; revealRevision?: number;
+  format?: ColorDisplayFormat; search?: string; searchTerms?: string; revealRevision?: number;
   scope?: object | string | null;
 }) {
   const display = inspectorColorDisplay(raw, encoding, format, aliases), { color, values, alias } = display;
@@ -46,7 +46,7 @@ export function ColorProperty({ label, raw, encoding, aliases, onCopy, fallback 
     };
   }, [menuOpen]);
   useEffect(() => setFoldedSearch(null), [search, revealRevision]);
-  const terms = [label, ...Object.values(values), alias, "颜色 Hex RGBA 原值 透明度", display.sourceLabel].filter(Boolean).join(" ");
+  const terms = [label, ...Object.values(values), alias, "颜色 Hex RGBA 原值 透明度", display.sourceLabel, searchTerms].filter(Boolean).join(" ");
   const searching = search.trim() && terms.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()) ? search : null;
   const open = searching ? foldedSearch !== searching : expanded;
   const copyLabel = (valueFormat: ColorDisplayFormat) => `${label}${valueFormat === "raw" ? "" : " "}${COLOR_FORMAT_LABELS[valueFormat]}`;

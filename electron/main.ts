@@ -12,12 +12,16 @@ import { realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { captureListViewItems, captureViewGroupImage, captureViewNodes, captureViewStyle } from "./capture/refresh";
+import { captureViewFont } from "./capture/font-capture";
+import { captureViewLayerImages } from "./capture/layer-image-demand";
 import { captureQmlGroupImage } from "./capture/qt";
 import { createProviderSessionPool } from "./sdk/provider-session";
 import { getDebugTarget } from "./device/target";
 import { inspectPreferredDevice } from "./capture/inspection";
 import { mergedTreeSupport } from "./capture/sdk-images";
-import { observeDebugApp } from "./automation/device-actions";
+import { observeDebugApp, waitDebugAppCondition, type DebugObserver } from "./automation/device-actions";
+import { createAccessibilityHelperSession } from "./capture/helper-session";
+import { createHelperDebugInput } from "./automation/helper-input";
 import { parseUiHierarchy } from "./capture/xml-tree";
 import { probeAdb } from "./device/probe";
 import { LivePreviewController, LivePreviewDisconnectedError } from "./device/live-preview";
@@ -25,12 +29,13 @@ import type { LivePreviewStopReason } from "../shared/live-preview";
 import { diagnoseConnection } from "./automation/connection-diagnostics";
 import { automationDiagnosticObservation, connectionDiagnosticRequest, type ConnectionDiagnosticReport } from "../shared/connection-diagnostics";
 import { DebugSession } from "./automation/debug-session";
-import { debugToolSchemas } from "../shared/debug-protocol";
+import { debugCommand, debugToolSchemas } from "../shared/debug-protocol";
 import { clearLiveEndpoint, openLiveBridge } from "./automation/mcp-live";
-import { clearSnapshots, loadSnapshots, saveSnapshot } from "./desktop/snapshot-store";
+import { clearSnapshots, deleteSnapshot, loadSnapshots, saveSnapshot } from "./desktop/snapshot-store";
 import { measureLayerImages } from "./desktop/layer-images";
 import { isAppMenuState, renderApplicationMenu } from "./desktop/application-menu";
 import { createWindowLayout, START_WINDOW_MIN, START_WINDOW_SIZE } from "./desktop/window-layout";
+import { isSameDesktopDocument, isTrustedDevelopmentRendererUrl } from "./desktop/window-navigation";
 import { exportNodeImage, exportSnapshot } from "./desktop/export";
 import { loadSnapshotFile } from "./desktop/snapshot-file";
 import type { ImportSnapshotFileResult } from "../shared/snapshot-file";
@@ -49,6 +54,8 @@ import { mcpStopReasons, type McpStopSource } from "../shared/types";
 import type { AppMenuState, DeviceInfo, LayerMenuAction, UiNode, UiSnapshot } from "../shared/types";
 
 const rendererUrl = process.env.ELECTRON_RENDERER_URL;
+if (!app.isPackaged && rendererUrl && !isTrustedDevelopmentRendererUrl(rendererUrl))
+  throw new Error("开发渲染页面必须使用 127.0.0.1:1420 的项目入口。");
 const visualFixtureMode = process.argv.includes("--visual-fixture");
 const visualCaptureLifecycle = process.argv.includes("--visual-capture-lifecycle");
 if (visualFixtureMode && app.isPackaged) throw new Error("Visual fixture requires an unpackaged app");
@@ -108,7 +115,9 @@ const inspectionService = createInspectionService({
   captureViewGroupImage: (...args) => captureViewGroupImage(provider, ...args),
   captureListViewItems: (...args) => captureListViewItems(provider, ...args),
   captureViewNodes: (...args) => captureViewNodes(provider, ...args),
+  captureViewLayerImages: (...args) => captureViewLayerImages(provider, ...args),
   captureViewStyle: (...args) => captureViewStyle(provider, ...args),
+  captureViewFont: (...args) => captureViewFont(provider, ...args),
   setTimeout, clearTimeout,
 });
 const inspectionModeStore = createInspectionModeStore(join(app.getPath("userData"), "inspection-settings.json"));
@@ -209,8 +218,9 @@ function previewFor(sender: DesktopSender) {
   if (!preview) {
     let fixtureFrame = 0;
     preview = new LivePreviewController({
-      isBusy: () => inspectionService.hasInspections() || inspectionService.hasGroupCaptures() || inspectionService.hasViewRefreshes()
-        || connectionDiagnoses.size > 0 || previewHolds.size > 0 || debugStarting || Boolean(debugSession?.hasPendingWork),
+      isBusy: () => inspectionService.hasActivity()
+        || connectionDiagnoses.size > 0 || previewHolds.size > 0 || debugStarting || Boolean(debugSession?.hasPendingWork)
+        || debugSession?.state.plan?.status === "running",
       ...(visualFixtureMode ? { capture: async (serial: string, signal: AbortSignal) => {
         signal.throwIfAborted();
         if (serial !== "visual-fixture" || visualFixtureState !== "connected") throw new LivePreviewDisconnectedError("合成设备未连接。");
@@ -357,6 +367,9 @@ function createWindow() {
     ...windowSize,
     minWidth: fixedViewport ? 960 : START_WINDOW_MIN.width,
     minHeight: fixedViewport ? 700 : START_WINDOW_MIN.height,
+    resizable: fixedViewport,
+    maximizable: fixedViewport,
+    fullscreenable: fixedViewport,
     title: "Android UI Inspector",
     backgroundColor: "#111419",
     show: false,
@@ -402,6 +415,10 @@ function createWindow() {
     if (details.reason !== "clean-exit") reportFailure(`渲染进程退出：${details.reason} (${details.exitCode})`);
   });
   window.webContents.on("preload-error", (_event, _path, error) => reportFailure(`界面桥接加载失败：${error.message}`));
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-navigate", (event, requestedUrl) => {
+    if (!isSameDesktopDocument(window.webContents.getURL(), requestedUrl)) event.preventDefault();
+  });
   window.webContents.on("did-start-navigation", (_event, _url, inPlace, isMainFrame) => {
     if (isMainFrame && !inPlace) {
       void runtime.releaseWindow(windowId, "window-reloaded");
@@ -419,7 +436,7 @@ function createWindow() {
   });
 }
 
-ipcMain.handle("probe-adb", () => visualFixtureMode ? fixtureProbe() : probeAdb());
+ipcMain.handle("probe-adb", event => { requireDesktopSender(event); return visualFixtureMode ? fixtureProbe() : probeAdb(); });
 ipcMain.handle("get-inspection-mode", event => {
   requireDesktopSender(event);
   return inspectionMode.state();
@@ -534,7 +551,7 @@ ipcMain.handle("debug-start", async (event, serial: unknown, options: unknown) =
     throw new Error("调试日志选项无效。");
   const androidLogs = (options as { androidLogs?: boolean } | undefined)?.androidLogs === true;
   runtime.operations.assertAvailable(event.sender.id);
-  if (debugStarting || debugSession?.state.active || inspectionService.hasInspections()) throw new Error("请先结束当前采集或调试。");
+  if (debugStarting || debugSession?.state.active || inspectionService.hasActivity()) throw new Error("请先结束当前采集或调试。");
   const capturePolicy = inspectionMode.capture();
   debugStarting = true;
   notifyInspectionMode();
@@ -557,18 +574,26 @@ ipcMain.handle("debug-start", async (event, serial: unknown, options: unknown) =
       if (!visualFixtureMode) await getDebugTarget(serial, target.packageName);
       if (revision !== mcpRevision || event.sender.isDestroyed()) return null;
       revokeMcpSnapshot(mcpSnapshotPath());
-      const session = new DebugSession({ serial, packageName: target.packageName, snapshotPath: mcpSnapshotPath(),
-        directory: join(app.getPath("userData"), "mcp", "runs"), androidLogs,
-        observe: async (device, packageName, mode, signal, backend) => {
+      const observer = (helper?: ReturnType<typeof createAccessibilityHelperSession>): DebugObserver =>
+        async (device, packageName, mode, signal, backend, screenshotTiming) => {
           await previews.get(event.sender.id)?.yieldForCapture();
           signal?.throwIfAborted();
           if (visualFixtureMode && backend === "accessibility-helper") throw new Error("合成页面没有连接 Helper。");
           const result = visualFixtureMode
             ? { snapshot: { ...fixtureSnapshot(device), captureMode: mode }, target: fixtureTarget }
-            : await observeDebugApp(provider, device, packageName, mode, signal, backend, capturePolicy.mode);
+            : await observeDebugApp(provider, device, packageName, mode, signal, backend, capturePolicy.mode, screenshotTiming, helper,
+              process.env.ANDROID_UI_INSPECTOR_CONTROLLED_READS === "1");
           if (mode === "deep") await measureLayerImages(result.snapshot.root, signal);
           return result;
-        },
+        };
+      const session = new DebugSession({ serial, packageName: target.packageName, snapshotPath: mcpSnapshotPath(),
+        directory: join(app.getPath("userData"), "mcp", "runs"), androidLogs,
+        observe: observer(),
+        ...(!visualFixtureMode ? { createObserver: (sessionId: string, signal: AbortSignal) => {
+          const helper = createAccessibilityHelperSession({ sessionId, serial, signal });
+          return Object.assign(observer(helper), { waitForCondition: waitDebugAppCondition(helper),
+            helperInput: createHelperDebugInput(helper), close: () => helper.close() });
+        } } : {}),
         ...(visualFixtureMode ? { input: async () => undefined,
           logExecute: async () => { throw new Error("合成设备没有 Android 日志，未采集手机日志。"); } } : {}),
         onEvent: update => {
@@ -598,6 +623,28 @@ ipcMain.handle("debug-state", event => {
   if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) throw new Error("无效的调试来源。");
   return debugSession?.state ?? null;
 });
+ipcMain.handle("debug-plan-command", async (event, input: unknown) => {
+  requireDesktopSender(event);
+  if (!input || typeof input !== "object" || !("name" in input) || typeof input.name !== "string"
+    || !["start_debug_plan", "get_debug_plan", "cancel_debug_plan"].includes(input.name)) throw new Error("无效的操作计划指令。");
+  const command = debugCommand.parse(input);
+  if (command.name !== "start_debug_plan" && command.name !== "get_debug_plan" && command.name !== "cancel_debug_plan")
+    throw new Error("无效的操作计划指令。");
+  const session = debugSession;
+  if (!session || session.state.id !== command.input.sessionId) throw new Error("会话不匹配，请先读取当前调试状态。");
+  const dispatch = async () => {
+    const result = await session.request(command);
+    if (result.isError) throw new Error(typeof result.message === "string" ? result.message : "操作计划请求失败。");
+    return result;
+  };
+  if (command.name !== "start_debug_plan") return dispatch();
+  const existing = await session.request({ name: "get_debug_plan", input: { sessionId: command.input.sessionId, runId: command.input.runId } });
+  if (existing.run) return dispatch();
+  if (!session.state.active) throw new Error("会话已结束，请在桌面重新授权。");
+  if (debugStarting || inspectionService.hasActivity() || connectionDiagnoses.size || session.hasPendingWork)
+    throw new Error("请等待当前采集或调试完成。");
+  return withPreviewHeld(event.sender.id, dispatch);
+});
 ipcMain.handle("debug-task-templates-load", event => { requireDesktopSender(event); return debugTaskTemplates.load(); });
 ipcMain.handle("debug-task-template-save", (event, input: unknown) => { requireDesktopSender(event); return debugTaskTemplates.save(input); });
 ipcMain.handle("debug-task-template-delete", (event, id: unknown) => { requireDesktopSender(event); return debugTaskTemplates.remove(id); });
@@ -612,7 +659,7 @@ ipcMain.handle("debug-task-define", async (event, input: unknown) => {
   const session = debugSession;
   if (!session || session.state.id !== request.sessionId || !session.state.active)
     throw new Error("会话已结束或不匹配，请在桌面重新授权。");
-  if (debugStarting || inspectionService.hasInspections() || inspectionService.hasGroupCaptures() || inspectionService.hasViewRefreshes() || connectionDiagnoses.size || session.hasPendingWork)
+  if (debugStarting || inspectionService.hasActivity() || connectionDiagnoses.size || session.hasPendingWork)
     throw new Error("请等待当前采集或调试完成。");
   return withPreviewHeld(event.sender.id, () => session.request({ name: "define_debug_task", input: request }));
 });
@@ -622,7 +669,7 @@ ipcMain.handle("debug-task-check", async (event, input: unknown) => {
   const session = debugSession;
   if (!session || session.state.id !== request.sessionId || !session.state.active)
     throw new Error("会话已结束或不匹配，请在桌面重新授权。");
-  if (debugStarting || inspectionService.hasInspections() || inspectionService.hasGroupCaptures() || inspectionService.hasViewRefreshes() || connectionDiagnoses.size || session.hasPendingWork)
+  if (debugStarting || inspectionService.hasActivity() || connectionDiagnoses.size || session.hasPendingWork)
     throw new Error("请等待当前采集或调试完成。");
   return withPreviewHeld(event.sender.id, () => session.request({ name: "check_debug_task", input: request }));
 });
@@ -694,7 +741,7 @@ ipcMain.handle("import-snapshot-file", async (event): Promise<ImportSnapshotFile
   } catch (error) { return { canceled: false, filePath: null, data: null, error: error instanceof Error ? error.message : "快照文件无法打开。" }; }
   finally { snapshotFileImports.delete(owner); }
 });
-ipcMain.handle("load-snapshots", () => loadSnapshots());
+ipcMain.handle("load-snapshots", event => { requireDesktopSender(event); return loadSnapshots(); });
 ipcMain.handle("import-test-report", async event => {
   if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) throw new Error("无效的报告导入来源。");
   const owner = event.sender.id, epoch = reportSourceEpochs.get(event.sender.id) ?? 0;
@@ -739,8 +786,9 @@ ipcMain.handle("import-comparison-report", async (event): Promise<ImportTestRepo
       ? error.message : "对比报告格式无效，请选择调试记录 report.json。" };
   } finally { reportImports.delete(owner); }
 });
-ipcMain.handle("save-snapshot", (_event, input: unknown) => saveSnapshot(input));
-ipcMain.handle("clear-snapshots", () => clearSnapshots());
+ipcMain.handle("save-snapshot", (event, input: unknown) => { requireDesktopSender(event); return saveSnapshot(input); });
+ipcMain.handle("delete-snapshot", (event, id: unknown) => { requireDesktopSender(event); return deleteSnapshot(id); });
+ipcMain.handle("clear-snapshots", event => { requireDesktopSender(event); return clearSnapshots(); });
 
 app.whenReady().then(() => {
   if (runtime.quitting) return;

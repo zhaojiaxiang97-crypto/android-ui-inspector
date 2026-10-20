@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { DesktopApi } from "../shared/desktop-api";
+import type { DesktopApi, DebugPlanDesktopCommand } from "../shared/desktop-api";
 import type { AppMenuAction, AppMenuState, DebugSessionEvent, DebugSessionStartOptions, ExportSnapshotRequest, InspectionPreview, InspectionProgress, LayerMenuOptions, McpStopSource, NodeImageOutputRequest, SaveSnapshotRequest, UiSnapshot, WindowMode } from "../shared/types";
 import type { ReadOnlyCaptureScope } from "../shared/inspection-policy";
 import type { ConnectionDiagnosticRequest } from "../shared/connection-diagnostics";
@@ -39,12 +39,18 @@ const desktopApi = {
     ipcRenderer.on("live-preview-event", listener);
     return () => ipcRenderer.removeListener("live-preview-event", listener);
   },
-  inspectDevice: (serial: string, requestId: string, priorityViewRef?: string | null, singleAttempt?: boolean, scope?: ReadOnlyCaptureScope) => scope === undefined
+  inspectDevice: (serial: string, requestId: string, priorityViewRef?: string | null, singleAttempt?: boolean, scope?: ReadOnlyCaptureScope, layerCapture?: import("../shared/types").LayerCaptureMode) => layerCapture !== undefined
+    ? ipcRenderer.invoke("inspect-device", serial, requestId, priorityViewRef, singleAttempt, scope, layerCapture)
+    : scope === undefined
     ? ipcRenderer.invoke("inspect-device", serial, requestId, priorityViewRef, singleAttempt)
     : ipcRenderer.invoke("inspect-device", serial, requestId, priorityViewRef, singleAttempt, scope),
   captureGroup: (requestId: string, nodeId: string) => ipcRenderer.invoke("capture-group", requestId, nodeId),
+  captureLayerImages: (requestId: string, nodeIds: string[]) => ipcRenderer.invoke("capture-layer-images", requestId, nodeIds),
+  cancelLayerImages: (requestId: string) => ipcRenderer.invoke("cancel-layer-images", requestId),
   refreshViewNode: (requestId: string, nodeId: string, scope: "node" | "branch" | "list" = "node") => ipcRenderer.invoke("refresh-view-node", requestId, nodeId, scope),
   readViewStyle: (requestId: string, nodeId: string) => ipcRenderer.invoke("read-view-style", requestId, nodeId),
+  readViewFont: (requestId: string, nodeId: string) => ipcRenderer.invoke("read-view-font", requestId, nodeId),
+  cancelViewFont: (requestId: string) => ipcRenderer.invoke("cancel-view-font", requestId),
   cancelInspection: (requestId: string) => ipcRenderer.invoke("cancel-inspection", requestId),
   showLayerMenu: async (canHide: boolean, canRestore: boolean, canExitFocus: boolean, options?: LayerMenuOptions) => {
     if ([canHide, canRestore, canExitFocus].some(value => typeof value !== "boolean")
@@ -72,6 +78,7 @@ const desktopApi = {
     ? ipcRenderer.invoke("debug-start", serial)
     : ipcRenderer.invoke("debug-start", serial, options),
   getDebugSession: () => ipcRenderer.invoke("debug-state"),
+  debugPlanCommand: (command: DebugPlanDesktopCommand) => ipcRenderer.invoke("debug-plan-command", command),
   loadDebugTaskTemplates: () => ipcRenderer.invoke("debug-task-templates-load"),
   saveDebugTaskTemplate: (input: DebugTaskTemplateSaveInput) => ipcRenderer.invoke("debug-task-template-save", input),
   deleteDebugTaskTemplate: (id: string) => ipcRenderer.invoke("debug-task-template-delete", id),
@@ -92,6 +99,7 @@ const desktopApi = {
   outputNodeImage: (request: NodeImageOutputRequest) => ipcRenderer.invoke("output-node-image", request),
   importSnapshotFile: () => ipcRenderer.invoke("import-snapshot-file"),
   loadSnapshots: () => ipcRenderer.invoke("load-snapshots"),
+  deleteSnapshot: (id: string) => ipcRenderer.invoke("delete-snapshot", id),
   importTestReport: () => ipcRenderer.invoke("import-test-report"),
   importComparisonReport: () => ipcRenderer.invoke("import-comparison-report"),
   loadDebugReport: () => ipcRenderer.invoke("load-debug-report"),

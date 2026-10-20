@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { debugSelector } from "./debug-selector";
+import { debugConditionState, debugConditionVisibility, refineDebugCondition } from "./debug-ui-condition";
 import type { UiSnapshot } from "./types";
 
 const key = z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/);
@@ -7,8 +8,8 @@ const text = z.string().min(1).max(16000);
 const date = z.string().datetime({ offset: true });
 export const debugTaskStatus = z.enum(["passed", "failed", "insufficient_evidence"]);
 export const debugTaskCondition = z.object({
-  id: key, selector: debugSelector, state: z.enum(["visible", "absent", "enabled", "disabled"]),
-}).strict();
+  id: key, selector: debugSelector, state: debugConditionState, visibility: debugConditionVisibility,
+}).strict().superRefine(refineDebugCondition);
 export const debugTaskDefinition = z.object({
   goal: z.string().trim().min(1).max(1024),
   checkpoints: z.array(z.object({ id: key, title: z.string().trim().min(1).max(256),

@@ -1,5 +1,5 @@
 import type { InspectionPort } from "../../platform/desktop-services";
-import type { InspectionPreview, UiSnapshot } from "../../../shared/types";
+import type { InspectionPreview, LayerCaptureMode, UiSnapshot } from "../../../shared/types";
 import { rememberCaptureFailures, type CaptureFailureRecord } from "../../../shared/capture-feedback";
 
 export type CapturePresentation = {
@@ -48,11 +48,11 @@ export function createInspectionSession(api: InspectionPort, presentation: Captu
   const preview = (event: InspectionPreview) => {
     const request = active;
     if (!connected || !request || request.id !== event.requestId) return;
-    if (event.phase === "layers" ? !request.previewShown : !event.snapshot.root) return;
+    if (event.phase === "tree" ? !event.snapshot.root : !request.previewShown) return;
     if (event.phase === "tree") request.previewShown = true;
     presentation.preview(event);
   };
-  async function inspectDevice(serial: string, priorityViewRef?: string | null, diagnostic?: { expectedPackage: string; requestId: string }): Promise<UiSnapshot | null> {
+  async function inspectDevice(serial: string, priorityViewRef?: string | null, diagnostic?: { expectedPackage: string; requestId: string }, layerCapture?: LayerCaptureMode): Promise<UiSnapshot | null> {
     if (!connected) return null;
     if (diagnostic && active) throw new Error("已有采集正在运行。");
     const previous = active;
@@ -64,7 +64,7 @@ export function createInspectionSession(api: InspectionPort, presentation: Captu
     presentation.begin(serial);
     try {
       const result = await api.inspectDevice(serial, request.id, priorityViewRef, diagnostic ? true : undefined,
-        diagnostic ? { expectedPackage: diagnostic.expectedPackage } : undefined);
+        diagnostic ? { expectedPackage: diagnostic.expectedPackage } : undefined, layerCapture);
       if (!isCurrent(request)) return null;
       presentation.complete(result);
       publish({ captureFailures: rememberCaptureFailures(state.captureFailures, result, request.id),

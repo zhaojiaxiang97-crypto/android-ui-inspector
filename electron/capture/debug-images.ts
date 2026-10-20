@@ -14,7 +14,7 @@ import { attachViewLayerImages, ordinaryViewClasses, hasSdkOrdinaryViewType, nee
 import { markInterruptedSdkImages, captureSdkRefOrFallback, markFailedSupplementImages } from "../sdk/capture-protocol";
 
 import { withCommandSignal, withoutCommandSignal } from "../device/command-context";
-import { notifyViewTreeReady, type CaptureRunContext } from "./run-context";
+import { notifyViewTreeReady, usesOnDemandLayers, type CaptureRunContext } from "./run-context";
 import { classifyCaptureFailure, blocksSdkCompatibility, isSdkInterruption } from "./capture-errors";
 import { readDebugPropertiesAndImages, startFinalScreenAfterPreview } from "./debug-image-handoff";
 
@@ -151,6 +151,13 @@ async function readDebugViewImages(provider: ProviderClient, adbPath: string, se
         stage, preview, timings, onBatchTiming: batchTiming });
       layers = properties.layers; windowName = properties.windowName;
     }
+    if (usesOnDemandLayers(context)) {
+      // The verified tree keeps deferred images distinct from empty/failed layers.
+      // No DDMS pixel export, type lookup, SDK fallback or bitmap session runs here.
+      const { finalScreen } = await startFinalScreenAfterPreview(undefined, context.signal,
+        () => captureScreen(adbPath, serial), FINAL_SCREEN_TIMEOUT_MS);
+      return { imageCount: 0, finalScreen };
+    }
     let sdkVisible = false;
     let specialRefs = new Set<string>();
     let pureRefs = new Set<string>();
@@ -254,9 +261,13 @@ async function readDebugViewImages(provider: ProviderClient, adbPath: string, se
           const jdwp = await captureViewBitmaps(Number(port), bitmapTarget(provider, adbPath, serial, packageName, root, root.children[0].attributes!["view-ref"], windowName, context.plan.inspectionMode), fallback.map((node) => ({ ref: node.attributes!["view-ref"], captureOwn: node.layerImageStatus !== "captured" })), context.signal);
           root.attributes = { ...root.attributes, "jdwp-fallback-field-requests": String(jdwp.timing.fieldReadRequests), "jdwp-fallback-field-batches": String(jdwp.timing.batchedFieldReads) };
           root.attributes = { ...root.attributes, "jdwp-setup-requests": String(jdwp.timing.setupRequests), "jdwp-thread-name-requests": String(jdwp.timing.threadNameRequests) };
+          root.attributes["jdwp-bitmap-setup-requests"] = String(jdwp.timing.bitmapSetupRequests);
           if (timings) for (const [name, value] of [["JDWP 初始化：连接握手", jdwp.timing.connectMs], ["JDWP 初始化：ID协议", jdwp.timing.idsMs],
             ["JDWP 初始化：找主线程", jdwp.timing.threadLookupMs], ["JDWP 初始化：安全消息边界", jdwp.timing.boundaryMs],
-            ["JDWP 初始化：类与方法", jdwp.timing.metadataMs], ["JDWP 初始化：窗口身份", jdwp.timing.rootVerifyMs]] as const) timings[name] = Math.round(value);
+            ["JDWP 初始化：类与方法", jdwp.timing.metadataMs], ["JDWP 初始化：窗口身份", jdwp.timing.rootVerifyMs],
+            ["JDWP 位图准备", jdwp.timing.bitmapSetupMs], ["JDWP 定位：对象查找", jdwp.timing.lookupRefMs],
+            ["JDWP 定位：类型识别", jdwp.timing.lookupTypeMs], ["JDWP 定位：绘制判断", jdwp.timing.lookupDrawMs],
+            ["JDWP 定位：临时引用释放", jdwp.timing.lookupReleaseMs]] as const) timings[name] = Math.round(value);
           if (timings) Object.assign(timings, { "JDWP 初始化": jdwp.timing.setupMs, "JDWP 定位与识别": jdwp.timing.lookupMs, "JDWP 补图": jdwp.timing.captureMs, "JDWP 生成位图": jdwp.timing.snapshotMs, "JDWP 传输像素": jdwp.timing.pixelsMs, "JDWP 压缩图片": jdwp.timing.compressMs });
           return { images: jdwp.images, failures: jdwp.failures, kinds: jdwp.kinds, skipDraw: jdwp.skipDraw, requested: jdwp.timing.requested, skipped: jdwp.timing.skipped, source: "jdwp" as const };
         };

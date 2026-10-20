@@ -97,6 +97,13 @@
 .home-history .snapshot-history-item:hover { border-color: var(--ref-blue); background: var(--ref-panel-raised); }
 .home-history .snapshot-history-item code { color: var(--ref-blue); font-size: 10px; }
 .home-history .snapshot-history-item .tree-hint { min-width: 0; overflow: hidden; color: var(--ref-muted); text-overflow: ellipsis; white-space: nowrap; }
+.snapshot-history-row { display: flex; align-items: center; min-width: 0; gap: 6px; }
+.snapshot-history-heading > span:last-child { min-width: 0; text-align: right; }
+.snapshot-history-row .snapshot-history-item { flex: 1; min-width: 0; }
+.snapshot-history-delete, .snapshot-history-export { flex: none; padding: 6px; border: 1px solid var(--ref-line); border-radius: 5px; background: transparent; color: var(--ref-text-soft); cursor: pointer; }
+.snapshot-history-export:hover, .snapshot-history-export:focus-visible { border-color: var(--ref-blue); color: var(--ref-blue); }
+.snapshot-history-capacity { color: var(--ref-muted); font-size: 11px; line-height: 1.5; margin: 6px 0; }
+.snapshot-history-delete:hover, .snapshot-history-delete:focus-visible { border-color: var(--ref-danger); color: var(--ref-danger); }
 .home-history .snapshot-diff { grid-column: 1 / -1; color: var(--ref-green); }
 .workbench-utilities-body > .close-button + .close-button { margin-top: 6px; }
 .workbench-export-actions { display: flex; gap: 6px; padding-top: 10px; margin-top: 10px; border-top: 1px solid var(--ref-line); }

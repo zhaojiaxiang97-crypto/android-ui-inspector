@@ -174,3 +174,21 @@ test("direct-open debug entry shares the protected import lifecycle and describe
   assert.match(panel, /保存这份记录时会话仍在授权中/);
   assert.doesNotMatch(panel, /读取时会话仍在录制/);
 });
+
+test("Helper receipts show only their recorded method and leave missing historical methods unconfirmed", () => {
+  for (const [method, label] of [[undefined, "执行方式未确认"], ["accessibility-click", "控件点击"],
+    ["global-back", "系统返回"], ["gesture", "触摸手势"]] as const) {
+    const f = fixture();
+    f.record.step.inputEvidence = { ...receipt(), transport: "accessibility-helper", spawned: false, closed: false, exitCode: null,
+      helperInput: { dispatchState: "sent", requestId: "request", receipt: { version: 1, sessionId: "session", requestId: "request",
+        serviceInstanceId: "service", captureId: "capture", packageName: "sample.app", windowId: "7",
+        display: { width: 100, height: 200, rotation: 0 }, status: "completed", dispatchState: "sent", startedAtMs: 1, finishedAtMs: 2,
+        ...(method ? { method } : {}) } } };
+    const html = renderToStaticMarkup(createElement(DebugReportStepDetails, f));
+    assert.match(html, new RegExp(label));
+    if (method === undefined) assert.doesNotMatch(html, /触摸手势/);
+    delete f.record.step.inputEvidence.helperInput!.receipt;
+    const missing = renderToStaticMarkup(createElement(DebugReportStepDetails, f));
+    assert.match(missing, /执行方式未确认/); assert.doesNotMatch(missing, /触摸手势/);
+  }
+});

@@ -18,6 +18,7 @@ type Options = {
 export function useSnapshotLibrary({ api, snapshot, treeCapturedAt, snapshotForStorage, showSnapshot, beforeOpen, clearCopyStatus }: Options) {
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [savedSnapshots, setSavedSnapshots] = useState<SavedSnapshot[]>([]);
+  const [snapshotFileBytes, setSnapshotFileBytes] = useState<number | null>(null);
   const [snapshotsLoading, setSnapshotsLoading] = useState(true);
   const [snapshotStoreError, setSnapshotStoreError] = useState<string | null>(null);
   const [snapshotStatus, setSnapshotStatus] = useState<string | null>(null);
@@ -57,6 +58,7 @@ export function useSnapshotLibrary({ api, snapshot, treeCapturedAt, snapshotForS
         if (!active) return;
         setSnapshotStoreError(result.error);
         setSavedSnapshots(result.error ? [] : addSnapshotDiffs(result.snapshots));
+        if (!result.error) setSnapshotFileBytes(result.fileBytes ?? null);
       } catch {
         if (active) {
           setSnapshotStoreError("读取本地快照失败");
@@ -147,6 +149,7 @@ export function useSnapshotLibrary({ api, snapshot, treeCapturedAt, snapshotForS
       const records = addSnapshotDiffs(result.snapshots);
       const newest = records[records.length - 1];
       setSavedSnapshots(records);
+      setSnapshotFileBytes(result.fileBytes ?? null);
       setSnapshotStoreError(null);
       setLatestDiff(newest?.diff ?? null);
       setDiffExpanded(false);
@@ -157,7 +160,23 @@ export function useSnapshotLibrary({ api, snapshot, treeCapturedAt, snapshotForS
     }
   }, [snapshot, snapshotForStorage, treeCapturedAt, api]);
 
+  const exportSavedSnapshot = useCallback(async (entry: SavedSnapshot) => {
+    setSnapshotStatus("正在导出历史快照…");
+    try {
+      const request = snapshotExportRequest(entry.snapshot, "snapshot", entry.snapshot);
+      if (!request) throw new Error("这份历史记录没有可导出的完整快照。");
+      request.defaultFileName = "android-ui-inspector-history-" + entry.id.slice(0, 8) + ".json";
+      const result = await api.exportSnapshot(request);
+      if (result.canceled) setSnapshotStatus("已取消导出；历史记录未更改。");
+      else if (result.error) setSnapshotStatus("历史导出失败：" + result.error + "；记录未更改。");
+      else setSnapshotStatus("已导出：" + result.filePath + "；确认文件可重新打开后再删除历史记录。");
+    } catch (error) {
+      setSnapshotStatus("历史导出失败：" + (error instanceof Error ? error.message : "未知错误") + "；记录未更改。");
+    }
+  }, [api]);
+
   const clearSavedSnapshots = useCallback(async () => {
+    if (!window.confirm("确定清空全部本地快照吗？删除后不可恢复，请先导出需要保留的记录。")) return;
     setSnapshotStatus("正在清空本地快照…");
     try {
       const result = await api.clearSnapshots();
@@ -167,6 +186,7 @@ export function useSnapshotLibrary({ api, snapshot, treeCapturedAt, snapshotForS
         return;
       }
       setSavedSnapshots([]);
+      setSnapshotFileBytes(result.fileBytes ?? 2);
       setSnapshotStoreError(null);
       setLatestDiff(null);
       setDiffExpanded(false);
@@ -176,6 +196,30 @@ export function useSnapshotLibrary({ api, snapshot, treeCapturedAt, snapshotForS
       setSnapshotStatus("清空本地快照失败");
     }
   }, [api]);
+
+  const deleteSavedSnapshot = useCallback(async (id: string) => {
+    if (!api.deleteSnapshot || !window.confirm("确定从本地历史库中删除这份快照吗？")) return;
+    setSnapshotStatus("正在删除本地快照…");
+    try {
+      const result = await api.deleteSnapshot(id);
+      if (result.error) {
+        setSnapshotStoreError(result.error);
+        setSnapshotStatus(result.error);
+        return;
+      }
+      const records = addSnapshotDiffs(result.snapshots);
+      setSavedSnapshots(records);
+      setSnapshotFileBytes(result.fileBytes ?? null);
+      setSnapshotStoreError(null);
+      setLatestDiff(records.at(-1)?.diff ?? null);
+      setDiffExpanded(false);
+      if (snapshotOrigin?.id === id) setSnapshotOrigin(null);
+      setSnapshotStatus("已删除本地记录；正在显示的画面需要切换页面才能从内存中移除。");
+    } catch {
+      setSnapshotStoreError("删除本地快照失败");
+      setSnapshotStatus("删除本地快照失败");
+    }
+  }, [api, snapshotOrigin]);
 
   const viewSavedSnapshot = useCallback((entry: SavedSnapshot) => {
     invalidateSnapshotFile();
@@ -223,8 +267,8 @@ export function useSnapshotLibrary({ api, snapshot, treeCapturedAt, snapshotForS
   }, [invalidateSnapshotFile]);
   const resetForHome = useCallback(() => { resetForCapture(); setSnapshotOrigin(null); }, [resetForCapture]);
   const dismissSnapshotFileStatus = useCallback(() => setSnapshotFileStatus(null), []);
-  return { savedSnapshots, snapshotsLoading, snapshotStoreError, snapshotStatus, snapshotOrigin, diffExportStatus,
+  return { savedSnapshots, snapshotFileBytes, snapshotsLoading, snapshotStoreError, snapshotStatus, snapshotOrigin, diffExportStatus,
     latestDiff, diffExpanded, setDiffExpanded, exportStatus, openingSnapshot, snapshotFileStatus, dismissSnapshotFileStatus,
     invalidateSnapshotFile, resetForCapture, resetForHome, showLiveSnapshot,
-    exportCurrentSnapshot, exportLatestDiff, saveCurrentSnapshot, clearSavedSnapshots, viewSavedSnapshot, openSnapshotFile };
+    exportCurrentSnapshot, exportLatestDiff, exportSavedSnapshot, saveCurrentSnapshot, clearSavedSnapshots, deleteSavedSnapshot, viewSavedSnapshot, openSnapshotFile };
 }

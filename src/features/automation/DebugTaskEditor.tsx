@@ -42,9 +42,11 @@ function ConditionEditor({ condition, label, snapshot, selectedNode, removable, 
     <legend>{label}<code>{condition.id}</code></legend>
     <div className="task-editor-condition-actions">
       <label>条件<select aria-label={`${label}状态`} value={condition.state}
-        onChange={event => onChange({ ...condition, state: event.target.value as DebugTaskCondition["state"] })}>
+        onChange={event => onChange({ ...condition, state: event.target.value as DebugTaskCondition["state"],
+          visibility: event.target.value === "visible" ? condition.visibility : undefined })}>
         {conditionStates.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
       </select></label>
+      {condition.visibility === "partial" && <span>允许局部遮挡 · 只读确认露出区域</span>}
       <button type="button" data-task-action="use-selected-node" aria-label={`${label}使用选中控件`} disabled={!selectedNode || !snapshot?.root} onClick={() => {
         const result = selectorFromSelectedNode(snapshot, selectedNode);
         if (result.selector) onChange({ ...condition, selector: result.selector }); else onError(result.error!);

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { classifyDebugInput, DebugInputError, runDebugInputCommand } from "../electron/device/debug-input";
 import type { CommandRecord } from "../electron/platform/command-runner";
 import type { DebugInputEvidence } from "../shared/types";
+import { debugInputEvidenceSchema } from "../shared/debug-scroll-validation";
 
 function record(extra: Partial<CommandRecord> = {}): CommandRecord {
   return { id: 1, command: ["not-run"], startedAt: new Date().toISOString(), dispatchMono: 1,
@@ -76,4 +77,66 @@ test("cancelled actual child is joined and partial output is retained without re
       error instanceof DebugInputError && error.evidence.classification === "cancelled" && error.evidence.closed
         && error.evidence.exitCode === null && error.evidence.signal === "SIGKILL" && error.evidence.stdout === "partial");
   } finally { clearTimeout(timer); }
+});
+
+const injectionNonce = "a".repeat(32);
+const injectionMarker = `__AUI_INPUT_${injectionNonce}__:22121:1582:1792156358100\n`;
+const systemDiagnostic = { status: "rejected" as const, remotePid: 22121, systemServerPid: 1582,
+  deviceStartedAt: 1792156358100, deviceFinishedAt: 1792156358200 };
+const printReply = (reply: string) => ["-e", `process.stdout.write(${JSON.stringify(reply)})`];
+
+test("a quiet exit0 with correlated system rejection stops before page verification and preserves an uncertain receipt", async () => {
+  let checks = 0, callbacks = 0;
+  await assert.rejects(runDebugInputCommand(process.execPath, printReply(injectionMarker), undefined, evidence => {
+    callbacks++; assert.equal(evidence.classification, "injection-failed"); assert.equal(evidence.stdout, "");
+    assert.equal(evidence.exitCode, 0); assert.equal(evidence.spawned, true);
+    assert.deepEqual(evidence.systemInjection, systemDiagnostic); assert(debugInputEvidenceSchema.safeParse(evidence).success);
+  }, { nonce: injectionNonce, check: async marker => {
+    checks++; assert.equal(marker.remotePid, 22121); assert.equal(marker.systemServerPid, 1582); return systemDiagnostic;
+  } }), (error: unknown) => error instanceof DebugInputError && /注入失败/.test(error.message) && /不要自动重试/.test(error.message));
+  assert.equal(checks, 1); assert.equal(callbacks, 1);
+});
+
+test("no matching system failure and unavailable diagnostics remain command acknowledgements only", async () => {
+  for (const status of ["not_observed", "unavailable"] as const) {
+    let receipt: DebugInputEvidence | undefined;
+    await runDebugInputCommand(process.execPath, printReply(injectionMarker), undefined, evidence => { receipt = evidence; },
+      { nonce: injectionNonce, check: async () => ({ ...systemDiagnostic, status }) });
+    assert.equal(receipt?.classification, "accepted"); assert.equal(receipt?.systemInjection?.status, status);
+    assert(debugInputEvidenceSchema.safeParse(receipt).success);
+  }
+  let receipt: DebugInputEvidence | undefined;
+  await runDebugInputCommand(process.execPath, printReply(injectionMarker), undefined, evidence => { receipt = evidence; },
+    { nonce: injectionNonce, check: async () => { throw Error("diagnostic transport unavailable"); } });
+  assert.equal(receipt?.classification, "accepted"); assert.equal(receipt?.systemInjection?.status, "unavailable");
+});
+
+test("missing or malformed input markers cannot become accepted and extra output keeps its error classification", async () => {
+  for (const reply of ["", injectionMarker.replace("22121", "021121"), injectionMarker + injectionMarker, injectionMarker + "warning"]) {
+    let checks = 0;
+    await assert.rejects(runDebugInputCommand(process.execPath, printReply(reply), undefined, undefined,
+      { nonce: injectionNonce, check: async () => { checks++; return systemDiagnostic; } }), DebugInputError);
+    assert.equal(checks, 0);
+  }
+  await assert.rejects(runDebugInputCommand(process.execPath, printReply(injectionMarker + "SecurityException: INJECT_EVENTS denied"),
+    undefined, undefined, { nonce: injectionNonce, check: async () => systemDiagnostic }),
+    (error: unknown) => error instanceof DebugInputError && error.evidence.classification === "permission-denied");
+});
+
+test("cancelling the read-only system check cannot publish an accepted input receipt", async () => {
+  const controller = new AbortController();
+  await assert.rejects(runDebugInputCommand(process.execPath, printReply(injectionMarker), controller.signal, undefined,
+    { nonce: injectionNonce, check: async () => { controller.abort(); throw controller.signal.reason; } }),
+    (error: unknown) => error instanceof DebugInputError && error.evidence.classification === "cancelled"
+      && error.evidence.spawned && error.evidence.systemInjection?.status === "unavailable");
+});
+
+test("system evidence refuses invalid process identities and inverted or excessive device-time windows", () => {
+  const base = classifyDebugInput(record());
+  for (const change of [{ remotePid: 0 }, { systemServerPid: -1 }, { deviceFinishedAt: 1792156358099 },
+    { deviceFinishedAt: 1792156378100 }, { status: "success" }, { extra: true }])
+    assert.equal(debugInputEvidenceSchema.safeParse({ ...base, systemInjection: { ...systemDiagnostic, ...change } }).success, false);
+  assert(debugInputEvidenceSchema.safeParse(base).success, "legacy receipts remain readable");
+  assert.equal(debugInputEvidenceSchema.safeParse({ ...base, systemInjection: systemDiagnostic }).success, false);
+  assert.equal(debugInputEvidenceSchema.safeParse({ ...base, classification: "injection-failed" }).success, false);
 });

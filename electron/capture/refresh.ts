@@ -28,7 +28,7 @@ function requireRefreshMode(snapshot: UiSnapshot, context: CaptureRunContext) {
 
 // 分支/列表刷新共用的活树读取器：dumpsys 段落 + JDWP 属性 + merged 快照 SDK 同源 adopt，
 // 瞬态读树失败有界重试，身份/层级变化立即拒绝。返回 { 整树, 目标节点 }。
-function buildReadCurrent(provider: ProviderClient, args: {
+export function buildReadCurrent(provider: ProviderClient, args: {
   adbPath: string; serial: string; packageName: string; snapshot: UiSnapshot; root: UiNode;
   section: string; before: ForegroundTarget; port: string; rootRef: string; windowName: string;
   processId: number; branch: boolean; nodeId: string; context: CaptureRunContext;

@@ -52,6 +52,7 @@ Android表中的Java文件均位于`android/inspector-sdk/src/main/java/com/andr
 | 工作台菜单、按钮与快捷键 | `src/features/workbench/useWorkbenchCommands.ts`、`workbench-dispatch.ts`；复用 shared 命令可用规则 |
 | 快照文件与历史 | `src/features/history/useSnapshotLibrary.ts` 持有导入失效令牌与历史；`snapshot-file-service.ts` 构建导出内容 |
 | 整页采集与回退 | `electron/capture/inspection.ts`；`createInspectionRunner` 注入设备与图片边界，负责就绪等待、native/QML 分流、尝试预算和最终身份核对 |
+| 渐进预览与截图生命周期 | `electron/capture/snapshot-preview.ts` 在单次尝试内并行读取可选截图，分别发布 tree/layers/screen，退出时取消并等待收尾；桌面服务过滤过期请求，工作台仅合并截图字段 |
 | 请求、尝试与阶段状态 | `electron/capture/run-context.ts` 显式传递选项、请求身份、当前尝试路由和阶段取消；重试只共享首次锁定的组件 |
 | SDK/DDMS 取图路由与错误 | `electron/capture/capture-plan.ts` 先应用标准/增强模式；增强模式内再保留用户偏好并接纳已验证的 SDK 能力；`capture-errors.ts` 在旧错误边界分类，内部重试读取错误类别 |
 | SDK 树身份核验 | `electron/capture/sdk-tree-verification.ts` 复用本次调用的已核验证据，或执行读树前后核对；不额外发能力探测请求 |
@@ -59,10 +60,11 @@ Android表中的Java文件均位于`android/inspector-sdk/src/main/java/com/andr
 | 独立图片采集 | `electron/capture/debug-images.ts`、`electron/capture/sdk-images.ts` |
 | JDWP连接、报文与元数据批次 | `electron/capture/jdwp-transport.ts` |
 | DDMS窗口核验及树/图采集编排 | `electron/capture/view-debug.ts` |
-| JDWP安全位图补采 | `electron/capture/view-bitmaps.ts` |
+| JDWP安全位图补采 | `electron/capture/view-bitmaps.ts`；先核验对象与绘制需求，有实际图片任务后才准备位图元信息；对象查找、类型、绘制判断、引用释放分别计时 |
 | 窗口与图片协议解析 | `electron/capture/view-protocol.ts` |
 | 图层几何与匹配 | `electron/capture/layer-images.ts` |
 | 控件/分支/列表刷新 | `electron/capture/refresh.ts` |
+| 标准按需图层 | `electron/capture/layer-image-demand.ts` 共用活树核验与有界 JDWP 取图会话；`inspection-service.ts` 管会话和取消；`demand-layer-capture.ts` 管分支访问、防抖与重试，工作台只合并图片补丁。主采集显式传 `layerCapture: on-demand`，旧调用省略时保持完整采集 |
 | SDK连接与取消 | `electron/sdk/provider-session.ts` 工厂拥有连接/回收/销毁；`provider-session-request.ts` 负责请求协议；桌面由 `main.ts` 创建并注入 |
 | Android准入、生命周期和串行调度 | `HierarchyProvider.java` |
 | Android会话和请求解码 | 同目录`HierarchySession.java` |
@@ -77,7 +79,7 @@ Android表中的Java文件均位于`android/inspector-sdk/src/main/java/com/andr
 | 自动调试步骤执行 | `debug-step-executor.ts` 拥有当前观察、输入前证据和输入请求历史，分派采集、输入与等待；`debug-step-context.ts` 保存单步事实 |
 | 自动调试目标与验收规则 | `debug-target-resolution.ts` 处理稳定匹配、坐标和遮挡；`debug-task-execution.ts` 处理任务定义、阶段顺序和两次新观察的验收，不执行设备或文件操作 |
 | 自动调试证据记录 | `debug-session-recording.ts` 拥有会话目录并组合已有 `debug-evidence.ts`；记录错误与操作结果分开，保留兼容文件与容量限制 |
-| 可选Helper只读后端 | `electron/capture/accessibility-helper.ts`拥有私有令牌、HTTP限额、唯一授权窗口与自有转发；`device-actions.ts`复核App/几何，`debug-session.ts`撤销切源旧共享并拒绝Helper输入；对比脚本复用此HTTP读取 |
+| 可选 Helper 观察后端 | `capture/helper-session.ts` 按授权会话拥有转发及清理；`helper-observation.ts` 核验能力、完整树与 PNG；`shared/helper-observation.ts` 校验服务、时间、窗口和可见区域。`device-actions.ts` 保留 ADB 前后核验，`debug-step-executor.ts` 接入同源操作及恢复，旧 `accessibility-helper.ts` 仍供只读诊断使用 |
 | 当前树、选中、展开、聚焦/隐藏、双击偏好与菜单动作 | `src/features/inspection/useInspectionWorkspace.ts` 保有浏览状态，并组合采集与刷新能力 |
 | 采集、取消、进度与预览接纳 | `inspection-session.ts` 控制请求身份；`useInspectionSession.ts` 连接接口订阅、计时器与 React |
 | 补图、局部刷新和旧结果隔离 | `useSnapshotAugmentation.ts` 拥有刷新身份；`group-image-cache.ts` 按源快照/节点复用补图；`inspection-refresh.ts` 校验并构建新树；`inspection-presentation.ts` 计算选中/展开映射。均在 `src/features/inspection/` |

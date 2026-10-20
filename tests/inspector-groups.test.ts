@@ -66,6 +66,7 @@ test("legacy visibility settings inherit compact disclosure defaults", () => {
   assert.equal(inspectorDisclosureOpen(preference, "business"), true);
   assert.equal(inspectorDisclosureOpen(preference, "image"), true);
   assert.equal(inspectorDisclosureOpen(preference, "padding"), false);
+  assert.equal(inspectorDisclosureOpen(preference, "text-style"), true);
   assert.deepEqual(preference.hidden, ["image"]);
 });
 
@@ -82,6 +83,7 @@ test("explicit nested and top-level disclosure overrides persist without changin
   assert.deepEqual(expanded.expanded, { type: true });
   assert.equal(inspectorDisclosureOpen(DEFAULT_INSPECTOR_GROUPS, "type"), false);
   assert.equal(inspectorDisclosureOpen(DEFAULT_INSPECTOR_GROUPS, "image"), true);
+  assert.equal(inspectorDisclosureOpen(readInspectorGroupPreference(JSON.stringify(withInspectorDisclosure(original, "text-style", false))), "text-style"), false);
 });
 
 test("disclosure parsing clones valid values and rejects unknown or non-boolean states", () => {

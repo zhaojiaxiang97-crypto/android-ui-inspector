@@ -288,6 +288,8 @@ test("scroll/back share live preflight, stale guards, dispatch state, evidence a
     assert.ok(swipe.kind === "swipe" && swipe.fromY > swipe.toY && swipe.fromX === swipe.toX);
     assert.deepEqual(session.state.steps.at(-1)!.resolvedInput, {
       action: swipe, frame: { width: 1080, height: 2400, rotation: 0 }, targetNodeId: "0/1",
+      scrollRegion: { viewport: { left: 20, top: 200, right: 1000, bottom: 2000 },
+        confirmationBounds: { left: 486, top: 536, right: 535, bottom: 1665 }, excludedNavigationBounds: [] },
     });
     assert.equal((await call("wait_for_ui", { selector: { text: "第二页" }, timeoutMs: 1000 })).verified, true);
     assert.equal((await scroll(initial.snapshotId)).dispatchState, "not_sent");

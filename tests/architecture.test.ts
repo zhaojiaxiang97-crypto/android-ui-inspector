@@ -259,13 +259,17 @@ test("debug session owns lifecycle while target resolution, execution and record
   for (const dependency of executor)
     assert.ok(!/debug-(?:session(?:-recording)?|evidence|logs)\.ts$/.test(dependency), `executor cannot own session or evidence IO: ${dependency}`);
 
-  for (const name of ["debug-target-resolution", "debug-task-execution"]) {
+  const domainModules = ["debug-target-resolution", "debug-scroll-geometry", "debug-ui-step", "debug-task-execution", "debug-scroll-execution"];
+  for (const name of domainModules) {
     for (const ref of references(module(name)).filter(ref => ref.runtime)) {
       if (!ref.specifier.startsWith(".")) {
         assert.ok(name === "debug-task-execution" && ref.specifier === "node:crypto", `${name}: unexpected runtime IO dependency ${ref.specifier}`);
         continue;
       }
-      assert.ok(pathName(localModule(module(name), ref.specifier)!).startsWith("shared/"), `${name}: domain decisions cannot call device or session IO`);
+      const dependency = localModule(module(name), ref.specifier)!;
+      // Pure sibling decisions may compose; every member is checked for IO here.
+      assert.ok(pathName(dependency).startsWith("shared/") || domainModules.some(sibling => module(sibling) === dependency),
+        `${name}: domain decisions cannot call device or session IO`);
     }
   }
   const recording = dependencies("debug-session-recording");

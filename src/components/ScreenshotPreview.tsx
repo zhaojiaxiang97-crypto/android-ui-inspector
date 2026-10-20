@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import type { CaptureGeometry, LayerFocus, LayerMenuAction, PixelSize, QmlGroupImage, SnapshotGroupImage, TreeDoubleClickAction, UiNode } from "../../shared/types";
 import { assessCaptureGeometry, boundsPercent, validSize, validBounds, clipBounds } from "../../shared/screen-coordinates";
 import { nodeDisplayLabel } from "../../shared/tree-utils";
+import { hasAvailableLayerImages, hasDeferredLayerImages } from "../../shared/deferred-layers";
 import { constrainOrbitCamera } from "../../shared/orbit-camera";
 import { Layer3DPreview } from "../features/layers/Layer3DPreview";
 import { type LayerSceneHandle } from "../features/layers/types";
@@ -37,6 +38,12 @@ type Props = {
   sessionKey?: string | number;
   measurementSnapshot?: MeasurementSnapshotIdentity;
   src: string;
+  capturePending?: boolean;
+  preferFlat?: boolean;
+  preparing3d?: boolean;
+  preparingScreenshot?: string | null;
+  enter3dWhenReady?: boolean;
+  onPrepare3d?: () => void;
   root: UiNode;
   selectedNode: UiNode | null;
   expandedNodeIds: ReadonlySet<string>;
@@ -86,7 +93,7 @@ export function ScreenshotPreview(props: Props) {
   return <LoadedScreenshot key={props.sessionKey ?? props.src} {...props} appearance={effectiveAppearance} onAppearanceChange={changeAppearance} onToggleStructure={toggleStructure} />;
 }
 
-function LoadedScreenshot({ sessionKey, measurementSnapshot, src, root, selectedNode, expandedNodeIds, geometry, layersAvailable = true, toolbarHost, onSelect, onNavigateNode, navigationDisabled = false, toolsSuspended = false, contextHints, layerFocus, hiddenNodeIds, doubleClickAction, onDoubleClick, onLayerAction, onOpenLayerMenu, onCaptureGroup, savedGroupImages, cachedGroupImages, appearance, onAppearanceChange, onToggleStructure }: Props & {
+function LoadedScreenshot({ sessionKey, measurementSnapshot, src, capturePending = false, preferFlat = false, preparing3d = false, preparingScreenshot, enter3dWhenReady = false, onPrepare3d, root, selectedNode, expandedNodeIds, geometry, layersAvailable = true, toolbarHost, onSelect, onNavigateNode, navigationDisabled = false, toolsSuspended = false, contextHints, layerFocus, hiddenNodeIds, doubleClickAction, onDoubleClick, onLayerAction, onOpenLayerMenu, onCaptureGroup, savedGroupImages, cachedGroupImages, appearance, onAppearanceChange, onToggleStructure }: Props & {
   appearance: LayerAppearance; onAppearanceChange: (value: Partial<LayerAppearance>) => void; onToggleStructure: () => void;
 }) {
   const unavailableId = useId();
@@ -97,25 +104,53 @@ function LoadedScreenshot({ sessionKey, measurementSnapshot, src, root, selected
   const surface = { frameRef, stageRef, imageRef, layerSceneRef };
   const focusedNode = layerFocus?.node ?? null;
   const focusKey = layerFocus ? `${layerFocus.kind}:${layerFocus.node.attributes?.["view-ref"] ?? layerFocus.node.id}` : null;
-  const [size, setSize] = useState<PixelSize | null>(null);
+  const [decodedSize, setSize] = useState<PixelSize | null>(null);
   const [failed, setFailed] = useState(false);
+  const layerSize = useMemo(() => {
+    if (!layersAvailable || !root.bounds || !validBounds(root.bounds)) return null;
+    const pending = [root];
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (node.layerImageDataUrl) {
+        // Independent images are usable before the screen arrives. This only
+        // frames the 3D scene; it does not claim verified screenshot geometry.
+        const size = geometry?.screenshotSize ?? { width: Math.max(root.bounds.right, root.bounds.right - root.bounds.left), height: Math.max(root.bounds.bottom, root.bounds.bottom - root.bounds.top) };
+        return validSize(size) ? size : null;
+      }
+      pending.push(...node.children);
+    }
+    return null;
+  }, [root, layersAvailable, geometry]);
+  const size = decodedSize ?? layerSize;
   const frameSize = usePreviewViewport(frameRef);
   const viewport = frameSize.visible;
-  const integrity = assessCaptureGeometry(geometry, size ?? undefined);
-  const enabled = Boolean(size && !failed && integrity.status !== "mismatch");
-  const canRender3d = Boolean(layersAvailable && enabled && root.bounds && root.children.length > 0);
-  const view = useCanvasView({ surface, content: { root, src, focusKey, focusedNode, selectedId: selectedNode?.id ?? null, enabled, canRender3d },
+  const integrity = assessCaptureGeometry(geometry, decodedSize ?? undefined);
+  const geometryReady = Boolean(size && !failed && integrity.status !== "mismatch");
+  const completeStructure = appearance.showEmpty && appearance.structureMode === "complete";
+  const includeOffscreen = appearance.showOffscreen || Boolean(focusedNode);
+  const hasDeferred = useMemo(() => hasDeferredLayerImages(root, includeOffscreen), [root, includeOffscreen]);
+  // Manual hiding changes scene contents, not whether capture has usable pixels.
+  // Keep 3D and its restore action available when the user hides the last layer.
+  const hasLayerPixels = useMemo(() => hasAvailableLayerImages(root,
+    new Set([...(savedGroupImages ?? []), ...(cachedGroupImages ?? [])].filter(entry => entry.image.dataUrl).map(entry => entry.nodeId)), undefined, includeOffscreen),
+  [root, savedGroupImages, cachedGroupImages, includeOffscreen]);
+  const waitingForLayers = (hasDeferred || enter3dWhenReady) && !hasLayerPixels && !completeStructure;
+  const canRender3d = Boolean(layersAvailable && geometryReady && root.bounds && root.children.length > 0
+    && !preparing3d && !waitingForLayers && !(capturePending && !layerSize && !completeStructure));
+  const canPrepare3d = Boolean(onPrepare3d && hasDeferred && !completeStructure && !capturePending && !navigationDisabled && !preparing3d);
+  const canEnter3d = canRender3d || canPrepare3d;
+  const view = useCanvasView({ surface, content: { root, src, focusKey, focusedNode, selectedId: selectedNode?.id ?? null, enabled: geometryReady, canRender3d, preferFlat, enter3dWhenReady },
     layout: { size, frameSize }, appearance, onCancelGesture: (): void => interaction.cancel(),
     measurementMode: (): ReturnType<typeof useLayerMeasurement>["state"]["mode"] => measurement.state.mode,
     onExitFocus: () => onLayerAction("exit-focus"), onToggleStructure });
   const { viewMode, camera, zoom, framingScope, sceneOrigin, sceneFitScale, sceneFitViewportRef, renderScale, stageWidth, stageHeight,
     commitCamera, changeZoom, fitView, resetView, applyLayerPreset, toggleCompleteStructure, changeFramingScope } = view;
+  const enabled = geometryReady && (viewMode === "layers3d" || Boolean(src && decodedSize));
   const [displayMode, setDisplayMode] = useState<LayerDisplayMode>("images");
   useLayoutEffect(() => { setDisplayMode("images"); }, [root, src, sessionKey]);
-  const completeStructure = appearance.showEmpty && appearance.structureMode === "complete";
   const macPlatform = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
   const quickModifierLabel = macPlatform ? "Command" : "Ctrl";
-  const overlay = enabled && size && selectedNode?.visibleToUser && selectedNode.bounds ? boundsPercent(selectedNode.bounds, size) : null;
+  const overlay = src && enabled && size && selectedNode?.visibleToUser && selectedNode.bounds ? boundsPercent(selectedNode.bounds, size) : null;
   const rootSelected = selectedNode?.id === root.id;
   const hover = useCanvasHover({ root, size, enabled, viewMode, surface });
   const { hover: sharedHover } = useNodeHover();
@@ -163,7 +198,7 @@ function LoadedScreenshot({ sessionKey, measurementSnapshot, src, root, selected
     : { width: stageWidth, height: stageHeight, transform: `translate(${viewport.left + viewport.width / 2 - frameSize.width / 2}px, ${viewport.top + viewport.height / 2 - frameSize.height / 2}px)` };
 
 
-  const unavailable3d = !layersAvailable ? "当前为快速采集，只提供 2D 截图和控件边界。" : !enabled ? "截图尚未就绪，或截图与控件坐标不一致。" : "当前快照没有可展开的层级。";
+  const unavailable3d = preparing3d ? "正在准备完整 3D 图层，先显示 2D 截图。" : waitingForLayers ? "尚无可用的独立图层，当前保留 2D 预览。可完整采集，或在 3D 设置中查看完整结构。" : !layersAvailable ? "当前为快速采集，只提供 2D 截图和控件边界。" : capturePending && !layerSize ? "正在读取图层画面，请稍候。" : !enabled ? "画面尚未就绪，或截图与控件坐标不一致。" : "当前快照没有可展开的层级。";
   const unavailableQuick = viewMode !== "layers3d" ? "请切换到 3D 后选择图层。" : layerFocus?.kind === "layer" ? "仅看此层时请先退出聚焦，再查看重叠图层。" : navigationDisabled ? "正在更新快照，请稍后选择。" : !onNavigateNode ? "当前视图不支持图层定位。" : !enabled ? "截图尚未就绪。" : null;
   const currentOperation = activeQuick ? (activeQuick.mode === "position" ? "图层选择 · 点选画布查看重叠图层 · Esc 取消" : "内部选择 · 点选折叠画面 · Esc 取消")
     : measurementState.picking ? `测距 · 选择 ${measurementState.picking.endpoint === "anchor" ? "A" : "B"} · Esc 结束`
@@ -177,17 +212,17 @@ function LoadedScreenshot({ sessionKey, measurementSnapshot, src, root, selected
       <div className="canvas-tool-group canvas-view-tools" role="group" aria-label="视图与缩放">
       <div className="view-mode-toggle" role="group" aria-label="截图显示模式">
         <button className={viewMode === "flat" ? "active" : ""} aria-pressed={viewMode === "flat"} type="button" onClick={() => view.chooseMode("flat")}>2D <span className="view-mode-description">平面</span></button>
-        <span className="canvas-disabled-control" tabIndex={!canRender3d ? 0 : undefined} aria-describedby={!canRender3d ? `${unavailableId}-3d` : undefined}>
-        <button className={`view-mode-3d ${viewMode === "layers3d" ? "active" : ""}`} aria-pressed={viewMode === "layers3d"} type="button" disabled={!canRender3d} title={!canRender3d ? unavailable3d : "展开查看已采集的控件层级"} onClick={() => view.chooseMode("layers3d")}>3D <span className="view-mode-description">层级</span></button>
-        {!canRender3d && <span id={`${unavailableId}-3d`} className="canvas-disabled-reason" role="tooltip">{unavailable3d}</span>}</span>
+        <span className="canvas-disabled-control" tabIndex={!canEnter3d ? 0 : undefined} aria-describedby={!canEnter3d ? `${unavailableId}-3d` : undefined}>
+        <button className={`view-mode-3d ${viewMode === "layers3d" ? "active" : ""}`} aria-pressed={viewMode === "layers3d"} type="button" disabled={!canEnter3d} title={canPrepare3d ? "读取完整图层后进入 3D" : !canEnter3d ? unavailable3d : "展开查看已采集的控件层级"} onClick={() => canPrepare3d ? onPrepare3d?.() : view.chooseMode("layers3d")}>3D <span className="view-mode-description">{preparing3d ? "准备中…" : "层级"}</span></button>
+        {!canEnter3d && <span id={`${unavailableId}-3d`} className="canvas-disabled-reason" role="tooltip">{unavailable3d}</span>}</span>
       </div>
       <div className="zoom-controls" role="group" aria-label="截图缩放">
-        <button type="button" aria-label="缩小截图" title="缩小截图" onClick={() => changeZoom(zoom - ZOOM_STEP)} disabled={!size || zoom <= MIN_ZOOM}><AppIcon name="minus" size={14} /></button>
+        <button type="button" aria-label="缩小截图" title="缩小截图" onClick={() => changeZoom(zoom - ZOOM_STEP)} disabled={!enabled || zoom <= MIN_ZOOM}><AppIcon name="minus" size={14} /></button>
         <ContinuousZoom value={zoom} min={MIN_ZOOM} max={MAX_ZOOM} disabled={!enabled} presets={ZOOM_PRESETS} onReset={resetView}
           open={activeTool === "zoom"} onOpenChange={open => toolOpen("zoom", open)}
           onChange={next => changeZoom(next, undefined, true)} />
-        <button type="button" aria-label="放大截图" title="放大截图" onClick={() => changeZoom(zoom + ZOOM_STEP)} disabled={!size || zoom >= MAX_ZOOM}><AppIcon name="plus" size={14} /></button>
-        <button className="zoom-fit" type="button" onClick={fitView} disabled={!size} title="适应可见画布 · 0">适应画布</button>
+        <button type="button" aria-label="放大截图" title="放大截图" onClick={() => changeZoom(zoom + ZOOM_STEP)} disabled={!enabled || zoom >= MAX_ZOOM}><AppIcon name="plus" size={14} /></button>
+        <button className="zoom-fit" type="button" onClick={fitView} disabled={!enabled} title="适应可见画布 · 0">适应画布</button>
       </div></div>
       <div className="canvas-tool-group canvas-inspection-tools zoom-controls" role="group" aria-label="检查工具">
         <button ref={measurementToolRef} className="pin-layer-measurement" type="button"
@@ -207,7 +242,7 @@ function LoadedScreenshot({ sessionKey, measurementSnapshot, src, root, selected
         {!focusedNode && framingScope === "all" && <button className="zoom-fit" type="button" onClick={() => changeFramingScope("screen")}>返回当前屏幕</button>}
         {viewMode === "layers3d" && hiddenNodeIds.size > 0 && <button className="restore-layers" type="button" onClick={() => onLayerAction("restore")} aria-label={workbenchCommands["restore-layers"].label} title={workbenchCommands["restore-layers"].label}>恢复图层 ({hiddenNodeIds.size})</button>}
       </div>
-      {viewMode === "layers3d" && (
+      {(viewMode === "layers3d" || waitingForLayers && layersAvailable && geometryReady) && (
         <CanvasToolPopover className="layer-settings" bodyClassName="layer-settings-body" label="3D 层级设置" open={activeTool === "settings"} onOpenChange={open => toolOpen("settings", open)}
           summary={<><AppIcon name="settings" size={18} /><span>3D 设置</span></>}>
             <div className="layer-options" aria-label="3D 层级视图参数">
@@ -293,6 +328,10 @@ function LoadedScreenshot({ sessionKey, measurementSnapshot, src, root, selected
       onContextMenu={event => event.preventDefault()}
       onKeyDown={keyboard.onKeyDown}
       {...interaction.pointerHandlers}>
+      {preparing3d && !src && preparingScreenshot && <div className="preparing-3d-fallback">
+        <img className="preparing-3d-preview" src={preparingScreenshot} alt="上次采集的 2D 截图" />
+        <p>正在读取当前画面，暂时显示上次截图。</p>
+      </div>}
       {viewMode === "layers3d" && canRender3d && size && (
         <>
           <div className="viewport-grid" aria-hidden="true" />
@@ -306,14 +345,14 @@ function LoadedScreenshot({ sessionKey, measurementSnapshot, src, root, selected
       <div className={`screenshot-stage-shell ${viewMode === "layers3d" ? "layers3d-viewport" : ""}`} style={stageShellStyle}>
         <div ref={stageRef} className={`screenshot-stage ${viewMode === "layers3d" ? "layers3d-base" : ""}`} data-coordinate-status={enabled ? integrity.status : failed ? "error" : size ? integrity.status : "loading"}
           style={stageStyle}>
-          <img ref={imageRef} src={src} alt="Android screen snapshot" draggable={false}
+          {src && <img ref={imageRef} src={src} alt="Android screen snapshot" draggable={false}
             onLoad={event => {
               const image = event.currentTarget;
               const next = { width: image.naturalWidth, height: image.naturalHeight };
               if (validSize(next)) { setSize(next); setFailed(false); }
               else { setSize(null); setFailed(true); }
             }}
-            onError={() => { setSize(null); setFailed(true); }} />
+            onError={() => { setSize(null); setFailed(true); }} />}
           {overlay && selectedNode && (
             <div className={`selection-overlay ${rootSelected ? "root-selection" : ""}`} style={overlay} aria-hidden="true">
               <span className="selection-label">
@@ -322,7 +361,7 @@ function LoadedScreenshot({ sessionKey, measurementSnapshot, src, root, selected
               </span>
             </div>
           )}
-          {enabled && size && viewMode === "flat" && <FlatNodeHoverOverlay root={root} size={size} selectedId={selectedNode?.id ?? null} />}
+          {src && enabled && size && viewMode === "flat" && <FlatNodeHoverOverlay root={root} size={size} selectedId={selectedNode?.id ?? null} />}
         </div>
         {viewMode === "layers3d" && canRender3d && size && (
           <Layer3DPreview
@@ -354,7 +393,7 @@ function LoadedScreenshot({ sessionKey, measurementSnapshot, src, root, selected
           />
         )}
       </div>
-      {!size && <div className="no-screenshot" role="status">{failed ? "截图无法解码，请重新获取；节点树仍可使用。" : "正在加载截图…"}</div>}
+      {(!size || !src && viewMode === "flat") && !(preparing3d && !src && preparingScreenshot) && <div className="no-screenshot" role="status">{!src ? capturePending ? "正在读取截图和图层…" : "截图不可用；节点树仍可使用。" : failed ? "截图无法解码，请重新获取；节点树仍可使用。" : "正在加载截图…"}</div>}
       {activeQuick && <QuickSelectPanel viewport={viewport} result={activeQuick.result} disabled={navigationDisabled} onPreview={quick.preview}
         mode={activeQuick.mode ?? "inside"} onModeChange={quick.changeMode}
         onConfirm={quick.confirm} onPage={quick.page} onFilter={quick.filter} anchor={activeQuick.anchor} onClose={() => { if (quick.isCurrent()) quick.close(true); }} />}

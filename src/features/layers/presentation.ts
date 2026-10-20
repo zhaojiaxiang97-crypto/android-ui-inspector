@@ -112,7 +112,7 @@ export function hasOwnVisualStyle(record: LayerRecord, size: PixelSize, hiddenNo
   // Collapsed branches combine independent images; expanded nodes keep their own.
   if (record.isCollapsed) return Boolean(groupImageFor(record, groups, hiddenNodeIds)) || subtreeImageNodes(node, hiddenNodeIds).length > 0;
   const state = nodePresentationStatus(node).ownImage.code;
-  if (state === "empty" || state === "structural" || state === "ambiguous") return false;
+  if (state === "empty" || state === "structural" || state === "ambiguous" || state === "deferred") return false;
   if (node.layerImageDataUrl && node.layerImageSize) return true;
   // Without an independent bitmap, keep structural nodes as outlines.
   if (node.children.length > 0 || isNearFullScreen(record, size) || STRUCTURAL_CLASS_PATTERN.test(node.className ?? "")) return false;

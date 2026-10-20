@@ -92,7 +92,10 @@ function harness() {
   const session = createInspectionSession(api, {
     begin() { resetPresentation(); currentSnapshotRef.current = state.snapshot = null; captureTree = null; treeTouched = false; presentTree(null, null); },
     preview(event) {
-      if (event.phase === "layers") {
+      if (event.phase === "screen") {
+        const current = currentSnapshotRef.current!;
+        currentSnapshotRef.current = state.snapshot = { ...current, ...event.screen };
+      } else if (event.phase === "layers") {
         const current = currentSnapshotRef.current!;
         const root = mergeLayerImages(current.root!, event.updates);
         currentSnapshotRef.current = state.snapshot = { ...current, root }; captureTree = root;
@@ -283,6 +286,60 @@ test("cancel drops late events/results and recovery waits for old capture dispos
   assert.equal(recovered.root.children[0].layerImageEmpty, true);
   assert.equal(h.state.inspectionLoading, false); assert.equal(h.service.hasInspections(), false);
   assert.equal(h.sender.listenerCount("destroyed"), 0); assert.ok(h.cancelled.includes(oldId));
+});
+
+test("screen preview uses a narrow payload and leaves the current image baseline and browsing state intact", async () => {
+  const h = harness(), done = h.capture("fixture"); await turn(); const call = h.calls[0];
+  const screen = { ...snapshot("outdated-image"), screenshotDataUrl: "data:image/png;base64,screen" };
+  call.options.onPreview("screen", screen);
+  assert.equal(h.sent.length, 0, "a screen cannot establish a tree preview");
+  call.options.onPreview("tree", snapshot());
+  const layers = snapshot("current-image"); call.options.onPreview("layers", layers);
+  const root = h.state.snapshot.root, selected = root.children[0], expanded = new Set<string>();
+  h.state.selectedNode = selected; h.handleExpandedChange(expanded);
+  call.options.onPreview("screen", screen);
+  const event = h.sent.at(-1)!.payload;
+  assert.deepEqual(Object.keys(event).sort(), ["phase", "requestId", "screen"]);
+  assert.deepEqual(Object.keys(event.screen).sort(), ["captureGeometry", "screenshotDataUrl"]);
+  assert.equal(h.state.snapshot.screenshotDataUrl, screen.screenshotDataUrl);
+  assert.equal(h.state.snapshot.root, root); assert.equal(h.state.selectedNode, selected); assert.equal(h.state.expandedIds, expanded);
+  assert.equal(root.children[0].layerImageDataUrl, "current-image");
+  const before = h.sent.length; call.options.onPreview("layers", layers);
+  assert.equal(h.sent.length, before, "screen publication must not replace the layer diff baseline");
+  const nextLayers = snapshot("next-image"); call.options.onPreview("layers", nextLayers);
+  assert.equal(h.sent.at(-1)!.payload.phase, "layers");
+  assert.equal(h.state.snapshot.root.children[0].layerImageDataUrl, "next-image");
+  assert.equal(h.state.snapshot.screenshotDataUrl, screen.screenshotDataUrl);
+  call.resolve({ ...nextLayers, screenshotDataUrl: screen.screenshotDataUrl }); await done;
+});
+
+test("completed desktop captures stop publishing and queued screens cannot replace a newer capture", async () => {
+  const h = harness(), done = h.capture("fixture"); await turn(); const old = h.calls[0];
+  old.options.onPreview("tree", snapshot()); const oldId = h.scope.activeInspectionRef.current!;
+  old.resolve(snapshot("complete")); await done;
+  const before = h.sent.length;
+  old.options.onPreview("screen", { ...snapshot(), screenshotDataUrl: "late-screen" });
+  old.options.onPreview("tree", snapshot("late-tree")); old.options.onProgress("late-progress", 1);
+  assert.equal(h.sent.length, before);
+  h.preview({ requestId: oldId, phase: "screen", screen: { screenshotDataUrl: "queued-after-completion" } });
+  assert.equal(h.state.snapshot.screenshotDataUrl, null);
+  const next = h.capture("fixture"); await turn(); const current = h.calls[1];
+  current.options.onPreview("tree", snapshot("fresh-tree"));
+  h.preview({ requestId: oldId, phase: "screen", screen: { screenshotDataUrl: "queued-old-screen" } });
+  assert.equal(h.state.snapshot.screenshotDataUrl, null);
+  current.options.onPreview("screen", { ...snapshot(), screenshotDataUrl: "fresh-screen" });
+  assert.equal(h.state.snapshot.screenshotDataUrl, "fresh-screen");
+  current.resolve({ ...snapshot("fresh-tree"), screenshotDataUrl: "fresh-screen" }); await next;
+});
+
+test("cancelled screens are rejected in both desktop and renderer before a late result settles", async () => {
+  const h = harness(), done = h.capture("fixture"); await turn(); const call = h.calls[0];
+  call.options.onPreview("tree", snapshot()); const requestId = h.scope.activeInspectionRef.current!;
+  h.cancelUi(); const before = h.sent.length;
+  call.options.onPreview("screen", { ...snapshot(), screenshotDataUrl: "late-screen" });
+  h.preview({ requestId, phase: "screen", screen: { screenshotDataUrl: "queued-screen" } });
+  assert.equal(h.sent.length, before); assert.equal(h.state.snapshot, null);
+  call.resolve(snapshot()); await done; assert.equal(h.state.snapshot, null);
 });
 
 test("desktop rejects wrong frame and stale cancel cannot abort a newer request", async () => {

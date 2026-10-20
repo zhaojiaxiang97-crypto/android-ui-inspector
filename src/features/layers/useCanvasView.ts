@@ -28,7 +28,7 @@ const clampZoom = (value: number) => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, value
 /** Owns persistent view state and all camera, zoom, scroll and mode scheduling. */
 export function useCanvasView({ surface, content, layout, appearance, onCancelGesture, measurementMode, onExitFocus, onToggleStructure }: {
   surface: CanvasSurface;
-  content: { root: UiNode; src: string; focusKey: string | null; focusedNode: UiNode | null; selectedId: string | null; enabled: boolean; canRender3d: boolean };
+  content: { root: UiNode; src: string; focusKey: string | null; focusedNode: UiNode | null; selectedId: string | null; enabled: boolean; canRender3d: boolean; preferFlat?: boolean; enter3dWhenReady?: boolean };
   layout: { size: PixelSize | null; frameSize: ReturnType<typeof usePreviewViewport> };
   appearance: LayerAppearance;
   onCancelGesture: () => void;
@@ -41,8 +41,9 @@ export function useCanvasView({ surface, content, layout, appearance, onCancelGe
   const { size, frameSize } = layout;
   const viewport = frameSize.visible;
   const [viewMode, setViewMode] = useState<CanvasViewMode>("flat");
-  const viewChoiceRef = useRef<CanvasViewMode | null>(null);
+  const viewChoiceRef = useRef<CanvasViewMode | null>(content.preferFlat ? "flat" : null);
   const previousSelectedIdRef = useRef<string | null>(null);
+  const previous3dReadyRef = useRef(false);
   const previousFocusKey = useRef<string | null>(null);
   const savedViewRef = useRef<{ mode: CanvasViewMode; zoom: number; camera: OrbitCamera; left: number; top: number } | null>(null);
   const restoringViewRef = useRef(false);
@@ -164,14 +165,16 @@ export function useCanvasView({ surface, content, layout, appearance, onCancelGe
   }, [root, src, focusKey, enabled]);
   useLayoutEffect(() => () => { discardScrollRestore(); zoomAnchorRef.current = null; }, []);
   useEffect(() => {
+    const becameReady = canRender3d && !previous3dReadyRef.current;
+    previous3dReadyRef.current = canRender3d;
     if (restoringViewRef.current) { restoringViewRef.current = false; previousSelectedIdRef.current = selectedId; return; }
     if (!canRender3d) {
       setViewMode("flat");
-    } else if (viewChoiceRef.current !== "flat" && measurementMode() === "off" && !focusedNode && (selectedId !== previousSelectedIdRef.current || previousSelectedIdRef.current === null)) {
+    } else if (viewChoiceRef.current !== "flat" && measurementMode() === "off" && !focusedNode && (becameReady && content.enter3dWhenReady || selectedId !== previousSelectedIdRef.current || previousSelectedIdRef.current === null)) {
       setViewMode("layers3d");
     }
     previousSelectedIdRef.current = selectedId;
-  }, [canRender3d, selectedId, focusedNode]);
+  }, [canRender3d, selectedId, focusedNode, content.enter3dWhenReady]);
 
   const flatFitScale = useMemo(() => {
     if (!size || !validSize(size)) return 0;
@@ -328,7 +331,7 @@ export function useCanvasView({ surface, content, layout, appearance, onCancelGe
 
   function handleWheel(event: WheelEvent) {
     if (event.target instanceof Element && event.target.closest(".quick-select-panel, .measurement-card")) return;
-    if (!enabled || !Number.isFinite(event.deltaY) || event.deltaY === 0) return;
+    if (!enabled || viewMode === "flat" && !imageRef.current?.naturalWidth || !Number.isFinite(event.deltaY) || event.deltaY === 0) return;
     event.preventDefault();
     const pixels = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? frameRef.current?.clientHeight || 400 : 1);
     const factor = event.ctrlKey || event.deltaMode === 0 && Math.abs(event.deltaY) < 40

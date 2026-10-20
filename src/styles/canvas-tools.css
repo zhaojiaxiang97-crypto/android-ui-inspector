@@ -124,3 +124,10 @@
   .screenshot-view-toolbar .canvas-view-tools { flex-wrap: wrap; gap: 6px 10px; }
   .screenshot-view-toolbar .canvas-inspection-tools { padding-left: 0; border-left: 0; }
 }
+.demand-layer-status { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 9px 18px; border-bottom: 1px solid var(--ref-line); color: var(--ref-text-soft); font: 12px/1.5 var(--ref-font-ui); }
+.demand-layer-status > span { flex: 1 1 280px; }
+.demand-layer-status .close-button { white-space: nowrap; color: var(--ref-text-soft); background: var(--ref-panel); border: 1px solid var(--ref-line); box-shadow: none; }
+.demand-layer-status .close-button:hover:not(:disabled) { color: var(--ref-text); background: var(--ref-panel-raised); }
+.demand-layer-status .close-button:disabled { opacity: .5; cursor: default; }
+.preparing-3d-preview { display: block; max-width: min(100%, 360px); max-height: 55vh; object-fit: contain; }
+.preparing-3d-fallback { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--ref-text-soft); pointer-events: none; }

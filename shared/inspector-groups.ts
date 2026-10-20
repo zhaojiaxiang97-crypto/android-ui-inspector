@@ -2,7 +2,7 @@ export type InspectorGroupId = "type" | "business" | "relation" | "layout" | "in
 export const INSPECTOR_DISCLOSURE_DEFAULTS = {
   type: false, business: true, relation: false, layout: false, interaction: false, image: true, raw: false,
   identity: false, "class-chain": false, "parent-details": false, "layout-rules": false,
-  "extra-geometry": false, padding: false, "image-details": false,
+  "extra-geometry": false, padding: false, "image-details": false, "text-style": true,
 } as const;
 export type InspectorDisclosureId = keyof typeof INSPECTOR_DISCLOSURE_DEFAULTS;
 export type InspectorGroupPreference = {

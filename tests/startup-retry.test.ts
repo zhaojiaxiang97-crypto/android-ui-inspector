@@ -53,14 +53,15 @@ for (const focusMode of ["missing-focus", "focus-null"]) test(`preferred capture
     const calls: string[][] = readFileSync(callsPath, "utf8").trim().split(/\r?\n/).map(line => JSON.parse(line));
     // The one attempt now rechecks authorization while bracketing each ready-tree read.
     // Attempt count above, not the number of cheap focus checks, proves no budget restart.
-    assert.equal(calls.filter(c => c.join(" ") === "shell run-as com.example.startup id").length, 1,
-      "missing focus never repeats the initial debug eligibility check");
+    assert.equal(calls.filter(c => c.join(" ") === "shell run-as com.example.startup id").length, 2,
+      "only initial eligibility and the first strict confirmation use run-as; missing-focus retries stay cheap");
     const foregroundReads = calls.filter(c => c.join(" ") === "shell dumpsys activity activities").length;
     const focusReads = calls.filter(c => c.join(" ") === "shell dumpsys window windows").length;
     assert.ok(foregroundReads === focusReads + 1 || foregroundReads === focusReads + 2,
       "one foreground read per poll; final poll may exhaust the budget before focus observation");
+    let observed = 0;
     for (let i = 0; i < calls.length; i++) if (calls[i].join(" ") === "shell dumpsys window windows")
-      assert.equal(calls[i - 1]?.join(" "), "shell dumpsys activity activities");
+      assert.equal(calls[i - 1]?.join(" "), observed++ === 0 ? "shell run-as com.example.startup id" : "shell dumpsys activity activities");
     assert.ok(!calls.some(c => c.join(" ") === "shell dumpsys activity com.example.startup" || c.includes("open-session")), "no App tree or SDK preparation before authorized focus");
     assert.ok(!calls.some(c => c.includes("screencap") || c.includes("forward") || c.includes("capture-visible") || c.includes("capture-refs")));
   } finally { rmSync(directory, { recursive: true, force: true }); }
@@ -92,13 +93,15 @@ for (const mode of ["stable", "window-change", "component-change", "instance-cha
         assert.deepEqual(result.diagnostics.attempts[0].readiness, result.readiness);
         const observations = result.readiness.observations;
         assert.ok(observations && observations.droppedCount === 0);
-        assert.ok(observations.entries.some((r: { kind: string }) => r.kind === "foreground"));
+        assert.equal(observations.entries.some((r: { kind: string }) => r.kind === "foreground"), mode !== "stable",
+          "stable first poll uses the foreground read inside strict confirmation; retries retain cheap foreground checks");
         if (!changed) {
           assert.ok(observations.entries.some((r: { kind: string; result: string }) => r.kind === "focus-confirm-before" && r.result === "match"));
           assert.ok(observations.entries.some((r: { kind: string; result: string }) => r.kind === "focus-confirm-after" && r.result === "match"));
         }
         if (mode === "focus-delay") {
-          assert.equal(observations.entries.filter((r: { kind: string; result: string }) => r.kind === "focus-candidate" && r.result === "unavailable").length, 2);
+          assert.equal(observations.entries.filter((r: { kind: string; result: string }) => r.kind === "focus-confirm-before" && r.result === "unavailable").length, 1);
+          assert.equal(observations.entries.filter((r: { kind: string; result: string }) => r.kind === "focus-candidate" && r.result === "unavailable").length, 1);
           assert.ok(observations.entries.filter((r: { result: string }) => r.result === "unavailable")
             .every((r: { focusReason?: string }) => r.focusReason === "null-focus"));
           assert.ok(observations.entries.some((r: { kind: string }) => r.kind === "poll-wait"));
@@ -108,16 +111,26 @@ for (const mode of ["stable", "window-change", "component-change", "instance-cha
       const dumps = calls.filter(c => c.join(" ") === "shell dumpsys activity com.example.startup");
       const windows = calls.filter(c => c.join(" ") === "shell dumpsys window windows");
       assert.equal(dumps.length, mode === "cancel-wait" || candidateChanged ? 0 : mode === "window-change" || mode === "tree-delay" ? 2 : 1, "one per focus-ready poll; no unguarded initial dump or post-focus duplicate");
-      assert.equal(windows.length, mode === "cancel-wait" ? 1 : candidateChanged ? 2 : mode === "window-change" ? 6
-        : mode === "focus-delay" || mode === "tree-delay" ? 5 : 3, "candidate observation does not replace either strict check");
+      assert.equal(windows.length, mode === "cancel-wait" ? 1 : candidateChanged ? 3 : mode === "window-change" || mode === "focus-delay" ? 5
+        : mode === "tree-delay" ? 4 : 2, "first strict check replaces only a redundant candidate; retries retain both strict checks");
       const permissionReads = calls.filter(c => c.join(" ") === "shell run-as com.example.startup id");
-      assert.equal(permissionReads.length, mode === "cancel-wait" ? 1 : candidateChanged ? 2
-        : mode === "window-change" ? 5 : mode === "tree-delay" ? 4 : 3,
-        "only candidate and post-tree confirmations repeat run-as; never absent-focus observations");
+      assert.equal(permissionReads.length, mode === "cancel-wait" ? 2
+        : mode === "window-change" ? 5 : mode === "tree-delay" || mode === "focus-delay" ? 4 : 3,
+        "only strict confirmations repeat run-as; never absent-focus retry observations");
       if (inspectionMode === "standard" || mode === "cancel-wait" || changed)
         assert.ok(!calls.some(c => c.includes("open-session")), "SDK preparation requires enhanced mode and an authorized stable tree");
       const firstDump = calls.findIndex(c => c.join(" ") === "shell dumpsys activity com.example.startup");
       if (firstDump >= 0) assert.ok(calls.slice(0, firstDump).some(c => c.join(" ") === "shell dumpsys window windows"));
+      if (mode === "stable") {
+        assert.deepEqual(calls.slice(0, 9).map(call => call.join(" ")), [
+          "shell dumpsys activity activities", "shell run-as com.example.startup id",
+          "shell dumpsys activity activities", "shell run-as com.example.startup id", "shell dumpsys window windows",
+          "shell dumpsys activity com.example.startup",
+          "shell dumpsys activity activities", "shell run-as com.example.startup id", "shell dumpsys window windows",
+        ], "one valid dump remains bracketed by fresh foreground, permission and focus checks");
+        assert.ok(!result.readiness.observations.entries.some((r: { kind: string }) => r.kind === "poll-wait" || r.kind === "focus-candidate"),
+          "ready page has no artificial poll delay or duplicate focus query");
+      }
       if (mode === "focus-delay") assert.equal(calls.slice(0, firstDump).filter(c => c.join(" ") === "shell dumpsys window windows").length, 4);
       assert.ok(!calls.some(c => c.includes("screencap") || c.includes("capture-visible")));
       const forwards = calls.filter(c => c.includes("forward"));
@@ -130,6 +143,37 @@ for (const mode of ["stable", "window-change", "component-change", "instance-cha
         assert.equal(calls.slice(0, at).filter(c => c.join(" ") === "shell dumpsys window windows").length, windows.length,
           "socket preparation follows the post-tree focus confirmation, never an unconfirmed candidate");
       }
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+}
+
+for (const inspectionMode of ["standard", "sdk-enhanced"] as const)
+for (const mode of ["before-component-change", "before-instance-change", "before-package-change", "before-foreground-failure"]) {
+  test(`first strict confirmation rejects changed or unknown foreground before tree work: ${mode} (${inspectionMode})`, {
+    skip: process.platform === "win32", timeout: 10000,
+  }, () => {
+    const project = join(import.meta.dirname, "..");
+    const directory = mkdtempSync(join(tmpdir(), "inspector-startup-first-confirm-"));
+    const callsPath = join(directory, "calls.jsonl");
+    try {
+      const sdk = join(project, "tests/fixtures/startup-adb");
+      const child = spawnSync(process.execPath, [join(project, "tests/fixtures/startup-ready-entry.ts"), inspectionMode], {
+        cwd: project, timeout: 5000, encoding: "utf8",
+        env: { ...process.env, ANDROID_HOME: sdk, ANDROID_SDK_ROOT: sdk, STARTUP_ADB_LOG: callsPath, STARTUP_READY_FIXTURE: mode },
+      });
+      assert.equal(child.error, undefined); assert.equal(child.status, 0, child.stderr);
+      const result = JSON.parse(child.stdout.trim().split(/\r?\n/).at(-1)!);
+      assert.match(result.error, mode === "before-package-change" ? /前台 App 已离开授权范围/ : mode === "before-foreground-failure" ? /无法确认前台 App/ : /前台 App 已变化/);
+      assert.equal(result.root, null);
+      assert.equal(result.diagnostics.totalAttempts, 1);
+      assert.equal(result.readiness.treeReadCount, 0);
+      assert.ok(!result.readiness.observations.entries.some((r: { kind: string }) => r.kind === "poll-wait"));
+      assert.ok(!result.progress.includes("读取完整控件属性"));
+      const calls: string[][] = readFileSync(callsPath, "utf8").trim().split(/\r?\n/).map(line => JSON.parse(line));
+      assert.equal(calls.filter(c => c.join(" ") === "shell dumpsys activity activities").length, 2,
+        "the initial target read and the strict confirmation suffice; failure does not restart polling");
+      assert.ok(!calls.some(c => c.join(" ") === "shell dumpsys activity com.example.startup"
+        || c.includes("forward") || c.includes("open-session") || c.includes("screencap")), "no tree or image/SDK work after a failed first strict check");
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 }

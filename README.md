@@ -6,7 +6,7 @@
 
 2026-10-15：**R0–R8 架构重构已完成并验收**，源码已同步。职责边界与八轮结果见[架构收尾](docs/ARCHITECTURE_REFACTOR_PLAN.md#architecture-closeout)；桌面安装候选保持原版本，UI、跨平台发布和专项设备缺口按各自记录保留。
 
-[第一次使用](docs/FIRST_USE.md) · [项目状态](docs/PROJECT_STATUS.md) · [当前安排](docs/LOOKIN_ALIGNMENT_PLAN.md#下一步) · [最近验收](docs/CORE_ACCEPTANCE.md#architecture-round8-acceptance) · [文档索引](docs/README.md)
+[第一次使用](docs/FIRST_USE.md) · [项目状态](docs/PROJECT_STATUS.md) · [当前安排](docs/LOOKIN_ALIGNMENT_PLAN.md#下一步) · [最近验收](docs/CORE_ACCEPTANCE.md#architecture-round8-acceptance) · [文档导航](docs/README.md) · [自动调试专题](docs/AUTOMATION_INDEX.md)
 
 ## 主要能力
 

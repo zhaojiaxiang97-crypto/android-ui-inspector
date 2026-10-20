@@ -9,6 +9,12 @@ import type { ImportSnapshotFileResult } from "./snapshot-file";
 import type { ConnectionDiagnosticRequest, ConnectionDiagnosticReport } from "./connection-diagnostics";
 import type { LivePreviewEvent } from "./live-preview";
 import type { InspectionMode, InspectionModeState } from "./inspection-mode";
+import type { DebugPlanDefinition, DebugPlanRun } from "./debug-plan";
+
+export type DebugPlanDesktopCommand =
+  | { name: "start_debug_plan"; input: { sessionId: string; runId: string; definition: DebugPlanDefinition } }
+  | { name: "get_debug_plan" | "cancel_debug_plan"; input: { sessionId: string; runId: string } };
+export type DebugPlanDesktopResult = { run: DebugPlanRun; replayed?: boolean } | { found: false; runId: string };
 
 /** Public preload contract. Optional members remain optional for older runtimes and offline fixtures. */
 export interface DesktopApi {
@@ -28,10 +34,14 @@ export interface DesktopApi {
   stopLivePreview?: (sessionId?: string) => Promise<LivePreviewEvent>;
   getLivePreview?: () => Promise<LivePreviewEvent>;
   onLivePreview?: (callback: (event: LivePreviewEvent) => void) => () => void;
-  inspectDevice: (serial: string, requestId: string, priorityViewRef?: string | null, singleAttempt?: boolean, scope?: ReadOnlyCaptureScope) => Promise<UiSnapshot>;
+  inspectDevice: (serial: string, requestId: string, priorityViewRef?: string | null, singleAttempt?: boolean, scope?: ReadOnlyCaptureScope, layerCapture?: import("./types").LayerCaptureMode) => Promise<UiSnapshot>;
+  captureLayerImages?: (requestId: string, nodeIds: string[]) => Promise<import("./types").LayerImageCaptureResult>;
+  cancelLayerImages?: (requestId: string) => Promise<void>;
   captureGroup: (requestId: string, nodeId: string) => Promise<QmlGroupImage | null>;
   refreshViewNode: (requestId: string, nodeId: string, scope?: "node" | "branch" | "list") => Promise<ViewRefreshResult>;
   readViewStyle: (requestId: string, nodeId: string) => Promise<ViewStyleResult>;
+  readViewFont?: (requestId: string, nodeId: string) => Promise<import("./view-font").ViewFontResult>;
+  cancelViewFont?: (requestId: string) => Promise<void>;
   cancelInspection: (requestId: string) => Promise<void>;
   showLayerMenu: (canHide: boolean, canRestore: boolean, canExitFocus: boolean, options?: LayerMenuOptions) => Promise<LayerMenuAction>;
   onInspectionProgress: (callback: (progress: InspectionProgress) => void) => () => void;
@@ -42,6 +52,7 @@ export interface DesktopApi {
   copyMcpConfig?: () => Promise<void>;
   startDebugSession?: (serial: string, options?: DebugSessionStartOptions) => Promise<DebugSessionState | null>;
   getDebugSession?: () => Promise<DebugSessionState | null>;
+  debugPlanCommand?: (command: DebugPlanDesktopCommand) => Promise<DebugPlanDesktopResult>;
   loadDebugTaskTemplates?: () => Promise<DebugTaskTemplatesResult>;
   saveDebugTaskTemplate?: (input: DebugTaskTemplateSaveInput) => Promise<DebugTaskTemplatesResult>;
   deleteDebugTaskTemplate?: (id: string) => Promise<DebugTaskTemplatesResult>;
@@ -58,6 +69,7 @@ export interface DesktopApi {
   outputNodeImage?: (request: NodeImageOutputRequest) => Promise<ExportSnapshotResult>;
   importSnapshotFile?: () => Promise<ImportSnapshotFileResult>;
   loadSnapshots: () => Promise<SnapshotStoreResult>;
+  deleteSnapshot?: (id: string) => Promise<SnapshotStoreResult>;
   importTestReport?: () => Promise<DebugReportExportImportResult>;
   importComparisonReport?: () => Promise<ImportTestReportResult>;
   loadDebugReport?: () => Promise<DebugReportExportImportResult>;

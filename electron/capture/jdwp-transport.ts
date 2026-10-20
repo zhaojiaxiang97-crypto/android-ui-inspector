@@ -136,7 +136,7 @@ export async function requestChunk(socket: Socket, reader: SocketReader, id: num
   }
 }
 
-export async function requestJdwpCommand(socket: Socket, reader: SocketReader, id: number, set: number, operation: number, events: Buffer[], ...parts: Buffer[]) {
+export async function requestJdwpCommand(socket: Socket, reader: { take(size: number): Promise<Buffer> }, id: number, set: number, operation: number, events: Buffer[], ...parts: Buffer[]) {
   const data = Buffer.concat(parts);
   const packet = Buffer.alloc(11 + data.length);
   packet.writeUInt32BE(packet.length); packet.writeUInt32BE(id, 4);

@@ -8,6 +8,8 @@ import type { DebugSessionState, DebugStep, DebugStepError, UiNode, UiSnapshot }
 import type { McpSnapshot } from "./mcp-snapshot";
 import type { DebugTaskCheckResult } from "../../shared/debug-task";
 import { boundedDebugLogText, debugLogConfigurationSecrets, sanitizeDebugLogText } from "./debug-logs";
+import { measureDebugPhaseSync } from "./debug-timing";
+import { debugSnapshotPriorities } from "../../shared/debug-evidence-priority";
 
 const MiB = 1024 * 1024;
 export const DEBUG_EVIDENCE_LIMITS = {
@@ -18,6 +20,10 @@ export type DebugEvidenceObservation = { entry: McpSnapshot | null; freshness: D
 const sha = (data: Buffer) => createHash("sha256").update(data).digest("hex");
 const explanation = (error: unknown) => error instanceof Error ? sanitizeDebugLogText(error.message, debugLogConfigurationSecrets()).slice(0, 16000) : "证据保存失败。";
 const recordingError = (code: string, error: unknown): DebugStepError => ({ category: "recording", code, phase: "recording", message: explanation(error) });
+const capacityWarning = "证据总容量超过上限，已按保留优先级裁剪该附件。";
+const imageCountWarning = "截图数量超过上限，已按保留优先级裁剪该图片。";
+const capacityIssue: DebugStepError = { category: "recording", code: "evidence_capacity_exceeded", phase: "recording",
+  message: "证据容量或图片数量已达上限，部分附件未保存。优先保留当前操作、验收双帧、失败现场及操作前后；同优先级树优先于图片，缺失项见快照警告。" };
 
 export function appendDebugRecordingErrors(step: DebugStep, errors: DebugStepError[]) {
   if (!errors.length) return false;
@@ -63,7 +69,9 @@ export class DebugEvidenceWriter {
   readonly path: string;
   private readonly report: DebugSessionReport;
   private readonly owned = new Map<string, { ino: number; dev: number }>();
+  private readonly trimmed = new Map<string, Partial<Record<"tree" | "screenshot", DebugReportFile>>>();
   private committed = new Set<string>();
+  private reportSaved = false;
 
   constructor(private readonly directory: string, state: DebugSessionState,
     limits: Partial<DebugSessionReport["limits"]> = {}) {
@@ -81,10 +89,17 @@ export class DebugEvidenceWriter {
   }
 
   saveSession(state: DebugSessionState, totalSteps: number) {
+    this.reportSaved = false;
     Object.assign(this.report.session, { active: state.active, stopReason: state.stopReason ?? null,
       totalSteps, droppedSteps: Math.max(0, totalSteps - this.report.steps.length), updatedAt: new Date().toISOString() });
     this.report.session.progress = structuredClone(state.progress);
     this.report.session.androidLogsEnabled = state.androidLogsEnabled ?? false;
+    // Cleanup may fail after the last step was saved. Retain its error without
+    // rewriting input receipts or reopening any snapshot attachments.
+    for (const saved of this.report.steps) {
+      const current = state.steps.find(step => step.id === saved.step.id);
+      if (current?.recordingErrors?.length) appendDebugRecordingErrors(saved.step, current.recordingErrors);
+    }
     const errors: DebugStepError[] = [];
     this.report.task = structuredClone(state.task ?? null);
     this.retainSnapshots();
@@ -97,10 +112,17 @@ export class DebugEvidenceWriter {
   }
 
   record(state: DebugSessionState, totalSteps: number, record: DebugReportStep,
-    before: DebugEvidenceObservation, after: DebugEvidenceObservation, logs?: DebugLogCapture[]): DebugStepError[] {
+    before: DebugEvidenceObservation, after: DebugEvidenceObservation, logs?: DebugLogCapture[], scrollObservations?: McpSnapshot[], assertionObservations?: McpSnapshot[]): DebugStepError[] {
+    this.reportSaved = false;
     const errors: DebugStepError[] = [];
     const assets = new Map<string, Buffer>();
     const saved: DebugReportStep = structuredClone(record);
+    if (saved.step.scrollTask) {
+      // A synchronous stop can record while a gesture is still unwinding.
+      // Its input belongs to the iteration, never a second top-level gesture.
+      delete saved.step.resolvedInput;
+      delete saved.step.inputEvidence;
+    }
     if (logs) saved.logs = logs.slice(0, DEBUG_LOG_LIMITS.maxSources).map(log => {
       const evidence = structuredClone(log.evidence);
       if (log.text) {
@@ -121,16 +143,37 @@ export class DebugEvidenceWriter {
     this.report.session.androidLogsEnabled = state.androidLogsEnabled ?? false;
     const reference = (observation: DebugEvidenceObservation): DebugSnapshotReference => {
       if (!observation.entry) return { snapshotId: null, freshness: "missing", reason: observation.reason ?? "没有接受到该阶段的观察。" };
-      if (!this.report.snapshots.some(item => item.snapshotId === observation.entry!.id)) {
-        this.report.snapshots.push(this.snapshot(observation.entry, assets, errors));
+      const previous = this.report.snapshots.find(item => item.snapshotId === observation.entry!.id);
+      if (!previous) {
+        this.report.snapshots.push(measureDebugPhaseSync("attachments", () => this.snapshot(observation.entry!, assets, errors)));
+      } else if (previous.warnings.some(warning => warning === capacityWarning || warning === imageCountWarning)) {
+        // A previously trimmed capture may now be an input's before frame or a
+        // final confirmation. Reconsider the supplied original at its new role.
+        const restored = measureDebugPhaseSync("attachments", () => this.snapshot(observation.entry!, assets, errors));
+        const expected = this.trimmed.get(previous.snapshotId);
+        for (const kind of ["tree", "screenshot"] as const) if (!previous[kind] && expected?.[kind] && restored[kind]) {
+          if (restored[kind].path === expected[kind].path && restored[kind].size === expected[kind].size) {
+            previous[kind] = restored[kind]; delete expected[kind];
+          } else {
+            const issue = recordingError("artifact_identity_changed", new Error("重复快照的附件内容已变化，未替换此前证据。"));
+            errors.push(issue); if (!previous.warnings.includes(issue.message)) previous.warnings.push(issue.message);
+          }
+        }
+        if (expected && Object.keys(expected).length === 0) {
+          this.trimmed.delete(previous.snapshotId);
+          previous.warnings = previous.warnings.filter(warning => warning !== capacityWarning && warning !== imageCountWarning);
+        }
       }
       return { snapshotId: observation.entry.id, freshness: observation.freshness, reason: observation.reason };
     };
     saved.before = reference(before); saved.after = reference(after);
+    for (const entry of scrollObservations ?? []) reference({ entry, freshness: "current", reason: null });
+    for (const entry of assertionObservations ?? []) reference({ entry, freshness: "current", reason: null });
     this.retainSnapshots();
     appendDebugRecordingErrors(saved.step, errors);
     try { this.persist(assets, errors, saved); }
     catch (error) {
+      if (saved.step.assertionConfirmation) saved.verified = saved.step.verified = null;
       if (saved.step.taskCheck) {
         this.insufficient(saved.step.taskCheck, "任务记录保存失败，无法保留完整验收证据。");
         const latest = this.report.task?.checks.find(item => item.stepId === saved.step.id);
@@ -141,18 +184,73 @@ export class DebugEvidenceWriter {
     return errors;
   }
 
+  /** Update final measurements only. Never reopen, trim or reserialize snapshot/log attachments. */
+  finalizeTiming(state: DebugSessionState, totalSteps: number, step: DebugStep) {
+    if (!step.timings) return;
+    const saved = this.report.steps.find(item => item.step.id === step.id);
+    if (!this.reportSaved || !saved) throw new Error("步骤证据尚未保存，无法回填最终计时。");
+    const previousTimings = saved.step.timings, previousSession = this.report.session, previousBytes = this.report.storage.bytes;
+    saved.step.timings = structuredClone(step.timings);
+    this.report.session = { ...previousSession, active: state.active, stopReason: state.stopReason ?? null,
+      totalSteps, droppedSteps: Math.max(0, totalSteps - this.report.steps.length), updatedAt: new Date().toISOString(),
+      progress: structuredClone(state.progress), androidLogsEnabled: state.androidLogsEnabled ?? false };
+    try {
+      const bytes = this.serialize();
+      // Timing metadata must not evict evidence which was already saved successfully.
+      if (this.report.storage.bytes > this.report.limits.maxBytes) throw new Error("最终计时超过证据总容量上限，已保留此前报告和附件。");
+      privateDirectory(this.directory);
+      atomicWrite(this.path, bytes);
+    } catch (error) {
+      if (previousTimings) saved.step.timings = previousTimings; else delete saved.step.timings;
+      this.report.session = previousSession; this.report.storage.bytes = previousBytes;
+      throw error;
+    }
+  }
+
   private protectedSnapshots() {
-    return new Set((this.report.task?.checks ?? []).filter(check => check.status === "passed")
-      .flatMap(check => [check.observations.first?.snapshotId, check.observations.second?.snapshotId]).filter(Boolean));
+    return new Set([...(this.report.task?.checks ?? []).filter(check => check.status === "passed")
+      .flatMap(check => [check.observations.first?.snapshotId, check.observations.second?.snapshotId]),
+      ...this.report.steps.flatMap(item => item.step.scrollTask?.confirmation
+        ? [item.step.scrollTask.confirmation.firstSnapshotId, item.step.scrollTask.confirmation.secondSnapshotId] : []),
+      ...this.report.steps.flatMap(item => item.step.assertionConfirmation
+        ? [item.step.assertionConfirmation.first.snapshotId, item.step.assertionConfirmation.second.snapshotId] : [])].filter(Boolean));
+  }
+
+  private recoverySource(current: DebugReportStep | undefined) {
+    if (current?.step.action !== "resume_ui_step" || current.step.input.sessionId !== this.report.session.id
+      || typeof current.step.input.requestId !== "string") return undefined;
+    const originals = this.report.steps.filter(item => item.step.id < current.step.id
+      && ["perform_ui_step", "scroll_until"].includes(item.step.action)
+      && item.step.input.sessionId === current.step.input.sessionId && item.step.input.requestId === current.step.input.requestId);
+    return originals.length === 1 ? originals[0] : undefined;
+  }
+
+  private recordingPriorities() {
+    const current = this.report.steps.at(-1), original = this.recoverySource(current);
+    // Every current step's boundary must precede historical proof, including
+    // ordinary capture and a wait whose confirmation has not yet been formed.
+    // This is local to the writer; ordinary report viewing keeps its existing priorities.
+    const preferred = new Set<number>();
+    if (current) preferred.add(current.step.id);
+    if (original) preferred.add(original.step.id);
+    return debugSnapshotPriorities(this.report, preferred);
   }
 
   private retainSnapshots() {
     const referenced = new Set([...this.report.steps.flatMap(item => [item.before.snapshotId, item.after.snapshotId]),
+      ...this.report.steps.flatMap(item => [item.step.beforeId, item.step.afterId,
+        item.step.resolvedInput?.visualConfirmation?.referenceSnapshotId, item.step.resolvedInput?.visualConfirmation?.currentSnapshotId]),
+      ...this.report.steps.flatMap(item => item.step.scrollTask?.observationIds ?? []),
+      ...this.report.steps.flatMap(item => item.step.assertionConfirmation
+        ? [item.step.assertionConfirmation.first.snapshotId, item.step.assertionConfirmation.second.snapshotId] : []),
+      ...this.report.steps.flatMap(item => (item.step.scrollTask?.iterations ?? []).flatMap(iteration => [iteration.beforeId, iteration.afterId,
+        iteration.resolvedInput?.visualConfirmation?.referenceSnapshotId, iteration.resolvedInput?.visualConfirmation?.currentSnapshotId])),
       ...(this.report.task?.checks ?? []).flatMap(check => [check.observations.first?.snapshotId, check.observations.second?.snapshotId])].filter(Boolean));
-    const candidates = this.report.snapshots.filter(item => referenced.has(item.snapshotId)), protectedIds = this.protectedSnapshots();
-    const priority = [...candidates.filter(item => !protectedIds.has(item.snapshotId)), ...candidates.filter(item => protectedIds.has(item.snapshotId))];
+    const candidates = this.report.snapshots.filter(item => referenced.has(item.snapshotId)), priorities = this.recordingPriorities();
+    const priority = [...candidates].sort((left, right) => priorities.get(left.snapshotId)! - priorities.get(right.snapshotId)!);
     const retainedIds = new Set(priority.slice(-this.report.limits.maxSnapshots).map(item => item.snapshotId));
     this.report.snapshots = candidates.filter(item => retainedIds.has(item.snapshotId));
+    for (const id of this.trimmed.keys()) if (!retainedIds.has(id)) this.trimmed.delete(id);
     const retained = new Set(this.report.snapshots.map(item => item.snapshotId));
     for (const item of this.report.steps) {
       for (const side of ["before", "after"] as const) {
@@ -175,16 +273,39 @@ export class DebugEvidenceWriter {
   }
 
   private normalizeTaskEvidence() {
+    for (const item of this.report.steps) if (item.step.assertionConfirmation && item.verified === true) {
+      const { first, second } = item.step.assertionConfirmation;
+      const observations = [first, second];
+      if (first.snapshotId === second.snapshotId || Date.parse(first.capturedAt) < Date.parse(item.step.time)
+        || Date.parse(second.capturedAt) <= Date.parse(first.capturedAt)
+        || item.after.freshness !== "current" || item.after.snapshotId !== second.snapshotId
+        || observations.some(observation => {
+          const saved = this.report.snapshots.find(entry => entry.snapshotId === observation.snapshotId);
+          return !saved?.tree || !saved.screenshot || saved.capturedAt !== observation.capturedAt || saved.source !== "accessibility-helper";
+        })) item.verified = item.step.verified = null;
+    }
+    for (const item of this.report.steps) if (item.step.scrollTask && item.verified === true) {
+      const confirmation = item.step.scrollTask.confirmation;
+      if (!confirmation || item.after.freshness !== "current" || item.after.snapshotId !== confirmation.secondSnapshotId
+        || [confirmation.firstSnapshotId, confirmation.secondSnapshotId].some(id => !this.report.snapshots.find(entry => entry.snapshotId === id)?.tree)) {
+        // Keep the observed outcome and trace, but a trimmed report no longer proves it.
+        item.verified = item.step.verified = null;
+      }
+    }
     const normalize = (check: DebugTaskCheckResult) => {
+      const definition = this.report.task?.definition;
+      const conditions = check.checkpointId === null ? definition?.finalConditions
+        : definition?.checkpoints.find(item => item.id === check.checkpointId)?.conditions;
+      const partial = conditions?.some(condition => condition.visibility === "partial");
       let missing = false;
       for (const side of ["first", "second"] as const) {
         const observation = check.observations[side];
         const snapshot = observation && this.report.snapshots.find(item => item.snapshotId === observation.snapshotId);
         if (observation && !snapshot) check.observations[side] = null;
-        if (!snapshot?.tree) missing = true;
+        if (!snapshot?.tree || partial && !snapshot.screenshot) missing = true;
       }
       if (missing) this.insufficient(check, check.status === "insufficient_evidence" ? check.reason
-        : "缺少已保存的两份验收树，不能确认页面条件。");
+        : partial ? "partial 缺少已保存的两份验收树或截图，不能确认页面条件。" : "缺少已保存的两份验收树，不能确认页面条件。");
     };
     for (const item of this.report.steps) if (item.step.taskCheck) normalize(item.step.taskCheck);
     for (const check of this.report.task?.checks ?? []) normalize(check);
@@ -210,7 +331,9 @@ export class DebugEvidenceWriter {
     state.task = structuredClone(this.report.task ?? null);
     for (const step of [...state.steps, ...(record ? [record.step] : [])]) {
       const saved = this.report.steps.find(item => item.step.id === step.id);
-      if (!saved?.step.taskCheck) continue;
+      if (!saved) continue;
+      if (saved.step.assertionConfirmation) step.verified = saved.verified;
+      if (!saved.step.taskCheck) continue;
       step.taskCheck = structuredClone(saved.step.taskCheck); step.verified = saved.verified;
       if (step.status === "done") step.message = saved.step.message;
       if (saved.before.snapshotId) step.beforeId = saved.before.snapshotId; else delete step.beforeId;
@@ -264,9 +387,29 @@ export class DebugEvidenceWriter {
     return files;
   }
 
+  private evictionOrder() {
+    const priorities = this.recordingPriorities(), files = this.files();
+    const priority = new Map<string, number>();
+    for (const snapshot of this.report.snapshots) {
+      const role = priorities.get(snapshot.snapshotId) ?? -1;
+      for (const kind of ["tree", "screenshot"] as const) {
+        const file = snapshot[kind];
+        // Role wins, then tree before image. Ordinary old trees must not evict
+        // the current action's screenshot. Shared PNGs keep their strongest role.
+        if (file) priority.set(file.path, Math.max(priority.get(file.path) ?? -3, role * 2 + (kind === "tree" ? 1 : 0)));
+      }
+    }
+    for (const item of this.report.steps) for (const log of item.logs ?? []) if (log.file) priority.set(log.file.path, -3);
+    return [...files.values()].sort((left, right) => priority.get(left.path)! - priority.get(right.path)!);
+  }
+
   private omit(path: string, warning: string) {
     for (const snapshot of this.report.snapshots) {
       for (const kind of ["tree", "screenshot"] as const) if (snapshot[kind]?.path === path) {
+        if (warning === capacityWarning || warning === imageCountWarning) {
+          const expected = this.trimmed.get(snapshot.snapshotId) ?? {};
+          expected[kind] = snapshot[kind]!; this.trimmed.set(snapshot.snapshotId, expected);
+        }
         snapshot[kind] = null;
         if (!snapshot.warnings.includes(warning)) snapshot.warnings.push(warning);
       }
@@ -277,6 +420,7 @@ export class DebugEvidenceWriter {
   }
 
   private serialize() {
+    return measureDebugPhaseSync("serialization", () => {
     const fileBytes = [...this.files().values()].reduce((sum, file) => sum + file.size, 0);
     let bytes = Buffer.from(JSON.stringify(this.report));
     for (let attempt = 0; attempt < 8; attempt++) {
@@ -286,20 +430,38 @@ export class DebugEvidenceWriter {
       bytes = next;
     }
     throw new Error("证据容量计算失败。");
+    });
   }
 
-  private fit() {
-    const images = [...this.files().values()].filter(file => file.path.endsWith(".png"));
-    for (const file of images.slice(0, Math.max(0, images.length - this.report.limits.maxImages))) this.omit(file.path, "截图数量超过上限，未保留该图片。");
+  private fit(errors: DebugStepError[], record?: DebugReportStep) {
+    const original = this.recoverySource(record);
+    const requiredIds = new Set((record ? [record, ...(original ? [original] : [])] : []).flatMap(item => [item.before.snapshotId, item.after.snapshotId,
+      item.step.beforeId, item.step.afterId,
+      item.step.resolvedInput?.visualConfirmation?.referenceSnapshotId, item.step.resolvedInput?.visualConfirmation?.currentSnapshotId,
+      item.step.scrollTask?.confirmation?.firstSnapshotId, item.step.scrollTask?.confirmation?.secondSnapshotId,
+      item.step.assertionConfirmation?.first.snapshotId, item.step.assertionConfirmation?.second.snapshotId,
+      item.step.taskCheck?.observations.first?.snapshotId, item.step.taskCheck?.observations.second?.snapshotId,
+      ...item.step.scrollTask?.observationIds ?? [],
+      ...(item.step.scrollTask?.iterations ?? []).flatMap(item => [item.beforeId, item.afterId,
+        item.resolvedInput?.visualConfirmation?.referenceSnapshotId, item.resolvedInput?.visualConfirmation?.currentSnapshotId]),
+    ]));
+    const requiredPaths = new Set(this.report.snapshots.filter(snapshot => requiredIds.has(snapshot.snapshotId))
+      .flatMap(snapshot => [snapshot.tree, snapshot.screenshot].flatMap(file => file ? [file.path] : [])));
+    const omit = (file: DebugReportFile, warning: string) => {
+      this.omit(file.path, warning);
+      // Historical retention gaps are warnings; only losing this step's evidence blocks it.
+      if (!requiredPaths.has(file.path)) return;
+      if (!errors.some(error => error.code === capacityIssue.code)) errors.push({ ...capacityIssue });
+      if (record) appendDebugRecordingErrors(record.step, [capacityIssue]);
+    };
+    const images = this.evictionOrder().filter(file => file.path.endsWith(".png"));
+    for (const file of images.slice(0, Math.max(0, images.length - this.report.limits.maxImages))) omit(file, imageCountWarning);
     this.normalizeTaskEvidence();
     let bytes = this.serialize();
     while (this.report.storage.bytes > this.report.limits.maxBytes) {
-      const files = [...this.files().values()];
-      const protectedIds = this.protectedSnapshots();
-      const protectedTrees = new Set(this.report.snapshots.filter(item => protectedIds.has(item.snapshotId)).map(item => item.tree?.path).filter(Boolean));
-      const file = files.find(item => item.path.endsWith(".txt")) ?? files.find(item => !protectedTrees.has(item.path)) ?? files[0];
+      const file = this.evictionOrder()[0];
       if (!file) throw new Error("步骤元数据超过证据总容量上限，未写入报告。");
-      this.omit(file.path, "证据总容量超过上限，未保留该附件。");
+      omit(file, capacityWarning);
       this.normalizeTaskEvidence();
       bytes = this.serialize();
     }
@@ -312,9 +474,9 @@ export class DebugEvidenceWriter {
     const uncleared = [...this.owned.keys()].some(path => !this.committed.has(path));
     // An unsuccessful cleanup must not accumulate a new set of orphan files on every step.
     if (uncleared) for (const path of assets.keys()) if (!this.committed.has(path)) this.omit(path, "旧附件清理未完成，未继续写入新附件。");
-    this.fit();
-    const taskTrees = new Set([...this.report.steps.flatMap(item => item.step.taskCheck ? [item.step.taskCheck] : []),
-      ...(this.report.task?.checks ?? [])].flatMap(check => [check.observations.first?.snapshotId, check.observations.second?.snapshotId])
+    this.fit(errors, record);
+    const taskTrees = new Set([...this.protectedSnapshots(), ...[...this.report.steps.flatMap(item => item.step.taskCheck ? [item.step.taskCheck] : []),
+      ...(this.report.task?.checks ?? [])].flatMap(check => [check.observations.first?.snapshotId, check.observations.second?.snapshotId])]
       .map(id => this.report.snapshots.find(item => item.snapshotId === id)?.tree?.path).filter(Boolean));
     try {
       for (const [relative, file] of this.files()) {
@@ -341,7 +503,7 @@ export class DebugEvidenceWriter {
           }
         }
       }
-      atomicWrite(this.path, this.fit());
+      atomicWrite(this.path, this.fit(errors, record));
       this.committed = new Set(this.files().keys());
     } catch (error) {
       this.cleanup(this.committed, errors);
@@ -351,10 +513,11 @@ export class DebugEvidenceWriter {
     this.cleanup(this.committed, errors);
     // Cleanup errors are secondary recording errors, never an action failure.
     if (record && appendDebugRecordingErrors(record.step, errors)) {
-      atomicWrite(this.path, this.fit());
+      atomicWrite(this.path, this.fit(errors, record));
       this.committed = new Set(this.files().keys());
       this.cleanup(this.committed, errors);
     }
+    this.reportSaved = true;
   }
 
   private cleanup(keep: Set<string>, errors: DebugStepError[]) {

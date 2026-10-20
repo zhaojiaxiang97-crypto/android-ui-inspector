@@ -22,7 +22,6 @@
   overflow: auto;
 }
 .home-launchpad { flex: 0 0 auto; width: min(460px, 100%); text-align: center; }
-.home-launch-heading { margin: 0 0 24px; color: var(--ref-muted); font-size: 13px; font-weight: 400; letter-spacing: 0; }
 .home-launchpad .home-center-state { width: 100%; min-height: 0; justify-content: flex-start; }
 .home-target-preview {
   position: relative;
@@ -53,8 +52,7 @@
 .state-error .home-empty-symbol, .state-adb-missing .home-empty-symbol { color: var(--ref-danger); }
 .state-unauthorized .home-empty-symbol, .state-offline .home-empty-symbol { color: var(--ref-orange); }
 .home-launchpad .home-center-state h2 { max-width: 360px; width: 100%; font-size: 19px; line-height: 1.4; font-weight: 500; letter-spacing: 0; }
-.home-launchpad .home-device-platform { margin: 4px 0 0; font-size: 12px; }
-.home-launchpad .home-connection-status { gap: 6px; margin-top: 10px; font-size: 12px; }
+.home-launchpad .home-connection-status { gap: 6px; margin-top: 0; font-size: 12px; }
 .home-launchpad .home-status-dot { width: 6px; height: 6px; box-shadow: none; }
 .home-launchpad .home-empty-description { max-width: 330px; margin-top: 10px; font-size: 13px; line-height: 1.7; }
 .home-start-hint { margin: 24px 0 0; color: var(--ref-muted); font-size: 12px; }
@@ -80,7 +78,6 @@
 .home-launchpad .home-primary-action:hover:not(:disabled) { border-color: var(--ref-blue); background: var(--ref-selected-bg); box-shadow: none; }
 .home-launchpad .home-secondary-action { min-height: 28px; margin: 0; padding: 4px 10px; color: var(--ref-text-soft); font-size: 12px; font-weight: 400; }
 .home-launchpad .home-secondary-action:hover:not(:disabled) { border-radius: 4px; background: var(--ref-control-hover); }
-.home-launchpad .home-check-time { margin: 12px 0 0; color: var(--ref-muted); font-size: 11px; }
 .home-connection-help { margin: 20px auto 0; color: var(--ref-muted); font-size: 12px; }
 .home-connection-help > summary { display: flex; justify-content: center; align-items: center; gap: 6px; width: fit-content; margin: auto; padding: 4px 8px; list-style: none; cursor: pointer; }
 .home-connection-help > summary::-webkit-details-marker { display: none; }
@@ -109,7 +106,6 @@
 .home-launchpad :is(button, summary):focus-visible { outline: 2px solid var(--ref-blue); outline-offset: 3px; }
 @media (max-height: 740px) {
   .app-shell:not(.inspection-active) .home-view { padding-block: 20px; }
-  .home-launch-heading { margin-bottom: 16px; }
   .home-target-preview { width: 126px; height: 190px; margin-bottom: 14px; }
   .home-start-hint { margin-top: 18px; }
   .home-connection-help { margin-top: 14px; }
@@ -121,8 +117,6 @@
 @media (max-height: 580px) {
   .app-shell:not(.inspection-active) .home-view { padding-block: 16px; }
   .home-target-preview { width: 100px; height: 150px; margin-bottom: 10px; }
-  .home-launch-heading { margin-bottom: 12px; }
   .home-start-hint { margin-top: 14px; }
-  .home-launchpad .home-check-time { margin-top: 8px; }
   .home-connection-help { margin-top: 10px; }
 }

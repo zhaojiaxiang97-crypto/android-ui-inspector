@@ -41,6 +41,7 @@
     "benchmark:tree": "bun run scripts/tree-benchmark.ts",
     "benchmark:layers": "bun run scripts/layer-benchmark.ts",
     "benchmark:render": "bun run scripts/render-benchmark.mjs",
+    "regression:ui": "bun scripts/automation-ui-regression.ts",
     "preview": "vite preview",
     "start": "node scripts/start-electron.cjs",
     "package": "bun run build && electron-builder --publish never",

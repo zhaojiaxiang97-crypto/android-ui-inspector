@@ -111,6 +111,54 @@ export function debugViewTree(section: string, target: ForegroundTarget): UiNode
   return root;
 }
 
+function applyTextStyle(attributes: Record<string, string>, values: Record<string, string>) {
+  const fields = {
+    "text-size-px": ["text:textSize", "text:getTextSize()"],
+    "text-typeface-style": ["text:typefaceStyle", "text:getTypefaceStyle()"],
+    "text-color-argb": ["text:curTextColor", "text:mCurTextColor"],
+    "text-gravity": ["text:gravity", "text:mGravity"],
+    "text-ellipsize": ["text:ellipsize", "getEllipsize()"],
+    "text-alignment": ["text:textAlignment", "text:getTextAlignment()"],
+    "text-direction": ["text:textDirection", "text:getTextDirection()"],
+    "layout-direction": ["layout:layoutDirection", "layout:getLayoutDirection()"],
+  };
+  type Field = keyof typeof fields;
+  const raw = (key: Field) => fields[key].map(name => values[name]).find(value => value !== undefined);
+  const numeric = (key: Field) => {
+    const value = raw(key);
+    return value !== undefined && value.trim() !== "" && Number.isFinite(Number(value)) ? Number(value) : null;
+  };
+  // These values belong to this tree read; do not retain an older style when
+  // the framework stops exporting it or returns an invalid optional property.
+  for (const key of [...Object.keys(fields), "text-style-source"]) delete attributes[key];
+  const size = numeric("text-size-px");
+  if (size !== null && size >= 0) attributes["text-size-px"] = String(size);
+  const style = raw("text-typeface-style");
+  const styleNames: Record<string, number> = { NORMAL: 0, BOLD: 1, ITALIC: 2, BOLD_ITALIC: 3 };
+  const styleValue = values["text:typefaceStyle"] === undefined && style !== undefined && Object.prototype.hasOwnProperty.call(styleNames, style)
+    ? styleNames[style] : numeric("text-typeface-style");
+  if (styleValue !== null && Number.isInteger(styleValue) && styleValue >= 0 && styleValue <= 3)
+    attributes["text-typeface-style"] = String(styleValue);
+  const color = numeric("text-color-argb");
+  if (color !== null && Number.isInteger(color) && color >= -0x80000000 && color <= 0xffffffff)
+    attributes["text-color-argb"] = `#${(color >>> 0).toString(16).padStart(8, "0").toUpperCase()}`;
+  const gravity = numeric("text-gravity");
+  if (gravity !== null && Number.isInteger(gravity) && gravity >= 0 && gravity <= 0x7fffffff)
+    attributes["text-gravity"] = String(gravity);
+  const ellipsize = raw("text-ellipsize");
+  // V2 encodes a null String as ""; legacy reflection writes "null".
+  // An absent field is different from explicitly disabled ellipsizing.
+  if (values["text:ellipsize"] === "" || values["text:ellipsize"] === undefined && ellipsize === "null") attributes["text-ellipsize"] = "NONE";
+  else if (ellipsize !== undefined && ["START", "MIDDLE", "END", "MARQUEE", "END_SMALL"].includes(ellipsize))
+    attributes["text-ellipsize"] = ellipsize;
+  const hasTextStyle = ["text-size-px", "text-typeface-style", "text-color-argb", "text-gravity", "text-ellipsize"].some(key => attributes[key] !== undefined);
+  if (hasTextStyle) attributes["text-style-source"] = "view-debug";
+  for (const [key, max] of [["text-alignment", 6], ["text-direction", 7], ["layout-direction", 3]] as const) {
+    const value = numeric(key);
+    if (value !== null && Number.isInteger(value) && value >= 0 && value <= max) attributes[key] = String(value);
+  }
+}
+
 export function applyViewProperties(root: UiNode, dump: string, restoreHierarchy = false) {
   const properties = new Map<string, Record<string, string>>();
   const records: Array<{ ref: string; indent: number }> = [];
@@ -185,6 +233,7 @@ export function applyViewProperties(root: UiNode, dump: string, restoreHierarchy
     node.attributes = { ...node.attributes, "effective-alpha": String(effectiveAlpha) };
     node.visibleToUser = visible && (values?.["getVisibility()"] !== undefined ? ["VISIBLE", "0"].includes(values["getVisibility()"]) : node.visibleToUser) && effectiveAlpha > 0;
     if (values) {
+      applyTextStyle(node.attributes, values);
       if (values["geometry-error"]) node.attributes["geometry-error"] = values["geometry-error"];
       node.attributes["alpha"] = String(ownAlpha);
       const layerName = values["mID"];

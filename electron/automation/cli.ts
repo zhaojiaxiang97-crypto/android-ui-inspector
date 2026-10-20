@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, writeFileSync } from "node:fs";
+import { constants, existsSync, writeFileSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join, resolve } from "node:path";
@@ -11,6 +11,8 @@ import { createInspectorMcpServer } from "./mcp-server";
 import { probeAdb } from "../device/probe";
 import { version } from "../../package.json";
 import { debugTaskDefinition } from "../../shared/debug-task";
+import { debugToolSchemas, getUiStepInput, performUiStepInput, resumeUiStepInput, scrollUntilInput } from "../../shared/debug-protocol";
+import { debugPlanDefinition } from "../../shared/debug-plan";
 
 const selectors = ["resource-id", "text", "desc", "class"];
 const commands: Record<string, { args: number; options: string[]; usage: string }> = {
@@ -18,19 +20,30 @@ const commands: Record<string, { args: number; options: string[]; usage: string 
   diagnose: { args: 0, options: ["serial", "package", "mode", "backend", "timeout-ms"], usage: "--serial SERIAL [--package APP] [--mode fast|deep] [--backend uiautomator|accessibility-helper]  只读连接与采集诊断" },
   devices: { args: 0, options: [], usage: "列出 ADB 设备，不操作手机" },
   attach: { args: 0, options: [], usage: "读取已授权会话；不会自行授权" },
+  "plan-start": { args: 0, options: ["session", "run-id", "plan-file"], usage: "--session ID --run-id ID --plan-file FILE.json  提交操作计划，立即返回当前状态" },
+  "plan-status": { args: 0, options: ["session", "run-id"], usage: "--session ID --run-id ID  查询原计划，不采集或重发输入" },
+  "plan-cancel": { args: 0, options: ["session", "run-id"], usage: "--session ID --run-id ID  取消计划后续步骤，保留本次授权" },
   "task-define": { args: 0, options: ["session", "task-file"], usage: "--session ID --task-file FILE.json  固定任务目标与验收条件，不操作手机" },
   "task-check": { args: 0, options: ["session", "task-id", "checkpoint"], usage: "--session ID --task-id ID [--checkpoint 阶段ID]  两次只读观察验收；省略阶段则验最终条件" },
   snapshot: { args: 0, options: [], usage: "读取当前共享快照摘要" },
   capture: { args: 0, options: ["session", "mode", "backend"], usage: "--session ID [--mode fast|deep] [--backend uiautomator|accessibility-helper]  实时采集" },
+  step: { args: 0, options: ["session", "request-id", "backend", "action", ...selectors, "within-json", "clickable", "scrollable", "target",
+    "direction", "distance", "duration-ms", "expect-json", "timeout-ms", "visual-snapshot-id", "visual-confirmation", "input-json"],
+    usage: "--session ID --request-id ID --action tap|back|scroll [--backend uiautomator|accessibility-helper] [--text TEXT] [--expect-json JSON]  唯一定位、执行一次并验证" },
+  "scroll-until": { args: 0, options: ["session", "request-id", "backend", ...selectors, "within-json", "direction", "until-json", "loading-json", "empty-json",
+    "max-scrolls", "input-method", "distance", "duration-ms", "timeout-ms", "visual-snapshot-id", "visual-confirmation", "input-json"],
+    usage: "--session ID --request-id ID --resource-id LIST --direction down --until-json JSON [--backend uiautomator|accessibility-helper] [--max-scrolls N]  有界滚动并确认目标或终点" },
+  "get-step": { args: 0, options: ["session", "request-id"], usage: "--session ID --request-id ID  查询复合步骤，不发送输入" },
+  "resume-step": { args: 0, options: ["session", "request-id", "timeout-ms"], usage: "--session ID --request-id ID [--timeout-ms N]  只恢复观察，不重复输入" },
   tree: { args: 0, options: ["snapshot", "node", "depth", "offset", "limit", "format"], usage: "[--depth N] [--node ID] [--format text]  查看层级" },
   find: { args: 1, options: ["snapshot", "by", ...selectors, "visible", "enabled", "clickable", "scrollable", "offset", "limit"], usage: "QUERY [--by all|class|id|text|desc]  搜索控件" },
   attributes: { args: 0, options: ["snapshot", "node", "offset", "attribute-offset", "limit"], usage: "--node ID  查看控件属性、父子关系" },
   screenshot: { args: 0, options: ["snapshot", "node", "out"], usage: "[--node ID] --out FILE  导出屏幕或独立图层" },
   measure: { args: 2, options: ["snapshot"], usage: "FROM_NODE TO_NODE  测量原始布局外框间距" },
-  tap: { args: 0, options: ["session", "snapshot", "node", "target"], usage: "--session ID --snapshot ID --node ID [--target self|clickable-parent]  点击一次" },
-  scroll: { args: 0, options: ["session", "snapshot", "node", "direction", "distance", "duration-ms"], usage: "--session ID --snapshot ID --node ID --direction down|up|left|right" },
+  tap: { args: 0, options: ["session", "snapshot", "node", "target", "visual-confirm"], usage: "--session ID --snapshot ID --node ID [--target self|clickable-parent] [--visual-confirm 描述]  点击一次；确认须基于该快照整屏" },
+  scroll: { args: 0, options: ["session", "snapshot", "node", "direction", "distance", "duration-ms", "visual-confirm"], usage: "--session ID --snapshot ID --node ID --direction down|up|left|right [--visual-confirm 描述]  确认须基于该快照整屏" },
   back: { args: 0, options: ["session", "snapshot"], usage: "--session ID --snapshot ID  返回一次，可能丢弃编辑" },
-  wait: { args: 0, options: ["session", ...selectors, "state", "timeout-ms"], usage: "--session ID --text TEXT [--state visible|absent|enabled|disabled]" },
+  wait: { args: 0, options: ["session", "backend", ...selectors, "state", "visibility", "timeout-ms"], usage: "--session ID --text TEXT [--backend uiautomator|accessibility-helper] [--state visible|absent|enabled|disabled] [--visibility partial（仅 Helper visible）]" },
   stop: { args: 0, options: ["session"], usage: "--session ID  撤销自动调试授权" },
 };
 const globals = ["snapshot-file", "pretty", "help", "version"];
@@ -51,6 +64,23 @@ async function readTaskDefinition(file: string) {
     }
     if (count !== info.size) throw new Error("任务定义读取期间变化，未定义任务。");
     return debugTaskDefinition.parse(JSON.parse(bytes.subarray(0, count).toString("utf8")));
+  } finally { await handle.close(); }
+}
+
+async function readPlanDefinition(file: string) {
+  const handle = await open(resolve(file), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > 12000) throw new Error("操作计划必须是12000字节以内的JSON普通文件。");
+    const bytes = Buffer.alloc(info.size + 1);
+    let count = 0;
+    while (count < bytes.length) {
+      const next = await handle.read(bytes, count, bytes.length - count, count);
+      if (!next.bytesRead) break;
+      count += next.bytesRead;
+    }
+    if (count !== info.size) throw new Error("操作计划读取期间变化，未提交计划。");
+    return debugPlanDefinition.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, count))));
   } finally { await handle.close(); }
 }
 
@@ -108,6 +138,20 @@ tree：--depth 0–200（默认 200），--offset 0–20000，--limit 1–20000�
 find / attributes：--offset N --limit 1–50；attributes 另有 --attribute-offset N。
 find：--resource-id/--text/--desc/--class 精确匹配；--visible/--enabled/--clickable/--scrollable true|false。
 scroll：--distance 0.1–0.8 --duration-ms 150–1000；wait：--timeout-ms 1000–30000。
+step：目标使用 --resource-id/--text/--desc/--class 精确匹配；--within-json 为父级 selector；--clickable/--scrollable true|false 只筛选，不授予输入权限。
+step --action scroll 必须 --direction；--target clickable-parent 仅用于 tap。--expect-json 示例：'{"selector":{"text":"设置"},"state":"visible"}'。
+step：--timeout-ms 1000–60000（默认45000）；resume-step 默认30000。--input-json 可传完整输入，不能与其他步骤输入旗标混用。
+step 视觉确认须同时传 --visual-snapshot-id ID --visual-confirmation 描述，且已查看该快照整屏；返回操作不接受确认。
+scroll-until：selector 定位唯一滚动容器；--until-json 示例：'{"selector":{"text":"没有更多了"},"kind":"end_marker"}'。目标、--loading-json 和 --empty-json 均在容器内匹配。
+scroll-until：--max-scrolls 1–12（默认6），--timeout-ms 1000–120000（默认120000）；--distance/--duration-ms 与 scroll 一致，视觉确认只用于首个手势。
+scroll-until：--input-method accessibility 显式选择 Helper 无障碍滚动，仅支持有精确 ID/类型的竖直容器；省略为 gesture，失败不切换方式。
+scroll-until：until-json 可显式加 "reveal":"scroll"，在既有次数与时间内继续寻找被底栏挡住的目标；目前仅 Helper 向下滚动，容器和目标均需精确 resourceId/className。终点仍须完整露出并经双帧确认。
+scroll-until 连续两次观察确认目标或明确终点；无进展和空列表不算成功。resume-step 只恢复观察，不继续滚动。
+step/scroll-until 默认 --backend uiautomator；accessibility-helper 需手动配置且完整提供窗口、可见区域和无损截图证据。整个请求及 resume-step 固定原后端，失败不自动切换；旧 Helper 只读快照不能用于操作。
+同一 request-id 和参数只执行一次；响应丢失后用 get-step 或 resume-step，不生成新 ID 重发。step 未提供 expect 时不能宣称已验证。
+plan-start：--plan-file 是12000 UTF8字节以内的JSON；最多32步、10分钟，默认使用 uiautomator。提交后计划在桌面继续执行，不自动等待、重试或恢复中断计划。
+计划固定 run-id；重复提交相同定义只返回原状态，变更定义会拒绝。丢失回复时用 plan-status 查询原 run-id，不换ID重发。
+plan-cancel 只取消计划；stop 撤销整个授权。计划查询返回 status=passed 才表示声明条件通过，仍需查看报告证据。
 先在桌面‘文件 → MCP’共享快照或开启自动调试。attach 仅读取授权，不保存或延长会话。
 tap / scroll / back 必须显式传入最新 session 和 snapshot；失败或结果未知时不要盲目重试。
 task-define 在首次输入前固定本会话唯一目标；task-check 不输入，未通过或证据不足时stdout返回结果、退出码2。
@@ -138,7 +182,8 @@ stdout 为结果 JSON（tree --format text 除外）；失败输出 stderr JSON�
   const client = new Client({ name: "android-ui-cli", version });
   const [local, remote] = InMemoryTransport.createLinkedPair();
   const controller = new AbortController();
-  const interrupt = () => { process.exitCode = 130; controller.abort(new Error(["tap", "scroll", "back"].includes(command)
+  const interrupt = () => { process.exitCode = 130; controller.abort(new Error(command === "plan-start"
+    ? "连接已取消；桌面计划可能仍在执行，请用原 run-id 查询状态。" : ["tap", "scroll", "back", "step", "scroll-until"].includes(command)
     ? "命令已取消；操作可能已发出，不要盲目重试。" : "命令已取消。")); };
   process.once("SIGINT", interrupt);
   process.once("SIGTERM", interrupt);
@@ -154,9 +199,13 @@ stdout 为结果 JSON（tree --format text 除外）；失败输出 stderr JSON�
         }
         return result;
       } catch (error) {
+        if (name === "start_debug_plan") throw Object.assign(new Error("计划提交结果未确认；请查询原 run-id。"), { details: {
+          runId: input.runId, recoveryHint: "用 plan-status 查询原 run-id，不要换ID重新提交。", ...errorData(error) } });
         // A lost response is not proof that input was never sent. Preserve the desktop's state when available.
-        if (["tap_node", "scroll_node", "press_back"].includes(name)) {
-          throw Object.assign(new Error("操作失败；结果未知时不要盲目重试。"), { details: { dispatchState: "unknown", ...errorData(error) } });
+        if (["tap_node", "scroll_node", "press_back", "perform_ui_step", "scroll_until"].includes(name)) {
+          throw Object.assign(new Error("操作失败；结果未知时不要盲目重试。"), { details: { dispatchState: "unknown",
+            ...(["perform_ui_step", "scroll_until"].includes(name) ? { requestId: input.requestId, recoveryHint: "用 get-step 查询同一请求，或 resume-step 只恢复观察；不要换 request-id 重发。" } : {}),
+            ...errorData(error) } });
         }
         throw error;
       }
@@ -164,7 +213,71 @@ stdout 为结果 JSON（tree --format text 除外）；失败输出 stderr JSON�
     const data = async (name: string, input: Record<string, unknown> = {}) => (await call(name, input)).structuredContent!;
     const current = async () => str("snapshot") ?? (await data("get_snapshot")).snapshotId;
     const selector = Object.fromEntries([["resourceId", str("resource-id")], ["text", str("text")], ["contentDesc", str("desc")], ["className", str("class")]].filter(([, value]) => value !== undefined));
+    const jsonFlag = (key: string) => {
+      const value = str(key);
+      if (value === undefined) return undefined;
+      if (Buffer.byteLength(value) > 16 * 1024) throw new Error(`--${key} 超过16KiB。`);
+      try { return JSON.parse(value) as unknown; } catch { throw new Error(`--${key} 必须为有效 JSON。`); }
+    };
     switch (command) {
+      case "plan-start": {
+        const input = debugToolSchemas.start_debug_plan.parse({ sessionId: required("session"), runId: required("run-id"),
+          definition: await readPlanDefinition(required("plan-file")) });
+        output(await data("start_debug_plan", input)); break;
+      }
+      case "plan-status":
+      case "plan-cancel": {
+        const name = command === "plan-status" ? "get_debug_plan" : "cancel_debug_plan";
+        output(await data(name, debugToolSchemas[name].parse({ sessionId: required("session"), runId: required("run-id") }))); break;
+      }
+      case "scroll-until": {
+        let input: unknown;
+        if (str("input-json") !== undefined) {
+          if (spec.options.some(key => key !== "input-json" && seen.has(key))) throw new Error("--input-json 不能与其他步骤输入旗标混用。");
+          input = jsonFlag("input-json");
+        } else {
+          required("until-json");
+          input = {
+            sessionId: required("session"), requestId: required("request-id"), backend: str("backend"),
+            target: { selector, within: jsonFlag("within-json") }, direction: required("direction"),
+            until: jsonFlag("until-json"), loading: jsonFlag("loading-json"), empty: jsonFlag("empty-json"),
+            maxScrolls: number("max-scrolls"), inputMethod: str("input-method"), timeoutMs: number("timeout-ms"), distance: number("distance"), durationMs: number("duration-ms"),
+            ...(["visual-snapshot-id", "visual-confirmation"].some(key => seen.has(key))
+              ? { visualConfirmation: { snapshotId: required("visual-snapshot-id"), description: required("visual-confirmation") } } : {}),
+          };
+        }
+        output(await data("scroll_until", scrollUntilInput.parse(input)));
+        break;
+      }
+      case "step": {
+        let input: unknown;
+        if (str("input-json") !== undefined) {
+          if (spec.options.some(key => key !== "input-json" && seen.has(key))) throw new Error("--input-json 不能与其他步骤输入旗标混用。");
+          input = jsonFlag("input-json");
+        } else {
+          const kind = required("action");
+          if (kind !== "scroll" && ["direction", "distance", "duration-ms"].some(key => seen.has(key)))
+            throw new Error("--direction/--distance/--duration-ms 仅用于滚动。");
+          const hasTarget = Object.keys(selector).length > 0 || ["within-json", "clickable", "scrollable", "target"].some(key => seen.has(key));
+          input = {
+            sessionId: required("session"), requestId: required("request-id"), backend: str("backend"),
+            ...(hasTarget ? { target: { selector, within: jsonFlag("within-json"), clickable: boolean("clickable"), scrollable: boolean("scrollable"), target: str("target") } } : {}),
+            action: kind === "scroll" ? { kind, direction: required("direction"), distance: number("distance"), durationMs: number("duration-ms") } : { kind },
+            expect: jsonFlag("expect-json"), timeoutMs: number("timeout-ms"),
+            ...(["visual-snapshot-id", "visual-confirmation"].some(key => seen.has(key))
+              ? { visualConfirmation: { snapshotId: required("visual-snapshot-id"), description: required("visual-confirmation") } } : {}),
+          };
+        }
+        output(await data("perform_ui_step", performUiStepInput.parse(input)));
+        break;
+      }
+      case "get-step":
+      case "resume-step": {
+        const input = { sessionId: required("session"), requestId: required("request-id") };
+        output(command === "get-step" ? await data("get_ui_step", getUiStepInput.parse(input))
+          : await data("resume_ui_step", resumeUiStepInput.parse({ ...input, timeoutMs: number("timeout-ms") })));
+        break;
+      }
       case "diagnose": {
         const result = await data("diagnose_connection", { serial: required("serial"), packageName: str("package"),
           captureMode: str("mode"), backend: str("backend"), timeoutMs: number("timeout-ms") });
@@ -245,10 +358,11 @@ stdout 为结果 JSON（tree --format text 除外）；失败输出 stderr JSON�
         const input: Record<string, unknown> = { sessionId };
         if (["tap", "scroll", "back"].includes(command)) input.snapshotId = required("snapshot");
         if (["tap", "scroll"].includes(command)) input.nodeId = required("node");
+        if (["tap", "scroll"].includes(command) && str("visual-confirm") !== undefined) input.visualConfirmation = { description: str("visual-confirm") };
         if (command === "tap") input.target = str("target");
         if (command === "capture") Object.assign(input, { mode: str("mode"), backend: str("backend") });
         if (command === "scroll") Object.assign(input, { direction: required("direction"), distance: number("distance"), durationMs: number("duration-ms") });
-        if (command === "wait") Object.assign(input, { selector, state: str("state"), timeoutMs: number("timeout-ms") });
+        if (command === "wait") Object.assign(input, { selector, state: str("state"), visibility: str("visibility"), timeoutMs: number("timeout-ms"), backend: str("backend") });
         const tool = { capture: "capture_ui", tap: "tap_node", scroll: "scroll_node", back: "press_back", wait: "wait_for_ui", stop: "stop_debug_session" }[command]!;
         output(await data(tool, input));
       }

@@ -106,7 +106,7 @@ async function cancelThroughClient() {
   const session = new DebugSession({ serial, packageName, snapshotPath: path, directory,
     observe: async (...args) => {
       args[3]!.addEventListener("abort", () => { requestSignalAborted = true; }, { once: true });
-      return observeDebugApp(provider, ...args);
+      return observeDebugApp(provider, args[0], args[1], args[2], args[3], args[4], "standard", args[5]);
     },
     input: async () => { inputCalls++; throw Error("Fixture does not allow device input"); },
     onEvent: event => { if (event.snapshot) captures++; },

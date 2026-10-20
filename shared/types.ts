@@ -73,8 +73,14 @@ export const mcpStopReasons = {
 export type McpStopSource = keyof typeof mcpStopReasons;
 
 export type DebugInputEvidence = {
+  transport?: "accessibility-helper";
+  helperInput?: {
+    dispatchState: "not_sent" | "unknown" | "sent";
+    requestId?: string;
+    receipt?: import("./helper-input").HelperInputReply;
+  };
   classification: "accepted" | "permission-denied" | "device-unavailable" | "invalid-command" | "command-failed"
-    | "unexpected-output" | "cancelled" | "timeout" | "output-limit" | "spawn-failed" | "unconfirmed-exit";
+    | "unexpected-output" | "cancelled" | "timeout" | "output-limit" | "spawn-failed" | "unconfirmed-exit" | "injection-failed";
   spawned: boolean;
   closed: boolean;
   exitCode: number | null;
@@ -85,11 +91,19 @@ export type DebugInputEvidence = {
   stderr: string;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
+  systemInjection?: {
+    status: "rejected" | "not_observed" | "unavailable";
+    remotePid?: number;
+    systemServerPid?: number;
+    deviceStartedAt?: number;
+    deviceFinishedAt?: number;
+  };
 };
 
 export type DebugInputAction =
   | { kind: "tap"; x: number; y: number }
   | { kind: "swipe"; fromX: number; fromY: number; toX: number; toY: number; durationMs: number }
+  | { kind: "scroll"; direction: "up" | "down" }
   | { kind: "back" };
 
 export type DebugStepError = {
@@ -97,6 +111,8 @@ export type DebugStepError = {
   code: string;
   phase: "capture" | "locate" | "input" | "verify" | "recording";
   message: string;
+  helperDiagnostics?: import("./helper-observation-diagnostics").HelperObservationDiagnostics;
+  helperRecoveryDiagnostics?: import("./helper-recovery-diagnostics").HelperRecoveryDiagnostics;
 };
 
 export type DebugStep = {
@@ -110,9 +126,19 @@ export type DebugStep = {
   afterId?: string;
   dispatchState?: "not_sent" | "unknown" | "sent";
   inputEvidence?: DebugInputEvidence;
-  resolvedInput?: { action: DebugInputAction; frame: DisplayFrame; targetNodeId?: string; anchorNodeId?: string };
+  resolvedInput?: { action: DebugInputAction; frame: DisplayFrame; targetNodeId?: string; anchorNodeId?: string;
+    scrollRegion?: { viewport: Pick<UiBounds, "left" | "top" | "right" | "bottom">;
+      confirmationBounds: Pick<UiBounds, "left" | "top" | "right" | "bottom">;
+      excludedNavigationBounds: Pick<UiBounds, "left" | "top" | "right" | "bottom">[] };
+    visualConfirmation?: { referenceSnapshotId: string; currentSnapshotId: string; description: string;
+      region: { left: number; top: number; width: number; height: number }; sha256: string; overlapNodeIds: string[] } };
   error?: DebugStepError;
   recordingErrors?: DebugStepError[];
+  observationFailures?: { attempt: number; elapsedMs: number; willRetry: boolean; error: DebugStepError }[];
+  // Absent in legacy reports; missing measurements must not be displayed as zero.
+  timings?: import("./debug-timing").DebugTimings;
+  scrollTask?: import("./debug-scroll").DebugScrollProgress;
+  assertionConfirmation?: { first: import("./debug-task").DebugTaskObservation; second: import("./debug-task").DebugTaskObservation };
   verified?: boolean | null;
   taskCheck?: import("./debug-task").DebugTaskCheckResult;
 };
@@ -127,6 +153,7 @@ export type DebugSessionState = {
   evidencePath: string | null;
   reportPath?: string | null;
   task?: import("./debug-task").DebugTaskRecord | null;
+  plan?: import("./debug-plan").DebugPlanRun | null;
   stopReason?: string | null;
   startedAt?: string;
   revision?: number;
@@ -179,6 +206,8 @@ export type UiNode = {
   scrollable: boolean;
   selected: boolean;
   visibleToUser: boolean;
+  // Explicit source evidence; legacy nodes and missing/invalid flags remain unknown.
+  visibilityEvidence?: "visible" | "hidden" | "unknown";
   // Native transparent bitmap, or self-contained SVG rebuilt from measured QML style.
   layerImageDataUrl?: string;
   layerImageSize?: PixelSize;
@@ -186,7 +215,7 @@ export type UiNode = {
   layerCapturePlacement?: import("./capture-transform").LayerCapturePlacement;
   // Only set after checking the full bitmap; absent means not measured.
   layerImageEmpty?: boolean;
-  layerImageStatus?: "captured" | "style" | "unavailable" | "ambiguous" | "hidden" | "failed";
+  layerImageStatus?: "captured" | "style" | "unavailable" | "ambiguous" | "hidden" | "failed" | "deferred";
   // Explicit values from the SDK; absent means no registered business information.
   debugMetadata?: import("./debug-metadata").DebugMetadata;
   // Source-specific attributes not promoted to typed properties.
@@ -195,6 +224,8 @@ export type UiNode = {
 };
 
 export type ViewRefreshResult = { nodes: UiNode[]; failures: { id: string; message: string }[]; branch?: UiNode; timings?: Record<string, number> };
+export type LayerCaptureMode = "on-demand" | "full";
+export type LayerImageCaptureResult = { updates: LayerImageUpdate[]; failures: { id: string; message: string }[]; timings?: Record<string, number> };
 export type ViewStyleResult = { ref: string; capturedAtMillis: number; backgroundType: string | null; backgroundColor: string | null; textColor: string | null; textSizePx: number | null };
 
 export type FocusUnavailableReason = "null-focus" | "non-primary-display" | "missing-primary-display" | "missing-focus-field" | "ambiguous-focus-field" | "unrecognized-focus-format";
@@ -261,6 +292,7 @@ export type UiSnapshot = {
   hierarchyDumpMode?: HierarchyDumpMode;
   // Optional so snapshots saved before display checks remain readable.
   captureGeometry?: CaptureGeometry;
+  helperObservation?: import("./helper-observation").HelperObservationEvidence;
   captureTimings?: Record<string, number>;
   captureDurationMs?: number;
   // Bounded request-level diagnostics; never authorizes images or automation.
@@ -268,6 +300,8 @@ export type UiSnapshot = {
   captureReadiness?: CaptureReadiness;
   // Fast automation observes accessibility semantics, not independent render layers.
   captureMode?: "fast" | "deep";
+  // Standard Debug capture can defer independent images until a branch is viewed.
+  layerCapture?: LayerCaptureMode;
   // Already captured native subtree images; opening a saved snapshot never fetches them.
   layerGroupImages?: SnapshotGroupImage[];
 };
@@ -284,6 +318,7 @@ export type LayerImageUpdate = Pick<UiNode, "id" | "layerImageDataUrl" | "layerI
 export type InspectionPreview = { requestId: string } & (
   | { phase: "tree"; snapshot: UiSnapshot }
   | { phase: "layers"; updates: LayerImageUpdate[] }
+  | { phase: "screen"; screen: Pick<UiSnapshot, "screenshotDataUrl" | "captureGeometry"> }
 );
 
 export type ExportFormat = "snapshot" | "json" | "xml" | "png";
@@ -317,6 +352,7 @@ export type StoredSnapshot = {
 export type SnapshotStoreResult = {
   snapshots: StoredSnapshot[];
   error: string | null;
+  fileBytes?: number;
 };
 
 export type SaveSnapshotRequest = {

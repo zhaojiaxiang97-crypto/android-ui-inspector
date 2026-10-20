@@ -2,7 +2,7 @@ import { layerImagePresentation } from "./layer-image-provenance";
 import { nodeCaptureFacts, type NodeCaptureFacts } from "./node-capture-facts";
 import type { InspectionSource, UiNode } from "./types";
 
-export type NodePresentationCode = "user-hidden" | "device-hidden" | "waiting" | "missing" | "empty"
+export type NodePresentationCode = "user-hidden" | "device-hidden" | "waiting" | "deferred" | "missing" | "empty"
   | "failed" | "ambiguous" | "structural" | "captured" | "style" | "group" | "composite" | "outline";
 export type NodePresentationTone = "muted" | "info" | "warning" | "error";
 export type NodePresentationFact = {
@@ -50,6 +50,7 @@ function ownImageFact(capture: NodeCaptureFacts, context: NodePresentationContex
     return fact("captured", "已提供画面", "当前数据保存了自身画面，未标注采集方式或透明度。", "info");
   }
   if (capture.skipDraw) return fact("structural", "无自身绘制", "系统报告此控件跳过自身绘制；子层仍可能有画面。");
+  if (capture.status === "deferred") return fact("deferred", "待加载", "快速采集尚未读取此控件的独立画面。查看分支时按需加载，也可以完整采集。", "info");
   if (fast) return fact("missing", "无独立画面", "当前采集提供控件信息和整屏截图；画布可能裁剪截图展示叶片，裁剪图包含背景，不能作为独立画面。");
   if (context.waitingForImage) return fact("waiting", "等待画面", "本次采集仍在进行，尚未返回此控件的独立画面。", "info");
   if (capture.status === "captured") return fact("missing", "画面未提供", "记录为已采集，但当前数据未提供自身图片。", "warning");
@@ -81,7 +82,7 @@ export function nodePresentationStatus(node: UiNode, context: NodePresentationCo
   const knowsImageCapture = Boolean(capture.status || context.captureMode === "deep"
     || ["debug-view", "debug-qml", "debug-hybrid"].includes(source ?? ""));
   const badges: Partial<Record<NodePresentationCode, string>> = {
-    "user-hidden": "已隐藏", "device-hidden": "不可见", waiting: "等待", missing: "缺画面",
+    "user-hidden": "已隐藏", "device-hidden": "不可见", waiting: "等待", deferred: "待加载", missing: "缺画面",
     empty: "自身空图", failed: "失败", ambiguous: "匹配不明",
   };
   const badgeLabel = current.code === "missing" && (isFast || !knowsImageCapture) ? null : badges[current.code] ?? null;

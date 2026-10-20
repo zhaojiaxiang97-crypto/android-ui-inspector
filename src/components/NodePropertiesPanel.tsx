@@ -4,6 +4,9 @@ import { createPortal } from "react-dom";
 import type { InspectionSource, PixelSize, QmlGroupImage, UiNode, ViewStyleResult } from "../../shared/types";
 import { nodePresentationStatus } from "../../shared/node-presentation-status";
 import { nodeCaptureFacts } from "../../shared/node-capture-facts";
+import { nodeTextStyle } from "../../shared/node-text-style";
+import type { ViewFontResult } from "../../shared/view-font";
+import { nodeFontPresentation } from "../../shared/node-font-presentation";
 import { NodePresentationStatus } from "./NodePresentationStatus";
 import { nodeMetrics } from "../../shared/node-metrics";
 import { nodeDisplayLabel, nodeResourceName, nodeShortClass } from "../../shared/tree-utils";
@@ -54,6 +57,9 @@ type Props = {
   onRefreshBranch?: () => void;
   onRefreshList?: () => void;
   onReadStyle?: () => Promise<ViewStyleResult>;
+  onReadFont?: () => Promise<ViewFontResult>;
+  onCancelFont?: (sessionKey: string) => Promise<void>;
+  fontSessionKey?: string | null;
   refreshBusy?: boolean;
   refreshStatus?: string | null;
   revealRequest?: NodePropertiesRevealRequest | null;
@@ -160,7 +166,7 @@ function placeInspector(panel: HTMLElement, x: number, y: number) {
   panel.style.setProperty("--inspector-top", `${Math.max(minTop, Math.min(y, viewportHeight - Math.min(panel.offsetHeight, 160) - 16))}px`);
 }
 
-export function NodePropertiesPanel({ root, node, hiddenByUser = false, inspectionSource, captureMode, imageCapturePending = false, imageSessionKey, imageController, groupImage, screenshotSize, toolbarHost, onCopy, onCopyValue, copyStatus, onRefresh, onRefreshBranch, onRefreshList, onReadStyle, refreshBusy, refreshStatus, revealRequest, docked = false, colorAliases = DEFAULT_COLOR_ALIASES, inspectorGroups = DEFAULT_INSPECTOR_GROUPS, onSaveInspectorGroups, onOpenGroupPreferences, onNavigateNode, navigationDisabled, historyView, colorFormat = DEFAULT_COLOR_FORMAT, onColorFormatChange, colorFormatSaveError = false, referenceSnapshot, inspectorLayout, onInspectorLayoutChange, children }: Props) {
+export function NodePropertiesPanel({ root, node, hiddenByUser = false, inspectionSource, captureMode, imageCapturePending = false, imageSessionKey, imageController, groupImage, screenshotSize, toolbarHost, onCopy, onCopyValue, copyStatus, onRefresh, onRefreshBranch, onRefreshList, onReadStyle, onReadFont, onCancelFont, fontSessionKey, refreshBusy, refreshStatus, revealRequest, docked = false, colorAliases = DEFAULT_COLOR_ALIASES, inspectorGroups = DEFAULT_INSPECTOR_GROUPS, onSaveInspectorGroups, onOpenGroupPreferences, onNavigateNode, navigationDisabled, historyView, colorFormat = DEFAULT_COLOR_FORMAT, onColorFormatChange, colorFormatSaveError = false, referenceSnapshot, inspectorLayout, onInspectorLayoutChange, children }: Props) {
   const [visible, setVisible] = useState(true);
   const [reference, setReference] = useState<Reference | null>(null);
   const referencePinRef = useRef<HTMLButtonElement>(null);
@@ -181,6 +187,42 @@ export function NodePropertiesPanel({ root, node, hiddenByUser = false, inspecti
   const [styleError, setStyleError] = useState<string | null>(null);
   const [styleBusy, setStyleBusy] = useState(false);
   const styleRequest = useRef(0);
+  const canReadFont = Boolean(onReadFont && fontSessionKey && node.attributes?.["view-ref"]);
+  const fontScope = useMemo(() => ({}), [root, node, node.attributes?.["view-ref"], imageSessionKey, fontSessionKey, canReadFont]);
+  const currentFontScope = useRef(fontScope); currentFontScope.current = fontScope;
+  const [font, setFont] = useState<{ scope: object; value: ViewFontResult } | null>(null);
+  const [fontError, setFontError] = useState<{ scope: object; message: string } | null>(null);
+  const [fontPending, setFontPending] = useState<object | null>(null);
+  const activeFont = useRef<{ scope: object; session: string; cancel?: (session: string) => Promise<void> } | null>(null);
+  const fontCancellation = useRef(Promise.resolve());
+  function cancelActiveFont() {
+    const active = activeFont.current;
+    if (!active) return;
+    activeFont.current = null;
+    fontCancellation.current = fontCancellation.current.then(() => active.cancel?.(active.session)).catch(() => undefined);
+  }
+  useLayoutEffect(() => () => {
+    if (activeFont.current?.scope === fontScope) cancelActiveFont();
+  }, [fontScope]);
+  async function readFont() {
+    if (!canReadFont || !onReadFont || !fontSessionKey || styleBusy || activeFont.current?.scope === fontScope) return;
+    cancelActiveFont();
+    const active = { scope: fontScope, session: fontSessionKey, cancel: onCancelFont };
+    activeFont.current = active; setFontPending(fontScope); setFont(null); setFontError(null);
+    const current = () => activeFont.current === active && currentFontScope.current === fontScope;
+    try {
+      await fontCancellation.current;
+      if (!current()) return;
+      const result = await onReadFont();
+      if (!current()) return;
+      if (result.ref !== node.attributes?.["view-ref"] || !nodeFontPresentation(result)) throw new Error("控件字体结果已失效，请重新读取。");
+      setFont({ scope: fontScope, value: result });
+    } catch (error) {
+      if (current()) setFontError({ scope: fontScope, message: error instanceof Error ? error.message : "读取字体失败，请重试。" });
+    } finally {
+      if (activeFont.current === active) { activeFont.current = null; setFontPending(null); }
+    }
+  }
   const panelRef = useRef<HTMLElement>(null);
   const { persistInspectorLayout, layoutSaveError } = useFloatingInspectorLayout({ panelRef, floating, visible, collapsed,
     layout: inspectorLayout, onSave: onInspectorLayoutChange, onFloatingChange: setFloating });
@@ -300,6 +342,11 @@ export function NodePropertiesPanel({ root, node, hiddenByUser = false, inspecti
   const metrics = useMemo(() => nodeMetrics(root, node, screenshotSize), [node, root, screenshotSize]);
   const referenceDisabledReason = navigationDisabled || refreshBusy || imageCapturePending ? "正在更新快照，完成后可固定参考" : styleBusy ? "正在读取样式，完成后可固定参考" : null;
   const shownStyle = style?.root === root && style.value.ref === node.attributes?.["view-ref"] ? style.value : null;
+  const shownFont = font?.scope === fontScope && font.value.ref === node.attributes?.["view-ref"] ? font.value : null;
+  const fontProperties = useMemo(() => shownFont ? nodeFontPresentation(shownFont) : null, [shownFont]);
+  const shownFontError = fontError?.scope === fontScope ? fontError.message : null;
+  const fontBusy = fontPending === fontScope;
+  const snapshotTextStyle = useMemo(() => nodeTextStyle(node), [node]);
   const displayName = nodeDisplayLabel(node);
   const nameSource = node.attributes?.["debug-name"]?.trim() ? "Debug App 显式名称"
     : node.text?.trim() ? "控件文本" : node.contentDesc?.trim() ? "内容描述"
@@ -349,7 +396,7 @@ export function NodePropertiesPanel({ root, node, hiddenByUser = false, inspecti
   const imageStatus = presentationStatus.ownImage.detail;
   const imageLabel = presentationStatus.ownImage.label;
   const query = search.trim().toLocaleLowerCase();
-  const searchScope = useMemo(() => ({}), [root, node, imageSessionKey, query, shownStyle, colorAliases, colorFormat, visible, collapsed, presentationStatus]);
+  const searchScope = useMemo(() => ({}), [root, node, imageSessionKey, query, shownStyle, shownFont, colorAliases, colorFormat, visible, collapsed, presentationStatus]);
   const businessDisclosureScope = useMemo(() => ({}), [root, node, imageSessionKey]);
   const activeSearch = useRef({ scope: searchScope, active: visible && !collapsed });
   activeSearch.current = { scope: searchScope, active: visible && !collapsed };
@@ -358,7 +405,7 @@ export function NodePropertiesPanel({ root, node, hiddenByUser = false, inspecti
   const searchResults = useMemo(() => searchInspectorProperties(searchProperties, query, searchPageIndex), [searchProperties, query, searchPageIndex]);
   useLayoutEffect(() => {
     if (panelRef.current) setSearchProperties(indexInspectorProperties(panelRef.current));
-  }, [root, node, shownStyle, colorAliases, colorFormat, children, presentationStatus]);
+  }, [root, node, shownStyle, shownFont, canReadFont, colorAliases, colorFormat, children, presentationStatus]);
   useLayoutEffect(() => {
     const body = panelRef.current?.querySelector<HTMLElement>(".inspector-body");
     let frame = 0, timer: ReturnType<typeof setTimeout> | null = null;
@@ -404,6 +451,10 @@ export function NodePropertiesPanel({ root, node, hiddenByUser = false, inspecti
   const qmlColorTerms = hasQmlColors ? [node.attributes?.["background-color"], node.attributes?.["border-color"]]
     .flatMap(raw => colorTerms(raw, "qml-rgba")) : [];
   const liveColorTerms = [shownStyle?.backgroundColor, shownStyle?.textColor].flatMap(raw => colorTerms(raw, "android-argb"));
+  const textStyleTerms = ["文字样式 text style font", ...(canReadFont ? ["读取字体 font family weight italic Typeface"] : []),
+    ...(snapshotTextStyle ? [snapshotTextStyle.sourceLabel, ...snapshotTextStyle.properties.flatMap(property => [property.label, property.raw, property.display, property.terms,
+      ...(property.kind === "color" ? colorTerms(property.raw, "android-argb") : [])])] : []),
+    ...(fontProperties?.flatMap(property => [property.label, property.display, property.value, property.terms]) ?? [])];
   const matches = (...values: unknown[]) => values.some(value => String(value ?? "").toLocaleLowerCase().includes(query));
   const reveal = (...values: unknown[]) => query && matches(...values) ? query : null;
   const debugMetadata = node.debugMetadata;
@@ -421,7 +472,7 @@ export function NodePropertiesPanel({ root, node, hiddenByUser = false, inspecti
     relation: matches("关系 relation 父容器 parent 子节点 children 层级 depth index 序号", parentName, parent?.className, parent?.id, metrics.childCount, metrics.depth, node.index),
     layout: matches("布局 layout 位置 尺寸 geometry bounds 屏幕 px X Y W H width height 右 下 中心 面积 Z 父级内偏移 截图 padding 内边距 margin 外边距 border 边框 LayoutParams gravity weight 重力 权重 constraint 约束 对齐 父容器 偏置 宽高比", ...geometrySearchValues, ...ruleSearchValues, JSON.stringify(padding), marginLabel, node.attributes?.["sdk-layout-gravity"], node.attributes?.["sdk-layout-weight"], node.attributes?.["sdk-layout-rules"], borderWidth),
     interaction: hasSdkInteraction && matches("交互 点击 长按 上下文 点击监听器 按下 激活 SDK View", ...sdkInteractions.map(([, key]) => node.attributes?.[key])),
-    image: matches("画面 image 自身图 分支 原生整组图 本地重建 样式 style 文本色 字号 设备可见 visible 可点击 clickable 背景色 background-color 边框色 border-color 颜色 别名 Hex RGBA ARGB 透明度 圆角 corner-radii", imageStatus, imageLabel, presentationStatus.label, presentationStatus.detail, node.visibleToUser ? "是" : "否", node.clickable ? "是" : "否", shownStyle?.backgroundType, ...liveColorTerms, ...qmlColorTerms, imageFacts.source, imageFacts.error, ...["background-color", "border-color", "corner-radii"].map(key => node.attributes?.[key])),
+    image: matches("画面 image 自身图 分支 原生整组图 本地重建 样式 style 文本色 字号 设备可见 visible 可点击 clickable 背景色 background-color 边框色 border-color 颜色 别名 Hex RGBA ARGB 透明度 圆角 corner-radii", imageStatus, imageLabel, presentationStatus.label, presentationStatus.detail, node.visibleToUser ? "是" : "否", node.clickable ? "是" : "否", shownStyle?.backgroundType, ...liveColorTerms, ...qmlColorTerms, ...textStyleTerms, imageFacts.source, imageFacts.error, ...["background-color", "border-color", "corner-radii"].map(key => node.attributes?.[key])),
     raw: matches("原始属性 调试 定位 flags", node.id, flags, JSON.stringify(node.attributes)),
   };
   const groupMatches = (id: InspectorGroupId) => matching[id] || searchResults.groups.has(id);
@@ -721,7 +772,36 @@ export function NodePropertiesPanel({ root, node, hiddenByUser = false, inspecti
                 {node.attributes?.["image-refresh-error"] && <p className="inspector-image-note" data-inspector-label="上次刷新失败" data-inspector-value={node.attributes["image-refresh-error"]}>上次刷新失败，保留旧画面：{node.attributes["image-refresh-error"]}</p>}
                 {imageFacts.source && <p className="inspector-image-note" data-inspector-label="画面来源" data-inspector-value={imageFacts.source}>来源：{imageFacts.source}</p>}
                 <NodeImageActions root={root} node={node} groupImage={groupImage} sessionKey={imageSessionKey} controller={imageController} />
-                {onReadStyle && <button className="inspector-style-read" type="button" disabled={styleBusy} onClick={() => void readStyle()}>{styleBusy ? "正在读取样式…" : "读取实时样式"}</button>}
+                {(snapshotTextStyle || canReadFont || shownFont) && <InspectorGroup className="inspector-subsection inspector-text-style" disclosureId="text-style" searchKey={reveal(...textStyleTerms)}>
+                  <summary>文字样式</summary>
+                  {snapshotTextStyle && <><p className="inspector-image-note" data-inspector-label="文字样式来源" data-inspector-value={snapshotTextStyle.sourceLabel}>{snapshotTextStyle.sourceLabel}</p>
+                  <dl className="inspector-property-list">
+                    {snapshotTextStyle.properties.map(property => property.kind === "color"
+                      ? <ColorProperty key={property.key} label={property.label} raw={property.raw} encoding="android-argb" aliases={colorAliases}
+                        onCopy={onCopyValue} scope={searchScope} format={colorFormat} search={query} searchTerms={property.terms}
+                        revealRevision={searchReveal?.scope === searchScope ? searchReveal.revision : undefined} />
+                      : <div key={property.key} data-inspector-value={property.key === "text-size-px" ? property.display : property.raw} data-inspector-terms={property.terms}>
+                        <dt>{property.label}</dt>
+                        <dd className="inspector-text-style-value" title={property.raw}><LongTextValue label={property.label} value={property.display} />
+                          {copyField(property.label, property.key === "text-size-px" ? property.display : property.raw)}
+                        </dd>
+                      </div>)}
+                  </dl></>}
+                  {canReadFont && <button className="inspector-style-read inspector-font-read" type="button" disabled={fontBusy || styleBusy} onClick={() => void readFont()}>{fontBusy ? "正在读取字体…" : shownFontError ? "重试读取字体" : "读取字体"}</button>}
+                  {shownFontError && <p className="inspector-image-note inspector-font-error" role="status">{shownFontError}</p>}
+                  {shownFont && fontProperties && <div className="inspector-font-result">
+                    <p className="inspector-image-note" data-inspector-label="字体读取来源" data-inspector-value="当前绘制基础字体 · View Debug 实时读取" data-inspector-terms="font source JDWP TextPaint">当前绘制基础字体 · 实时读取 {new Date(shownFont.capturedAtMillis).toLocaleString()} · 不修改快照</p>
+                    <dl className="inspector-property-list">
+                      {fontProperties.map(property => <div key={property.key} data-font-property={property.key} data-inspector-value={property.value} data-inspector-terms={property.terms}>
+                        <dt>{property.label}</dt><dd className="inspector-text-style-value" title={property.value}>
+                          <LongTextValue label={property.label} value={property.display} />{copyField(property.label, property.value)}
+                        </dd>
+                      </div>)}
+                    </dl>
+                    <p className="inspector-image-note">这是当前绘制使用的基础字体；不代表具体字体文件或每个字符的回退字体。</p>
+                  </div>}
+                </InspectorGroup>}
+                {onReadStyle && <button className="inspector-style-read" type="button" disabled={styleBusy || fontBusy} onClick={() => void readStyle()}>{styleBusy ? "正在读取样式…" : "读取实时样式"}</button>}
                 {onRefresh && <button className="inspector-image-refresh" type="button" disabled={refreshBusy} onClick={onRefresh}>{refreshBusy ? "正在刷新…" : "刷新当前控件"}</button>}
                 {onRefreshBranch && <button className="inspector-image-refresh" type="button" disabled={refreshBusy} onClick={onRefreshBranch}>{refreshBusy ? "正在刷新…" : "刷新此分支"}</button>}
                 {onRefreshList && <button className="inspector-image-refresh" type="button" disabled={refreshBusy} onClick={onRefreshList}>{refreshBusy ? "正在刷新…" : "刷新可见项（分批）"}</button>}

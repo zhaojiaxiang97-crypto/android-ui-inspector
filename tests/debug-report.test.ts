@@ -275,7 +275,8 @@ test("aggregate tree reads stop at 16MiB even when each separate tree fits its f
     f.save();
     const result = await loadTestReport(f.file);
     assert.equal(result.debug!.snapshots.filter(item => item.snapshot).length, 8);
-    assert.match(result.debug!.snapshots[8].treeError!, /上限/);
+    assert.ok(result.debug!.snapshots.some(item => /上限/.test(item.treeError ?? "")));
+    assert.deepEqual(result.debug!.snapshots.map(item => item.evidence.snapshotId), f.report.snapshots.map(item => item.snapshotId));
   } finally { f.cleanup(); }
 });
 

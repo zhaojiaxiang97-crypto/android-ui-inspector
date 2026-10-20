@@ -126,17 +126,24 @@ try {
   }
 
   const captureOnce = async (requestId: string) => {
-    const outcome = await evaluateValue<{ error: string | null; nodeCount: number; inspectionSource?: string; warning?: string | null; captureTimings?: Record<string, number>; captureDurationMs?: number; debugProcessId?: string | null; diagnostics?: Record<string, string>; failedLayers?: { id: string; className: string; reason: string }[]; watchedLayers?: { resourceId: string; status: string; hasImage: boolean; inViewport: boolean }[]; coverage?: { captured: number; visible: number; failed: number }; geometryCoverage?: { verifiedRectangle: number; unsupportedContext: number; withoutEvidence: number }; previewTiming?: { treeReceivedMs: number | null; firstImageReceivedMs: number | null; imageBatches: number }; refreshTarget?: { id: string; ref: string; className: string; bounds: { left: number; top: number; right: number; bottom: number } } | null }>(connection,
+    const outcome = await evaluateValue<{ inspectionMode?: { mode?: string; revision?: number; busy?: boolean; error?: string }; error: string | null; nodeCount: number; inspectionSource?: string; warning?: string | null; captureTimings?: Record<string, number>; captureDurationMs?: number; debugProcessId?: string | null; diagnostics?: Record<string, string>; failedLayers?: { id: string; className: string; reason: string }[]; watchedLayers?: { resourceId: string; status: string; hasImage: boolean; inViewport: boolean }[]; coverage?: { captured: number; visible: number; failed: number }; geometryCoverage?: { verifiedRectangle: number; unsupportedContext: number; withoutEvidence: number }; previewTiming?: { treeReceivedMs: number | null; firstScreenReceivedMs: number | null; firstImageReceivedMs: number | null; imageBatches: number }; refreshTarget?: { id: string; ref: string; className: string; bounds: { left: number; top: number; right: number; bottom: number } } | null }>(connection,
       `(async () => {
         const progress = [];
+        let inspectionMode = { mode: "unknown", error: "Desktop mode API unavailable" };
+        try {
+          if (typeof window.electronApi.getInspectionMode === 'function') inspectionMode = await window.electronApi.getInspectionMode();
+        } catch (error) { inspectionMode = { mode: "unknown", error: String(error) }; }
         const started = performance.now();
-        const previewTiming = { treeReceivedMs: null, firstImageReceivedMs: null, imageBatches: 0 };
+        const previewTiming = { treeReceivedMs: null, firstScreenReceivedMs: null, firstImageReceivedMs: null, imageBatches: 0 };
         const unsubscribe = window.electronApi.onInspectionProgress((p) => {
           if (p.requestId === ${JSON.stringify(requestId)}) progress.push({ stage: p.stage, elapsedMs: p.elapsedMs, receivedMs: Math.round(performance.now() - started) });
         });
         const unsubscribePreview = window.electronApi.onInspectionPreview((p) => {
           if (p.requestId !== ${JSON.stringify(requestId)}) return;
           const elapsed = Math.round(performance.now() - started);
+          if (previewTiming.firstScreenReceivedMs === null
+              && (p.phase === 'screen' && p.screen?.screenshotDataUrl || p.phase === 'tree' && p.snapshot?.screenshotDataUrl))
+            previewTiming.firstScreenReceivedMs = elapsed;
           if (p.phase === 'tree' && previewTiming.treeReceivedMs === null) previewTiming.treeReceivedMs = elapsed;
           else if (p.phase === 'layers' && p.updates.some(u => Boolean(u.layerImageDataUrl))) {
             previewTiming.imageBatches++;
@@ -144,7 +151,7 @@ try {
           }
         });
         try {
-          const r = await window.electronApi.inspectDevice(${JSON.stringify(serial)}, ${JSON.stringify(requestId)}, undefined, ${singleAttempt});
+          const r = await window.electronApi.inspectDevice(${JSON.stringify(serial)}, ${JSON.stringify(requestId)}, undefined, ${singleAttempt}, ${reuseApp && singleAttempt ? JSON.stringify({ expectedPackage: appArgument }) : "undefined"});
           const counts = { captured: 0, visible: 0, failed: 0 };
           const geometryCoverage = { verifiedRectangle: 0, unsupportedContext: 0, withoutEvidence: 0 };
           const failedLayers = [];
@@ -196,8 +203,8 @@ try {
               if (node.children) pending.push(...node.children);
             }
           }
-          const diagnostics = Object.fromEntries(Object.entries(r.root?.attributes ?? {}).filter(([key]) => /^(?:fallback-source|ddms-batch-(?:bytes|layers|images)|jdwp-(?:setup-requests|thread-name-requests)|jdwp-fallback-(?:candidates|requested|skipped|field-requests|field-batches|sdk-type-avoided)|sdk-(?:first|visible|ref)-fallback|sdk-(?:tree-source|branch-geometry-version)|sdk-visible-interrupted|sdk-task-(?:queue-buckets|queue-max-ms|slow)|sdk-visible-failure-(?:phase|target|wait-ms|completed|phase-started-ms|phase-wait-ms|timing)|geometry-retry-(?:requested|recovered|error|mode|candidates|selected|selection|phase|recovery-phase|elapsed-ms|first-read-ms|capture-ms|verify-read-ms|total-ms|selection-ms|window-before-ms|geometry-ms|window-after-ms|stage-ms|commit-ms|publish-ms))$/.test(key)));
-          return { error: r.error, nodeCount: r.nodeCount, inspectionSource: r.inspectionSource, warning: r.warning, captureTimings: r.captureTimings, captureDurationMs: r.captureDurationMs, captureRequestDiagnostics: r.captureRequestDiagnostics, debugProcessId: (r.root?.attributes ?? {})["debug-process-id"] ?? null,
+          const diagnostics = Object.fromEntries(Object.entries(r.root?.attributes ?? {}).filter(([key]) => /^(?:fallback-source|ddms-batch-(?:bytes|layers|images)|jdwp-(?:setup-requests|bitmap-setup-requests|thread-name-requests)|jdwp-fallback-(?:candidates|requested|skipped|field-requests|field-batches|sdk-type-avoided)|sdk-(?:first|visible|ref)-fallback|sdk-(?:tree-source|branch-geometry-version)|sdk-visible-interrupted|sdk-task-(?:queue-buckets|queue-max-ms|slow)|sdk-visible-failure-(?:phase|target|wait-ms|completed|phase-started-ms|phase-wait-ms|timing)|geometry-retry-(?:requested|recovered|error|mode|candidates|selected|selection|phase|recovery-phase|elapsed-ms|first-read-ms|capture-ms|verify-read-ms|total-ms|selection-ms|window-before-ms|geometry-ms|window-after-ms|stage-ms|commit-ms|publish-ms))$/.test(key)));
+          return { inspectionMode, error: r.error, nodeCount: r.nodeCount, inspectionSource: r.inspectionSource, warning: r.warning, captureTimings: r.captureTimings, captureDurationMs: r.captureDurationMs, captureRequestDiagnostics: r.captureRequestDiagnostics, debugProcessId: (r.root?.attributes ?? {})["debug-process-id"] ?? null,
             processInstance: r.root?.attributes?.['sdk-process-instance'] ?? null, rootRef: r.root?.children?.[0]?.attributes?.['view-ref'] ?? null,
             diagnostics, coverage: counts, geometryCoverage, previewTiming, failedLayers, watchedLayers, progress, refreshTarget };
         } finally { unsubscribePreview(); unsubscribe(); }
@@ -209,6 +216,7 @@ try {
     if (outcome.value?.failedLayers?.length) console.log(`[failed-layers] ${JSON.stringify(outcome.value.failedLayers)}`);
     if (watchIds.length) console.log(`[watch-layers] ${JSON.stringify(outcome.value?.watchedLayers ?? [])}`);
     if (Object.keys(outcome.value?.diagnostics ?? {}).length) console.log(`[fallback] ${JSON.stringify(outcome.value?.diagnostics)}`);
+    console.log(`[inspection-mode] ${JSON.stringify(outcome.value?.inspectionMode ?? null)}`);
     // API delivery only: this probe does not mount the snapshot or measure GPU/screen presentation.
     console.log(`[preview-received] ${JSON.stringify(outcome.value?.previewTiming ?? null)}`);
     console.log(`[geometry-coverage] ${JSON.stringify(outcome.value?.geometryCoverage ?? null)}`);

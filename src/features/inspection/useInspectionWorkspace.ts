@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import type { InspectionPort } from "../../platform/desktop-services";
-import type { LayerFocus, LayerImageAction, LayerImageScopeOption, LayerMenuAction, LayerMenuMode, InspectionPreview, TreeDoubleClickAction, UiNode, UiSnapshot } from "../../../shared/types";
+import type { LayerCaptureMode, LayerFocus, LayerImageAction, LayerImageScopeOption, LayerMenuAction, LayerMenuMode, InspectionPreview, TreeDoubleClickAction, UiNode, UiSnapshot } from "../../../shared/types";
 import { flattenNodes, nodeDisplayLabel, mergeLayerImages, remapViewNodeIds } from "../../../shared/tree-utils";
 import { collapseTreeBranch, expandAncestors, indexTree } from "../../../shared/visible-tree";
 import { DEFAULT_TREE_COLLAPSE, initialTreeExpansion, MAX_COLLAPSE_PREFERENCE_LENGTH, parseTreeCollapsePreference, reconcileTreeExpansion, treeExpansionForBranch, treeExpansionToContent, TREE_COLLAPSE_STORAGE_KEY, type TreeCollapsePreference } from "../../../shared/tree-collapse";
@@ -14,6 +14,7 @@ import { manuallyHiddenAncestor, manuallyHiddenLayers } from "../../../shared/tr
 import { stepTreeSearchMatch, treeSearchMatches, type TreeSearchNavigation } from "../../../shared/tree-search-navigation";
 import { useInspectionSession } from "./useInspectionSession";
 import { useSnapshotAugmentation } from "./useSnapshotAugmentation";
+import { useDemandLayerImages } from "./useDemandLayerImages";
 import type { RefreshedDocument } from "./inspection-refresh";
 import { captureTreePresentation } from "./inspection-presentation";
 
@@ -81,9 +82,15 @@ export function useInspectionWorkspace(options: {
   const [treeSession, setTreeSession] = useState(0);
   useEffect(() => setWarningDismissed(false), [treeSession]);
   const [treeExpandedIds, setTreeExpandedIds] = useState<ReadonlySet<string>>(new Set());
+  const expandedRef = useRef(treeExpandedIds); expandedRef.current = treeExpandedIds;
+  const demandRequestRef = useRef<(nodeId: string) => void>(() => {});
+  const pendingDemandVisitRef = useRef<string | null>(null);
   const handleExpandedChange = useCallback((next: SetStateAction<ReadonlySet<string>>) => {
     captureTreeTouchedRef.current = true;
-    setTreeExpandedIds(next);
+    const previous = expandedRef.current, expanded = typeof next === "function" ? next(previous) : next;
+    expandedRef.current = expanded; setTreeExpandedIds(expanded);
+    const opened = [...expanded].find(id => !previous.has(id));
+    if (opened) demandRequestRef.current(opened);
   }, []);
   const [treeRevealRequest, setTreeRevealRequest] = useState(0);
   const currentSnapshotRef = useRef(snapshot);
@@ -102,7 +109,7 @@ export function useInspectionWorkspace(options: {
   const { cancelInspection } = session.controller;
   const augmentation = useSnapshotAugmentation({ api, snapshot, qmlLiveRequestId, viewLiveRequestId,
     isCapturing: session.controller.isCapturing,
-    refreshBlocked: () => Boolean(imageOptionsRef.current.refreshBlocked?.()),
+    refreshBlocked: () => demandImages.isBusy() || Boolean(imageOptionsRef.current.refreshBlocked?.()),
     document: {
       current: () => currentSnapshotRef.current,
       canRefresh: (node, source) => source === currentSnapshotRef.current && actionEpoch === nodeNavigationEpochRef.current && nodes.get(node.id) === node,
@@ -112,14 +119,44 @@ export function useInspectionWorkspace(options: {
   });
   const { viewRefreshingNodeId, viewRefreshStatus, cancelViewRefresh, refreshViewNode, refreshScopesForNode,
     groupRequestId, requestGroup, availableGroupImages, snapshotForStorage, dismissViewRefreshStatus } = augmentation;
+  const demandImages = useDemandLayerImages({ api, snapshot, requestId: viewLiveRequestId,
+    current: () => currentSnapshotRef.current,
+    blocked: () => session.controller.isCapturing() || augmentation.isRefreshing() || Boolean(imageOptionsRef.current.refreshBlocked?.()),
+    apply: (source, result) => {
+      if (currentSnapshotRef.current !== source || !source.root) return;
+      const root = mergeLayerImages(source.root, result.updates), next = { ...source, root, layerGroupImages: undefined };
+      augmentation.invalidateGroups();
+      // Image patches retain tree identity. Keep the focus return point on the
+      // same revision before an immediately following exit-focus action.
+      if (focusReturnRef.current?.root === source.root) focusReturnRef.current.root = root;
+      currentSnapshotRef.current = next; setSnapshot(next);
+      const updated = flattenNodes(root);
+      setSelectedNodeState(node => node ? updated.get(node.id) ?? null : null);
+    },
+  });
+  demandRequestRef.current = nodeId => {
+    if (session.controller.isCapturing()) {
+      if (currentSnapshotRef.current?.layerCapture === "on-demand") pendingDemandVisitRef.current = nodeId;
+      return;
+    }
+    demandImages.request(nodeId);
+  };
+  useEffect(() => {
+    if (inspectionLoading) return;
+    const nodeId = pendingDemandVisitRef.current; pendingDemandVisitRef.current = null;
+    if (nodeId && viewLiveRequestId) demandRequestRef.current(nodeId);
+  }, [inspectionLoading, viewLiveRequestId]);
   const invalidateLiveInspection = useCallback(() => {
     if (!session.controller.isConnected()) return;
     menuRequestRef.current++;
-    augmentation.invalidateLiveRequests(); session.controller.invalidateLiveRequests();
+    pendingDemandVisitRef.current = null;
+    demandImages.invalidate(); augmentation.invalidateLiveRequests(); session.controller.invalidateLiveRequests();
     setRequiresRecapture(Boolean(currentSnapshotRef.current?.root));
   }, [augmentation.invalidateLiveRequests, session.controller]);
   const resetPresentation = useCallback(() => {
     setRequiresRecapture(false);
+    pendingDemandVisitRef.current = null;
+    demandImages.invalidate();
     menuRequestRef.current++; nodeNavigationEpochRef.current++;
     augmentation.invalidateGroups(); focusReturnRef.current = null;
     setLayerFocus(null); setHiddenNodeIds(new Set()); setLayerMenuError(null);
@@ -145,6 +182,13 @@ export function useInspectionWorkspace(options: {
     if (present.restore) setTreeRestoreRequest(value => value + 1);
   }
   function previewCapture(event: InspectionPreview) {
+    if (event.phase === "screen") {
+      const current = currentSnapshotRef.current;
+      if (!current?.root) return;
+      const next = { ...current, screenshotDataUrl: event.screen.screenshotDataUrl, captureGeometry: event.screen.captureGeometry };
+      currentSnapshotRef.current = next; setSnapshot(next);
+      return;
+    }
     menuRequestRef.current++;
     if (event.phase === "layers") {
       const current = currentSnapshotRef.current;
@@ -162,6 +206,7 @@ export function useInspectionWorkspace(options: {
   }
   function completeCapture(result: UiSnapshot) {
     const previous = captureTreeRef.current; captureTreeRef.current = null;
+    currentSnapshotRef.current = result;
     setSnapshot(result); setTreeCapturedAt(result.root ? new Date().toISOString() : null); presentCaptureTree(result.root, previous);
   }
   function replaceRefreshedDocument(change: RefreshedDocument) {
@@ -212,6 +257,7 @@ export function useInspectionWorkspace(options: {
   }, []);
   const recordNodeVisit = useCallback((node: UiNode) => {
     captureTreeTouchedRef.current = true;
+    demandRequestRef.current(node.id);
     const before = rememberCurrentVisit(), next = visitNode(before, node);
     nodeHistoryRef.current = next; setNodeHistoryState(next);
     if (before.visits[before.cursor]?.node !== node && next.root) setHistoryViewRequest({
@@ -341,11 +387,11 @@ export function useInspectionWorkspace(options: {
     window.addEventListener("keydown", escape);
     return () => window.removeEventListener("keydown", escape);
   }, [layerFocus, exitLayerFocus]);
-  const inspectDevice = useCallback((serial: string, priorityViewRef?: string | null, diagnostic?: { expectedPackage: string; requestId: string }) => {
+  const inspectDevice = useCallback((serial: string, priorityViewRef?: string | null, diagnostic?: { expectedPackage: string; requestId: string }, layerCapture?: LayerCaptureMode) => {
     if (!session.controller.isConnected()) return Promise.resolve(null);
     if (diagnostic && session.controller.isCapturing()) return Promise.reject(new Error("已有采集正在运行。"));
     cancelViewRefresh();
-    return session.controller.inspectDevice(serial, priorityViewRef, diagnostic);
+    return session.controller.inspectDevice(serial, priorityViewRef, diagnostic, layerCapture);
   }, [cancelViewRefresh, session.controller]);
 
   const handleScreenshotSelect = useCallback((node: UiNode) => {
@@ -581,6 +627,7 @@ export function useInspectionWorkspace(options: {
     warningDismissed, setWarningDismissed, treeQuery, setTreeQuery, interactiveOnly, setInteractiveOnly,
     identifiedOnly, setIdentifiedOnly, treeSession, treeExpandedIds, setTreeExpandedIds: handleExpandedChange, treeRevealRequest,
     viewLiveRequestId, viewRefreshingNodeId, viewRefreshStatus, requiresRecapture, invalidateLiveInspection,
+    demandImages,
     dismissViewRefreshStatus, groupRequestId, requestGroup, refreshViewNode, refreshScopesForNode, snapshotForStorage, availableGroupImages,
     inspectDevice, cancelInspection, clearInspection, showSnapshot, clearTreeFilter, handleExpandedChange,
     handleScreenshotSelect, navigateToNode, layerFocus, hiddenNodeIds, layerMenuError, treeRestoreRequest,

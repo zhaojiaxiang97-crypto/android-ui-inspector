@@ -6,7 +6,7 @@ import { SceneGroupRuntime, type SceneGroups, type SceneResourceContext } from "
 import { SceneTextureRuntime, type TextureDemand } from "./scene-texture-runtime";
 import type { SceneRuntimePorts } from "./scene-runtime-ports";
 
-export type SceneDemandInput = { textures: ReadonlyMap<string, TextureDemand>; groups: ReadonlyMap<string, UiNode>; visibility: string; selectedId?: string; viewport: Rect };
+export type SceneDemandInput = { textures: ReadonlyMap<string, TextureDemand>; groups: ReadonlyMap<string, UiNode>; pendingGroupIds?: readonly string[]; visibility: string; selectedId?: string; viewport: Rect };
 export type SceneRuntimeEvents = { status(status: RendererStatus): void; warning(message: string | null): void; groups(state: SceneGroups): void; painted(): void };
 
 /** Renderer lifetime is the authority for GPU work; tree lifetime is the authority for captures. */
@@ -62,7 +62,9 @@ export class LayerSceneRuntime {
     const scheduled = painted ?? this.frames.demandFrame();
     if (!scheduled || !this.demand) return;
     const ids = layerDemandOrder(scheduled.frame.planes, scheduled.camera, scheduled.frame.presentation.pivot, this.demand.viewport, this.demand.selectedId);
-    this.groups?.schedule(ids, this.demand.groups);
+    const pendingGroups = this.demand.pendingGroupIds ?? [];
+    const selectedGroup = this.demand.selectedId && pendingGroups.includes(this.demand.selectedId) ? [this.demand.selectedId] : [];
+    this.groups?.schedule([...new Set([...selectedGroup, ...ids, ...pendingGroups])], this.demand.groups);
     this.textures?.schedule(ids, this.demand.visibility);
   }
   dispose() {
@@ -91,6 +93,12 @@ export class LayerSceneRuntime {
     this.screenshotCancel?.(); this.screenshotCancel = null;
     const renderer = this.renderer, context = this.groups?.context;
     if (!renderer || !context || this.lost || this.disposed) return;
+    if (!context.src) {
+      // A transparent base texture lets independently captured layers render
+      // without inventing screen pixels or starting an empty image request.
+      this.events.status(this.ports.uploadScreenshot(renderer, null) ? "webgl" : "fallback"); this.draw();
+      return;
+    }
     const current = () => !this.disposed && !this.lost && this.renderer === renderer && this.imageGeneration === generation;
     this.screenshotCancel = this.ports.loadScreenshot(context.src, image => {
       if (!current()) return;

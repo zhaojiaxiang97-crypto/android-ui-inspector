@@ -4,13 +4,16 @@ import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { commandSignal } from "./command-context";
+import { debugCommandCategory, measureDebugCommand } from "./debug-timing";
+import { trackSignalDeadline } from "./signal-deadline";
 
 
 export const COMMAND_TIMEOUT_MS = 30_000;
 
 export function captureSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const deadline = performance.now() + timeoutMs;
   const timeout = AbortSignal.timeout(timeoutMs);
-  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+  return trackSignalDeadline(signal ? AbortSignal.any([signal, timeout]) : timeout, deadline, [signal]);
 }
 
 export type CommandResult = {
@@ -19,7 +22,13 @@ export type CommandResult = {
   stderr: string;
 };
 
-export function runCommand(command: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS): Promise<CommandResult> {
+export async function runCommand(command: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS): Promise<CommandResult> {
+  // Pre-cancelled commands never start and must not increase the command count.
+  commandSignal()?.throwIfAborted();
+  return measureDebugCommand(debugCommandCategory(command, args), () => executeCommand(command, args, timeoutMs), result => result.code === 0 ? "success" : "failed");
+}
+
+function executeCommand(command: string, args: string[], timeoutMs: number): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
     const signal = commandSignal();
     signal?.throwIfAborted();

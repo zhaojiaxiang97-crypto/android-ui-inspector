@@ -6,24 +6,29 @@ const args = process.argv.slice(2);
 if (args[0] !== "-s" || args[1] !== "startup-fixture" || !process.env.STARTUP_ADB_LOG) process.exit(2);
 appendFileSync(process.env.STARTUP_ADB_LOG, JSON.stringify(args.slice(2)) + "\n");
 const command = args.slice(2).join(" ");
+const calls: string[][] = readFileSync(process.env.STARTUP_ADB_LOG, "utf8").trim().split("\n").map(line => JSON.parse(line));
+const count = (command: string) => calls.filter(call => call.join(" ") === command).length;
+const mode = process.env.STARTUP_READY_FIXTURE;
 if (command === "shell dumpsys activity activities") {
-  const reads = readFileSync(process.env.STARTUP_ADB_LOG, "utf8").split("\n").filter(line => line.includes('"activity","com.example.startup"')).length;
-  const observed = readFileSync(process.env.STARTUP_ADB_LOG, "utf8").includes('"window","windows"');
-  const activity = process.env.STARTUP_READY_FIXTURE === "component-change" && reads >= 1 ? ".OtherActivity" : ".MainActivity";
-  const token = process.env.STARTUP_READY_FIXTURE === "instance-change" && reads >= 1
-    || process.env.STARTUP_READY_FIXTURE === "candidate-instance-change" && observed ? "def" : "abc";
-  console.log(`mResumedActivity: ActivityRecord{${token} u0 com.example.startup/${activity} t1}`);
+  const reads = count("shell dumpsys activity com.example.startup");
+  const afterInitial = count(command) > 1;
+  if (mode === "before-foreground-failure" && afterInitial) process.exit(1);
+  const activity = mode === "component-change" && reads >= 1 || mode === "before-component-change" && afterInitial ? ".OtherActivity" : ".MainActivity";
+  const token = mode === "instance-change" && reads >= 1 || mode === "before-instance-change" && afterInitial
+    || mode === "candidate-instance-change" && count("shell dumpsys window windows") >= 2 ? "def" : "abc";
+  const packageName = mode === "before-package-change" && afterInitial ? "com.example.other" : "com.example.startup";
+  console.log(`mResumedActivity: ActivityRecord{${token} u0 ${packageName}/${activity} t1}`);
 } else if (command === "shell run-as com.example.startup id") {
   console.log("uid=10001(com.example.startup) gid=10001");
 } else if (command === "shell dumpsys activity com.example.startup") {
-  const reads = readFileSync(process.env.STARTUP_ADB_LOG, "utf8").split("\n").filter(line => line.includes('"activity","com.example.startup"')).length;
+  const reads = count(command);
   console.log("ACTIVITY com.example.startup/.MainActivity abc pid=42\n" + (process.env.STARTUP_READY_FIXTURE && (process.env.STARTUP_READY_FIXTURE !== "tree-delay" || reads > 1)
     ? "    View Hierarchy:\n      DecorView@abcdef[MainActivity]\n        android.widget.TextView{123456 V.E...... ........ 0,0-100,100}\n    Looper (main)"
     : "  No hierarchy yet"));
 } else if (process.env.STARTUP_READY_FIXTURE && command === "shell dumpsys window windows") {
-  const reads = readFileSync(process.env.STARTUP_ADB_LOG, "utf8").split("\n").filter(line => line.includes('"window","windows"')).length;
-  const id = process.env.STARTUP_READY_FIXTURE === "window-change" && reads >= 3 ? "def" : "abc";
-  console.log(process.env.STARTUP_READY_FIXTURE === "focus-delay" && reads < 3 || ["cancel-wait", "focus-null"].includes(process.env.STARTUP_READY_FIXTURE)
+  const reads = count(command);
+  const id = mode === "window-change" && count("shell dumpsys activity com.example.startup") > 0 ? "def" : "abc";
+  console.log(mode === "focus-delay" && reads < 3 || mode === "candidate-instance-change" && reads === 1 || ["cancel-wait", "focus-null"].includes(mode!)
     ? "mCurrentFocus=null" : `mCurrentFocus=Window{${id} u0 com.example.startup/.MainActivity}`);
 } else if (process.env.SDK_TREE_FIXTURE === "timeout" && command === "shell pidof com.example.startup") {
   console.log("42");

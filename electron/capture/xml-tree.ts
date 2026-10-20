@@ -38,6 +38,13 @@ function attributeBool(raw: XmlNode, key: string, fallback: boolean) {
   return fallback;
 }
 
+function visibilityEvidence(raw: XmlNode): UiNode["visibilityEvidence"] {
+  const value = attributeValue(raw, "visible-to-user");
+  if (value === "true" || value === "1") return "visible";
+  if (value === "false" || value === "0") return "hidden";
+  return "unknown";
+}
+
 function rawAttributes(raw: XmlNode) {
   const attributes: Record<string, string> = {};
   for (const [key, value] of Object.entries(raw)) {
@@ -96,6 +103,7 @@ function createNormalizedNode(raw: XmlNode, id: string): UiNode {
     scrollable: attributeBool(raw, "scrollable", false),
     selected: attributeBool(raw, "selected", false),
     visibleToUser: attributeBool(raw, "visible-to-user", true),
+    visibilityEvidence: visibilityEvidence(raw),
     attributes: rawAttributes(raw),
     children: [],
   };

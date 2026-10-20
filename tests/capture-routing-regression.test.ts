@@ -55,6 +55,43 @@ function fixture(overrides: Partial<InspectionPorts> = {}, sdkInstalled = true) 
   return { api, provider, commands, screens, opens };
 }
 
+test("standard capture overlaps screenshot preparation with properties and starts DDMS before screenshot delivery", async () => {
+  const pendingScreen = deferred<Awaited<ReturnType<InspectionPorts["captureScreen"]>>>(), screenDelivered = deferred();
+  const phases: string[] = [];
+  let screenshotStarted = false, screenCalls = 0;
+  const frame = { width: 100, height: 100, rotation: 0 as const };
+  const previewScreen = { result: ok(), screenshotDataUrl: "preview-screen", captureGeometry: {
+    hierarchyRotation: 0 as const, beforeScreenshot: frame, afterScreenshot: frame, screenshotSize: frame,
+  } };
+  const finalScreen = { ...previewScreen, screenshotDataUrl: "final-screen" };
+  const h = fixture({
+    captureScreen: async () => { screenCalls++; screenshotStarted = true; return pendingScreen.promise; },
+    captureDebugViewImages: async (_provider, _adb, _serial, _package, root, stage, preview, _timings, context) => {
+      assert.equal(screenshotStarted, true, "screenshot starts before process and property preparation");
+      fillRoot(root);
+      await readDebugPropertiesAndImages({ port: 1234, packageName: target.packageName, root, context, stage, preview, onBatchTiming: undefined }, {
+        applyViewProperties: () => {},
+        captureViewLayers: async (_port, options) => {
+          await options!.onHierarchy!({} as Parameters<NonNullable<NonNullable<typeof options>["onHierarchy"]>>[0], "fixture-window");
+          assert.deepEqual(phases, ["tree"], "the DDMS handoff is reachable while the screenshot is still pending");
+          pendingScreen.resolve(previewScreen); await screenDelivered.promise;
+          return [];
+        },
+      });
+      await preview?.("layers");
+      return { imageCount: 1, finalScreen: Promise.resolve(finalScreen) };
+    },
+  });
+  const result = await h.api.inspectPreferredDevice(h.provider, "fixture", { onPreview(phase, snapshot) {
+    phases.push(phase);
+    if (phase === "tree") assert.equal(snapshot.screenshotDataUrl, null);
+    if (phase === "screen") { assert.equal(snapshot.screenshotDataUrl, "preview-screen"); screenDelivered.resolve(); }
+  } });
+  assert.equal(result.error, null); assert.equal(result.screenshotDataUrl, "final-screen");
+  assert.deepEqual(phases, ["tree", "screen", "layers"]); assert.equal(screenCalls, 1);
+  assert.deepEqual(h.opens, [], "progressive capture does not probe an SDK");
+});
+
 test("default standard capture completes native properties, images and screen without any SDK probe or open", async () => {
   for (const sdkInstalled of [false, true]) for (const preferVisibleSdk of [undefined, false, true]) {
     let nativeProperties = 0, nativeImages = 0;

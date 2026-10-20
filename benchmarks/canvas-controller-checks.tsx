@@ -118,6 +118,43 @@ export async function verifyCanvasController(native: Native) {
     finally { release(); await mouseUp({ x: 2, y: 2 }); await settle(); }
   };
   try {
+    await check("layers-before-screen-flat-guard-and-native-pick", async () => {
+      data.src = ""; session++; render(); await ready();
+      assert(!host.querySelector(".screenshot-stage img"), "missing screen unexpectedly created an image element");
+      await click(".view-mode-toggle button:first-child");
+      assert(get<HTMLButtonElement>(".pin-layer-measurement").disabled && get<HTMLButtonElement>('[aria-label="放大截图"]').disabled,
+        "blank 2D canvas exposed measurement or zoom commands");
+      const bounds = frame().getBoundingClientRect(), point = { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+      const beforeZoom = get(".zoom-readout").textContent, beforeSelections = selections;
+      frame().focus();
+      await native.input([{ type: "mouseMove", ...point }, { type: "mouseWheel", ...point, deltaY: -60, deltaX: 0, canScroll: true, modifiers: ["control"] },
+        { type: "keyDown", keyCode: "M" }, { type: "keyUp", keyCode: "M" },
+        { type: "mouseDown", ...point, button: "left", clickCount: 1 }, { type: "mouseUp", ...point, button: "left", clickCount: 1 }]);
+      await settle();
+      assert(get(".zoom-readout").textContent === beforeZoom && selections === beforeSelections && frame().dataset.measurementActive === "false",
+        "blank 2D canvas accepted zoom, measurement or selection");
+      await click(".view-mode-3d"); await ready();
+      const painted = canvas(), rect = painted.getBoundingClientRect();
+      assert(painted.dataset.layerProbeX !== undefined && painted.dataset.layerProbeY !== undefined, "no painted layer available before screen");
+      const target = { x: rect.left + Number(painted.dataset.layerProbeX), y: rect.top + Number(painted.dataset.layerProbeY) };
+      await native.input([{ type: "mouseMove", ...target }, { type: "mouseDown", ...target, button: "left", clickCount: 1 }, { type: "mouseUp", ...target, button: "left", clickCount: 1 }]);
+      await settle();
+      assert(selections === beforeSelections + 1, "native 3D picking still required an unrelated screen image");
+    });
+    await check("late-screen-dimensions-preserve-camera-and-zoom", async () => {
+      data.src = ""; session++; render(); await ready();
+      chooseCanvasZoom(host, 2); frame().focus();
+      await native.input([{ type: "keyDown", keyCode: "ArrowRight" }, { type: "keyUp", keyCode: "ArrowRight" },
+        { type: "keyDown", keyCode: "ArrowUp" }, { type: "keyUp", keyCode: "ArrowUp" }]); await settle();
+      const beforeCamera = camera(), beforeZoom = get(".zoom-readout").textContent, beforeFrame = frame(), beforeSelected = selected;
+      const raster = document.createElement("canvas"); raster.width = 800; raster.height = 640;
+      raster.getContext("2d")!.fillRect(0, 0, 800, 640); data.src = raster.toDataURL(); render();
+      await until(() => host.querySelector<HTMLImageElement>(".screenshot-stage img")?.naturalWidth === 800, "late screen did not decode with new dimensions");
+      await ready();
+      assert(frame() === beforeFrame && camera() === beforeCamera && get(".zoom-readout").textContent === beforeZoom && selected === beforeSelected,
+        "late larger screen remounted the canvas or reset camera, zoom or selection");
+      assert(get<HTMLButtonElement>(".view-mode-3d").classList.contains("active"), "late screen reset the 3D mode");
+    });
     await check("fixed-scene", async () => {
       await until(() => !frame().dataset.modeMotion && getComputedStyle(get(".layer-scene")).opacity === "1", "fixed scene reveal did not reach full opacity");
       await tick(); await tick();

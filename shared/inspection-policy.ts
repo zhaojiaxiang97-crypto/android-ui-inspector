@@ -1,3 +1,9 @@
+export function inspectionLayerCapture(value: unknown): import("./types").LayerCaptureMode {
+  if (value === undefined) return "full";
+  if (value !== "on-demand" && value !== "full") throw new Error("图层采集范围无效。");
+  return value;
+}
+
 /** Omission preserves the existing automatic startup retry behavior. */
 export function inspectionSingleAttempt(value: unknown): boolean {
   if (value === undefined) return false;

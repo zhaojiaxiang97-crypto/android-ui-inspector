@@ -28,6 +28,7 @@ export class DebugSessionRecording {
     const issue: DebugStepError = { category: "recording", code, phase: "recording", message: debugStepMessage(error) };
     if (step) {
       appendDebugRecordingErrors(step, [issue]);
+      if (step.assertionConfirmation) step.verified = null;
       invalidateDebugTaskCheck(this.state, step, "任务验收的记录保存失败，无法保留完整证据。");
       const summary = step.taskCheck && step.status === "done" ? step.taskCheck.reason : step.message;
       step.message = `${summary} 记录保存失败：${issue.message}`.slice(0, 16000);
@@ -46,10 +47,26 @@ export class DebugSessionRecording {
       const errors = this.evidence.record(this.state, sequence, { step: context.step,
         finishedAt: context.finishedAt ?? new Date().toISOString(), durationMs: Math.max(0, Math.round(performance.now() - context.started)),
         verified: context.step.verified ?? null, before: { snapshotId: null, freshness: "missing", reason: null },
-        after: { snapshotId: null, freshness: "missing", reason: null } }, before, after, context.logs);
+        after: { snapshotId: null, freshness: "missing", reason: null } }, before, after, context.logs, context.scrollObservations, context.assertionObservations);
       this.state.reportPath = this.evidence.path;
       appendDebugRecordingErrors(context.step, errors);
     } catch (error) { this.recordingFailure(context.step, "report_write_failed", error); }
+  }
+
+  // Called after the measured save span ends. This final metadata write is intentionally unmeasured.
+  finalizeTiming(context: StepContext, sequence: number) {
+    if (!context.step.timings) return;
+    const failed = (code: string, error: unknown) => appendDebugRecordingErrors(context.step, [{
+      category: "recording", code, phase: "recording", message: debugStepMessage(error),
+    }]);
+    try {
+      this.evidence.finalizeTiming(this.state, sequence, context.step);
+      this.state.reportPath = this.evidence.path;
+    } catch (error) { failed("timing_report_write_failed", error); }
+    // Do not call record/saveSession on failure: those would process attachments again and recurse.
+    // Measurement metadata failure also does not invalidate an already persisted task proof.
+    try { this.saveSteps(); }
+    catch (error) { failed("timing_steps_write_failed", error); }
   }
 
 

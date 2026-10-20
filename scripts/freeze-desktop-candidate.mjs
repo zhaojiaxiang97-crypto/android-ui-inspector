@@ -24,13 +24,25 @@ for (const { path } of sources) {
   const destination = join(output, "source", path); mkdirSync(dirname(destination), { recursive: true });
   copyFileSync(join(project, path), destination);
 }
+// The built App carries its exact candidate ID; the overlay is recorded separately from the original source hashes.
+const frozenPackagePath = join(output, "source", "package.json");
+const originalPackageBytes = readFileSync(frozenPackagePath);
+const frozenPackage = JSON.parse(originalPackageBytes.toString("utf8"));
+if (frozenPackage.inspectorCandidate !== undefined) throw new Error("源码已有候选身份，不能重复冻结。");
+frozenPackage.inspectorCandidate = candidate;
+const stampedPackageBytes = Buffer.from(JSON.stringify(frozenPackage, null, 2) + "\n");
+writeFileSync(frozenPackagePath, stampedPackageBytes);
+const buildOverrides = { "package.json": { originalSha256: hash(originalPackageBytes), stampedSha256: hash(stampedPackageBytes) } };
+const buildSources = sources.map(entry => entry.path === "package.json"
+  ? { ...entry, sha256: buildOverrides["package.json"].stampedSha256 } : entry);
+const buildSourceDigest = hash(JSON.stringify(buildSources));
 const profile = join(homedir(), "Library", "Application Support", "android-ui-inspector");
 const liveResources = resolve(project, "release/mac-arm64/Android UI Inspector.app/Contents/Resources");
 const oldPaths = [join(liveResources, "app.asar"), join(liveResources, "cli/android-ui.cjs"), join(liveResources, "mcp/server.cjs"),
   ...["Preferences", "Local State", "snapshots.json"].map(name => join(profile, name))];
 const oldRecords = oldPaths.map(path => ({ path, exists: existsSync(path), sha256: existsSync(path) ? hash(readFileSync(path)) : null }));
 const run = command => execFileSync(command, ["--version"], { encoding: "utf8", timeout: 5000 }).trim();
-const manifest = { candidate, sourceDigest, sources, sourceSnapshot: join(output, "source"), output,
+const manifest = { candidate, sourceDigest, sources, buildSourceDigest, buildOverrides, sourceSnapshot: join(output, "source"), output,
   capturedAt: new Date().toISOString(), baseCommit: git("rev-parse", "HEAD").trim(),
   dirtyStatus: git("status", "--porcelain=v1", "--untracked-files=all"),
   environment: { node: process.version, bun: run("bun"), platform: process.platform, arch: process.arch,

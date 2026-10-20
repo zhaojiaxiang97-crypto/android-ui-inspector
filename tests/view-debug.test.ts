@@ -665,6 +665,83 @@ function encodedView(hash: number, extra: EncodedProperties = {}): EncodedProper
   return { "meta:__name__": "android.view.View", "meta:__hash__": hash, "layout:left": 0, "layout:top": 0, "layout:width": 100, "layout:height": 40, "misc:visibility": 0, ...extra };
 }
 
+function decodedTextProperties(extra: EncodedProperties) {
+  const root = debugViewTree(activityHierarchy, activityTarget);
+  const text = encodedView(2, { "meta:__name__": "android.widget.TextView", ...extra });
+  const decor = encodedView(0x9c5dabe, { "meta:__name__": "com.android.internal.policy.DecorView", "meta:__childCount__": 1, "meta:__child__0": text });
+  applyViewProperties(root, decodeViewHierarchy(encodedHierarchy(decor)), true);
+  return root.children[0].children[0].attributes!;
+}
+
+test("V2 text properties survive decoding and mapping without an SDK or another capture", () => {
+  const attributes = decodedTextProperties({ "text:textSize": 22.5, "text:typefaceStyle": 3,
+    "text:curTextColor": -15654349, "text:gravity": 8388659, "text:ellipsize": "END",
+    "text:textAlignment": 5, "text:textDirection": 7, "layout:layoutDirection": 1,
+    "text:scaledTextSize": 15 });
+  assert.deepEqual(Object.fromEntries(Object.entries(attributes).filter(([key]) => key.startsWith("text-") || key === "layout-direction")), {
+    "text-size-px": "22.5", "text-typeface-style": "3", "text-color-argb": "#FF112233",
+    "text-gravity": "8388659", "text-ellipsize": "END", "text-style-source": "view-debug",
+    "text-alignment": "5", "text-direction": "7", "layout-direction": "1",
+  });
+  assert.equal(attributes["text-size-sp"], undefined, "scaledTextSize is not evidence of the original sp size");
+});
+
+test("native text styles retain zero and transparent values and distinguish no ellipsis from a missing field", () => {
+  const attributes = decodedTextProperties({ "text:textSize": 0, "text:typefaceStyle": 0,
+    "text:curTextColor": 0, "text:gravity": 0, "text:ellipsize": "",
+    "text:textAlignment": 0, "text:textDirection": 0, "layout:layoutDirection": 0 });
+  for (const key of ["text-size-px", "text-typeface-style", "text-gravity", "text-alignment", "text-direction", "layout-direction"])
+    assert.equal(attributes[key], "0");
+  assert.equal(attributes["text-color-argb"], "#00000000");
+  assert.equal(attributes["text-ellipsize"], "NONE");
+  assert.equal(attributes["text-style-source"], "view-debug");
+  assert.equal(decodedTextProperties({ "text:ellipsize": "" })["text-style-source"], "view-debug");
+  const missing = decodedTextProperties({ "text:scaledTextSize": 14, "text:textAlignment": 1, "text:textDirection": 3, "layout:layoutDirection": 0 });
+  assert.equal(missing["text-alignment"], "1");
+  assert.equal(missing["text-direction"], "3");
+  for (const key of ["text-size-px", "text-typeface-style", "text-color-argb", "text-gravity", "text-ellipsize", "text-style-source"])
+    assert.equal(missing[key], undefined, `${key} is not inferred from base View properties`);
+});
+
+test("invalid optional text properties never become defaults or break the V2 tree", () => {
+  const cases: Array<[string, string, EncodedProperties[string][]]> = [
+    ["text:textSize", "text-size-px", ["", " ", -1, NaN, Infinity, "NaN", true]],
+    ["text:typefaceStyle", "text-typeface-style", ["", -1, 4, 1.5, "UNKNOWN", "BOLD", false]],
+    ["text:curTextColor", "text-color-argb", ["", " ", "-2147483649", "4294967296", 1.5, "red", false]],
+    ["text:gravity", "text-gravity", ["", -1, "2147483648", 1.5, "LEFT"]],
+    ["text:ellipsize", "text-ellipsize", [" ", "UNKNOWN", "NONE", "null", 0, false]],
+    ["text:textAlignment", "text-alignment", ["", -1, 7, 1.5]],
+    ["text:textDirection", "text-direction", ["", -1, 8, 1.5]],
+    ["layout:layoutDirection", "layout-direction", ["", -1, 4, 1.5]],
+  ];
+  for (const [source, destination, values] of cases) for (const value of values) {
+    const attributes = decodedTextProperties({ [source]: value });
+    assert.equal(attributes[destination], undefined, `${source}=${String(value)}`);
+    assert.equal(attributes["text-style-source"], undefined, `invalid ${source} cannot claim text style evidence`);
+    assert.equal(attributes["view-ref"], "android.widget.TextView@2");
+  }
+});
+
+test("legacy exported text fields use their real values and a later read clears stale text styles", () => {
+  const root: UiNode & { attributes: Record<string, string> } = { ...makeNode("root"), attributes: { "view-ref": "android.widget.TextView@a" } };
+  const apply = (values: Record<string, string>) => applyViewProperties(root,
+    `android.widget.TextView@a ${Object.entries(values).map(([key, value]) => `${key}=${value.length},${value}`).join(" ")} `);
+  apply({ "text:getTextSize()": "18.25", "text:getTypefaceStyle()": "BOLD", "text:mCurTextColor": "4294967295",
+    "text:mGravity": "17", "getEllipsize()": "null" });
+  assert.equal(root.attributes["text-size-px"], "18.25");
+  assert.equal(root.attributes["text-typeface-style"], "1");
+  assert.equal(root.attributes["text-color-argb"], "#FFFFFFFF");
+  assert.equal(root.attributes["text-gravity"], "17");
+  assert.equal(root.attributes["text-ellipsize"], "NONE");
+  apply({ "text:mCurTextColor": "-2147483648" });
+  assert.equal(root.attributes["text-color-argb"], "#80000000");
+  assert.equal(root.attributes["text-size-px"], undefined);
+  apply({ "text:textAlignment": "2", "text:mCurTextColor": "" });
+  assert.equal(root.attributes["text-alignment"], "2");
+  assert.equal(root.attributes["text-color-argb"], undefined);
+  assert.equal(root.attributes["text-style-source"], undefined);
+});
+
 test("V2 decoding preserves identity, text, scroll, transforms and rejects incomplete hierarchies", () => {
   const root = debugViewTree(activityHierarchy, activityTarget);
   const child = encodedView(-1, { "layout:left": 10, "layout:top": 20, "drawing:translationX": 3, "text:text": "背景 = 😀", "id": "id/title", "drawing:alpha": 0.5, "padding:paddingLeft": 2, "drawing:hardwareAccelerated": false });
@@ -914,7 +991,9 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
   const pins: number[] = [], released: number[] = [], recycled: number[] = [], drawn: number[] = [];
   let next = 1000, disposed = false, suspendCount = 0, resumes = 0, brokenPixels = false, emptyTexture = false, skipOwn = false, disconnect = false;
   let customDraw = false, overlayOwn = false, legacyWakes = 0;
-  const methodQueries: number[] = [];
+  const methodQueries: number[] = [], classQueries: string[] = [];
+  let rootChecks = 0, disposeCount = 0;
+  let cancelTypeLookup: { controller: AbortController; reason: Error; closed: () => void } | undefined;
   let missingOverlay = false, badFields = "", badDrawMethodsOnce = false;
   const fieldReads: number[][] = [];
   const refs = ["example.Image@aaa", "example.Image@bbb", "example.Image@ccc", "android.view.TextureView@ddd"];
@@ -956,6 +1035,7 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
           case "199/1": legacyWakes++; assert.equal(body.subarray(0, 4).toString(), "VUOP"); assert.equal(body.readInt32BE(8), 2); break;
           case "1/2": {
             const name = body.subarray(4).toString();
+            classQueries.push(name);
             assert.notEqual(name, "Landroid/view/ViewDebug$HardwareCanvasProvider;", "load the snapshot provider on cold startup");
             if (!classes.has(name)) classes.set(name, classes.size + 1);
             payload = name === "Ljava/lang/Class;"
@@ -975,6 +1055,12 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
             payload = int(classes.get("Landroid/view/View;")!); break;
           case "2/1": payload = string([...classes].find(([, id]) => id === body.readInt32BE())![0]); break;
           case "9/1": {
+            if (cancelTypeLookup) {
+              const cancellation = cancelTypeLookup; cancelTypeLookup = undefined;
+              socket.once("close", cancellation.closed);
+              cancellation.controller.abort(cancellation.reason);
+              return;
+            }
             const name = body.readInt32BE() === 504 ? "Landroid/view/TextureView;" : "Lexample/Image;";
             if (!classes.has(name)) classes.set(name, classes.size + 1);
             payload = Buffer.concat([Buffer.from([1]), int(classes.get(name)!)]); break;
@@ -1014,6 +1100,7 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
             if (method === 2) {
               assert.equal(values[0], 100, "only search within the identified window");
               const index = refs.indexOf(strings.get(values[1])!);
+              if (strings.get(values[1]) === "example.DecorView@abc") rootChecks++;
               payload = result("L", strings.get(values[1]) === "example.DecorView@abc" ? 100 : index < 0 ? 0 : 501 + index);
             } else if (method === 13) payload = result("L", 400);
             else if (method === 15) {
@@ -1045,7 +1132,7 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
           }
           case "4/1": payload = tagged("[", ++next); break;
           case "13/2": payload = Buffer.concat([Buffer.from("I"), int(1), Buffer.from([emptyTexture && arrays.get(body.readInt32BE()) === 704 ? 0 : 1, arrays.get(body.readInt32BE())! - 700, 0, 0]).subarray(0, brokenPixels ? 3 : 4)]); break;
-          case "1/6": disposed = true; break;
+          case "1/6": disposed = true; disposeCount++; break;
           default: assert.fail(`unexpected command ${command}`);
         }
         const header = Buffer.alloc(11); header.writeUInt32BE(11 + payload.length); packet.copy(header, 4, 4, 8); header[8] = 0x80;
@@ -1061,6 +1148,39 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const address = server.address(); assert.ok(address && typeof address !== "string");
+    const bitmapQueriesSince = (classStart: number, methodStart: number) => ({
+      classes: classQueries.slice(classStart).filter(name => name === "Landroid/graphics/Bitmap;" || name === "[I"),
+      methods: methodQueries.slice(methodStart).filter(id => id === classes.get("Landroid/graphics/Bitmap;")),
+    });
+    for (const metadataBatch of [false, true]) {
+      for (const scenario of ["type-only", "skip-draw", "lookup-failure"] as const) {
+        const classStart = classQueries.length, methodStart = methodQueries.length;
+        const pinsStart = pins.length, releasedStart = released.length, drawsStart = drawn.length;
+        const rootsBefore = rootChecks, disposedBefore = disposeCount;
+        skipOwn = scenario === "skip-draw";
+        const ref = scenario === "lookup-failure" ? "example.Missing@999" : refs[0];
+        const inspected = await captureViewBitmaps(address.port,
+          { rootRef: "example.DecorView@abc", windowName: "activity-window", metadataBatch },
+          [{ ref, captureOwn: scenario === "skip-draw" }], AbortSignal.timeout(5000));
+        assert.deepEqual(bitmapQueriesSince(classStart, methodStart), { classes: [], methods: [] },
+          `${scenario}, batch=${metadataBatch}: classification-only work must not prepare bitmap metadata`);
+        assert.equal(inspected.images.size, 0);
+        assert.equal(inspected.timing.requested, 0);
+        assert.equal(inspected.timing.bitmapSetupRequests, 0);
+        assert.equal(inspected.timing.bitmapSetupMs, 0);
+        for (const key of ["lookupRefMs", "lookupTypeMs", "lookupDrawMs", "lookupReleaseMs"] as const)
+          assert.ok(Number.isFinite(inspected.timing[key]) && inspected.timing[key] >= 0, key);
+        assert.equal(inspected.skipDraw.has(ref), scenario === "skip-draw");
+        assert.equal(inspected.failures.size, Number(scenario === "lookup-failure"));
+        if (scenario === "lookup-failure") assert.match(inspected.failures.get(ref)!, /控件已不在当前窗口/);
+        else assert.equal(inspected.kinds.get(ref), "own");
+        assert.equal(rootChecks, rootsBefore + 1, "no bitmap work still verifies the exact window root");
+        assert.equal(disposeCount, disposedBefore + 1, "classification-only completion disposes the debugger");
+        assert.deepEqual(released.slice(releasedStart).sort(), pins.slice(pinsStart).sort(), "release every pinned object on the no-bitmap path");
+        assert.equal(drawn.length, drawsStart);
+      }
+    }
+    skipOwn = false;
     const captured = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window", metadataBatch: true }, refs.map((ref) => ({ ref, captureOwn: true })), AbortSignal.timeout(5000));
     assert.deepEqual(drawn, [501, 502, 503]);
     assert.deepEqual([...captured.images.keys()], [refs[3], refs[0], refs[2]], "prioritize video buffers before the bounded own-view fallback");
@@ -1072,9 +1192,10 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
     }
     assert.equal(suspendCount, 0, "never forcibly interrupt a draw/layout operation");
     assert.equal(disposed, true);
-    for (const key of ["connectMs", "idsMs", "threadLookupMs", "boundaryMs", "metadataMs", "rootVerifyMs"] as const)
+    for (const key of ["connectMs", "idsMs", "threadLookupMs", "boundaryMs", "metadataMs", "rootVerifyMs", "bitmapSetupMs", "lookupRefMs", "lookupTypeMs", "lookupDrawMs", "lookupReleaseMs"] as const)
       assert.ok(Number.isFinite(captured.timing[key]) && captured.timing[key] >= 0);
     assert.ok(captured.timing.setupRequests > 0);
+    assert.ok(captured.timing.bitmapSetupRequests > 0);
     assert.ok(captured.timing.threadNameRequests > 0);
     assert.deepEqual(released.sort(), pins.sort());
     assert.deepEqual(recycled.sort(), [601, 701, 603, 703, 704].sort());
@@ -1084,6 +1205,7 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
     assert.deepEqual([...serialMetadata.images], [...captured.images], "batching changes transport, not pixels");
     assert.deepEqual([...serialMetadata.failures], [...captured.failures]);
     assert.equal(serialMetadata.timing.setupRequests, captured.timing.setupRequests, "same read-only requests in both modes");
+    assert.equal(serialMetadata.timing.bitmapSetupRequests, captured.timing.bitmapSetupRequests, "lazy bitmap preparation has the same request count in both modes");
     const wakeCount = legacyWakes;
     await assert.rejects(captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window", hardwareAccelerated: false }, [{ ref: refs[0], captureOwn: true }]), /软件窗口需要新版 SDK/);
     assert.equal(legacyWakes, wakeCount, "known software window never calls the HWUI wake");
@@ -1119,7 +1241,9 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
     assert.deepEqual(released.sort(), pins.sort());
     const capturedObjects = [...drawn];
     disposed = false;
+    const staleClassStart = classQueries.length, staleMethodStart = methodQueries.length;
     await assert.rejects(captureViewBitmaps(address.port, { rootRef: "example.DecorView@stale", windowName: "activity-window" }, [], AbortSignal.timeout(5000)), /窗口身份已变化/);
+    assert.deepEqual(bitmapQueriesSince(staleClassStart, staleMethodStart), { classes: [], methods: [] }, "identity rejection precedes bitmap initialization");
     assert.equal(disposed, true);
     assert.deepEqual(drawn, capturedObjects, "a stale window never captures another view's pixels");
     assert.deepEqual(released.sort(), pins.sort());
@@ -1181,6 +1305,28 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
     assert.equal(missing.images.size, 0); assert.equal(missing.skipDraw.size, 0);
     assert.match(missing.failures.get(refs[0])!, /field unavailable: mOverlay/);
     missingOverlay = false;
+    for (const metadataBatch of [false, true]) {
+      const controller = new AbortController(), reason = new Error("cancel classification without bitmap work");
+      let closed!: () => void;
+      const socketClosed = new Promise<void>(resolve => { closed = resolve; });
+      cancelTypeLookup = { controller, reason, closed };
+      const classStart = classQueries.length, methodStart = methodQueries.length, disposedBefore = disposeCount;
+      await assert.rejects(captureViewBitmaps(address.port,
+        { rootRef: "example.DecorView@abc", windowName: "activity-window", metadataBatch },
+        [{ ref: refs[0], captureOwn: false }], controller.signal), error => error === reason);
+      await socketClosed;
+      assert.deepEqual(bitmapQueriesSince(classStart, methodStart), { classes: [], methods: [] });
+      assert.equal(disposeCount, disposedBefore, "closed sockets release debugger ownership without sending more commands");
+      const pinsStart = pins.length, releasedStart = released.length;
+      const recovered = await captureViewBitmaps(address.port,
+        { rootRef: "example.DecorView@abc", windowName: "activity-window", metadataBatch },
+        [{ ref: refs[0], captureOwn: false }], AbortSignal.timeout(5000));
+      assert.equal(recovered.images.size, 0); assert.equal(recovered.failures.size, 0);
+      assert.equal(recovered.kinds.get(refs[0]), "own");
+      assert.equal(recovered.timing.bitmapSetupRequests, 0);
+      assert.equal(disposeCount, disposedBefore + 1, "the next no-bitmap request completes and disposes normally");
+      assert.deepEqual(released.slice(releasedStart).sort(), pins.slice(pinsStart).sort());
+    }
     emptyTexture = false; skipOwn = false; disconnect = true;
     const partial = await captureViewBitmaps(address.port, { rootRef: "example.DecorView@abc", windowName: "activity-window" }, [{ ref: refs[0], captureOwn: true }, { ref: refs[3], captureOwn: false }]);
     assert.deepEqual([...partial.images.keys()], [refs[3]], "disconnect must preserve already captured video pixels");
@@ -1188,7 +1334,7 @@ test("fallback preserves own pixels, handles cold startup and bounds capture wor
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
 
-for (const legacy of [false, true]) test(`Surface capture isolates the actual buffer and respects protection (${legacy ? "PixelCopy backend" : "Android 14 backend"})`, async () => {
+for (const legacy of [false, true]) for (const metadataBatch of [false, true]) test(`Surface capture isolates the actual buffer and respects protection (${legacy ? "PixelCopy backend" : "Android 14 backend"}, metadata batch=${metadataBatch})`, async () => {
   const int = (n: number) => { const b = Buffer.alloc(4); b.writeInt32BE(n); return b; };
   const string = (s: string) => Buffer.concat([int(Buffer.byteLength(s)), Buffer.from(s)]);
   const tagged = (tag: string, n: number) => {
@@ -1336,8 +1482,11 @@ for (const legacy of [false, true]) test(`Surface capture isolates the actual bu
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const address = server.address(); assert.ok(address && typeof address !== "string");
-    const capture = (refs: string[]) => captureViewBitmaps(address.port, { rootRef: "example.Root@1", windowName: "window" }, refs.map((ref) => ({ ref, captureOwn: false })), AbortSignal.timeout(5000));
+    const capture = (refs: string[]) => captureViewBitmaps(address.port, { rootRef: "example.Root@1", windowName: "window", metadataBatch }, refs.map((ref) => ({ ref, captureOwn: false })), AbortSignal.timeout(5000));
     const captured = await capture(refs);
+    assert.ok(captured.timing.bitmapSetupRequests > 0, "surface and texture capture prepare bitmap metadata on demand");
+    for (const key of ["bitmapSetupMs", "lookupRefMs", "lookupTypeMs", "lookupDrawMs", "lookupReleaseMs"] as const)
+      assert.ok(Number.isFinite(captured.timing[key]) && captured.timing[key] >= 0, key);
     assert.deepEqual([...captured.images.keys()], [refs[0], refs[6]]);
     assert.equal(captured.kinds.get(refs[0]), "surface", "custom GLSurfaceView subclass is recognized");
     assert.equal(captured.kinds.get(refs[5]), "own", "a name containing TextureView is not a TextureView");

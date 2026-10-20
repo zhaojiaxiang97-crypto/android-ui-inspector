@@ -1,10 +1,41 @@
 import { parseAppPids, selectActivityPid } from "./app-process";
-import { withCommandSignal } from "./command-context";
+import { commandSignal, withCommandSignal } from "./command-context";
 import type { FocusUnavailableReason } from "../../shared/types";
-import { runDeviceAdb, findAdbPath } from "./runtime";
+import { runDeviceAdb, findAdbPath, type CommandResult } from "./runtime";
 
 
 export type ForegroundTarget = { packageName: string; activityName: string; component: string; activityRecordId?: string };
+
+const foregroundFailureMessages = {
+  "query-failed": "活动查询命令失败",
+  "missing-field": "系统未提供前台 Activity 字段",
+  "null-foreground": "系统前台 Activity 为空",
+  "unrecognized-format": "前台 Activity 格式无法识别",
+  "invalid-package": "前台 App 包名无效",
+  "outside-grant": "前台 App 已离开授权范围，未执行操作",
+} as const;
+
+export class ForegroundUnavailableError extends Error {
+  constructor(readonly foregroundReason: keyof typeof foregroundFailureMessages) {
+    super(`无法确认前台 App：${foregroundFailureMessages[foregroundReason]}。`);
+    this.name = "ForegroundUnavailableError";
+  }
+}
+
+export function checkedForegroundTarget(result: Pick<CommandResult, "code" | "stdout" | "stderr">, expectedPackage?: string): ForegroundTarget {
+  const output = result.stdout.toString("utf8");
+  if (result.code !== 0 || /Permission\s+(?:Denial|denied)|\bSecurityException\b|Can't find service:|Error dumping service info:|\bDUMP TIMEOUT\b/i.test(`${output}\n${result.stderr}`))
+    throw new ForegroundUnavailableError("query-failed");
+  const target = foregroundTarget(output);
+  if (!target) {
+    const fields = [...output.matchAll(/(?:mResumedActivity|topResumedActivity)\s*[:=]([^\n]*)/g)];
+    throw new ForegroundUnavailableError(fields.length === 0 ? "missing-field"
+      : fields.every(field => /^\s*null\s*$/.test(field[1])) ? "null-foreground" : "unrecognized-format");
+  }
+  if (!/^[\w]+(?:\.[\w]+)+$/.test(target.packageName)) throw new ForegroundUnavailableError("invalid-package");
+  if (expectedPackage && target.packageName !== expectedPackage) throw new ForegroundUnavailableError("outside-grant");
+  return target;
+}
 
 export function foregroundTarget(output: string): ForegroundTarget | null {
   const match = output.match(/(?:mResumedActivity|topResumedActivity)[:=].*?\bu\d+\s+([^/\s]+)\/([^\s}\]]+)/);
@@ -76,32 +107,90 @@ export function parseFocusedWindow(output: string): { id: string; packageName: s
   return parseFocusedWindowState(output).focus;
 }
 
-export async function checkedDebugTarget(adbPath: string, serial: string, expectedPackage?: string): Promise<DebugTarget> {
-  const activities = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]);
-  const target = foregroundTarget(activities.stdout.toString("utf8"));
-  if (activities.code !== 0 || !target || !/^[\w]+(?:\.[\w]+)+$/.test(target.packageName)) throw new Error("无法确认前台 App。");
-  if (expectedPackage && target.packageName !== expectedPackage) throw new Error("前台 App 已离开授权范围，未执行操作。");
-  const debug = await runDeviceAdb(adbPath, serial, ["shell", "run-as", target.packageName, "id"]);
+export async function checkedDebugTarget(adbPath: string, serial: string, expectedPackage?: string,
+  options?: { parallelBoundary?: boolean }): Promise<DebugTarget> {
+  let activities: CommandResult, debugRead: PromiseSettledResult<CommandResult> | undefined;
+  if (options?.parallelBoundary && expectedPackage) {
+    if (!/^[\w]+(?:\.[\w]+)+$/.test(expectedPackage)) throw new Error("授权 App 包名无效。");
+    // Only the already authorized package can be probed early; join both reads before checking focus or returning.
+    const reads = await Promise.allSettled([
+      runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]),
+      runDeviceAdb(adbPath, serial, ["shell", "run-as", expectedPackage, "id"]),
+    ]);
+    commandSignal()?.throwIfAborted();
+    if (reads[0].status === "rejected") throw new ForegroundUnavailableError("query-failed");
+    activities = reads[0].value; debugRead = reads[1];
+  } else {
+    try { activities = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "activity", "activities"]); }
+    catch {
+      commandSignal()?.throwIfAborted();
+      throw new ForegroundUnavailableError("query-failed");
+    }
+  }
+  const target = checkedForegroundTarget(activities, expectedPackage);
+  if (debugRead?.status === "rejected") throw debugRead.reason;
+  const debug = debugRead?.value ?? await runDeviceAdb(adbPath, serial, ["shell", "run-as", target.packageName, "id"]);
   if (debug.code !== 0) throw new Error(`仅支持 Debug App：${target.packageName} 不可调试。`);
   const focus = await readDebugFocus(adbPath, serial);
   if (focus.packageName !== target.packageName) throw new Error("焦点窗口不属于授权 App；请关闭系统弹窗后重试。");
   return { ...target, windowId: focus.id };
 }
 
-export async function readDebugFocus(adbPath: string, serial: string): Promise<{ id: string; packageName: string }> {
-  const windows = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "window", "windows"]);
-  let focusOutput = windows.stdout.toString("utf8");
-  // Newer Android versions put per-display focus in `displays`, not `windows`.
-  if (!focusOutput.includes("mCurrentFocus=")) {
-    const displays = await runDeviceAdb(adbPath, serial, ["shell", "dumpsys", "window", "displays"]);
-    if (displays.code !== 0) throw new Error("无法读取前台窗口焦点。");
-    focusOutput += `\n${displays.stdout.toString("utf8")}`;
-  }
-  if (windows.code !== 0) throw new Error("无法读取前台窗口状态。");
-  const { focus, reason, reasonCode } = parseFocusedWindowState(focusOutput);
-  if (!focus) throw new FocusUnavailableError(reasonCode!, reason!);
-  return focus;
+export const FOCUS_QUERY_CACHE_LIMIT = 32;
+export const FOCUS_QUERY_CACHE_TTL_MS = 5 * 60_000;
+type FocusQuery = "windows" | "all";
+
+/** Cache the supported query shape, never a window identity or its contents. */
+export function createDebugFocusReader(execute: typeof runDeviceAdb = runDeviceAdb, now = () => performance.now()) {
+  const cache = new Map<string, { query?: FocusQuery; expiresAt: number }>();
+  return async (adbPath: string, serial: string): Promise<{ id: string; packageName: string }> => {
+    const key = JSON.stringify([adbPath, serial]), previous = cache.get(key), started = now();
+    const entry = { query: previous && previous.expiresAt > started ? previous.query : undefined, expiresAt: started + FOCUS_QUERY_CACHE_TTL_MS };
+    cache.delete(key);
+    cache.set(key, entry);
+    while (cache.size > FOCUS_QUERY_CACHE_LIMIT) cache.delete(cache.keys().next().value!);
+    const first = entry.query ?? "windows";
+    const queries: FocusQuery[] = [first, first === "windows" ? "all" : "windows"];
+    try {
+      for (let index = 0; index < queries.length; index++) {
+        commandSignal()?.throwIfAborted();
+        const query = queries[index];
+        const result = await execute(adbPath, serial, query === "all" ? ["shell", "dumpsys", "window"] : ["shell", "dumpsys", "window", query]);
+        commandSignal()?.throwIfAborted();
+        const output = result.stdout.toString("utf8");
+        // dumpsys can report permission/service errors with exit code zero.
+        if (result.code !== 0 || /Permission\s+(?:Denial|denied)|\bSecurityException\b|Can't find service:|Error dumping service info:|\bDUMP TIMEOUT\b/i.test(`${output}\n${result.stderr}`))
+          throw new Error("无法读取前台窗口焦点。");
+        const focusedDisplays = [...output.matchAll(/\bmTopFocusedDisplayId=([^\s]*)/g)].map(match => match[1]);
+        if (focusedDisplays.length > 1) throw new FocusUnavailableError("ambiguous-focus-field", "系统焦点显示器字段不唯一");
+        if (focusedDisplays.length === 1 && !/^\d+$/.test(focusedDisplays[0]))
+          throw new FocusUnavailableError("unrecognized-focus-format", "系统焦点显示器格式无法识别");
+        if ([...output.matchAll(/Display: mDisplayId=0\b/g)].length > 1)
+          throw new FocusUnavailableError("ambiguous-focus-field", "系统主显示器窗口段不唯一");
+        const { focus, reason, reasonCode } = parseFocusedWindowState(output);
+        if (focus) {
+          // A per-display focus is insufficient by itself. The full dump must
+          // also identify the globally focused display in this same response.
+          if (query === "all" && focusedDisplays.length !== 1)
+            throw new FocusUnavailableError("unrecognized-focus-format", "系统未提供完整焦点显示器字段");
+          // A slower concurrent request must not overwrite a newer result or failure.
+          if (cache.get(key) === entry) { entry.query = query; entry.expiresAt = now() + FOCUS_QUERY_CACHE_TTL_MS; }
+          return focus;
+        }
+        // Only a missing field indicates a different dumpsys layout. A null,
+        // ambiguous, malformed or non-primary focus must never be bypassed.
+        if (index === 0 && reasonCode === "missing-focus-field" && !output.includes("mCurrentFocus=")) continue;
+        throw new FocusUnavailableError(reasonCode!, reason!);
+      }
+      throw new Error("无法读取前台窗口焦点。");
+    } catch (error) {
+      if (cache.get(key) === entry) cache.delete(key);
+      throw error;
+    }
+  };
 }
+
+export const readDebugFocus = createDebugFocusReader();
 
 export function automationAdb(serial: string) {
   if (!/^[\w.:-]{1,256}$/.test(serial)) throw new Error("设备序列号无效。");

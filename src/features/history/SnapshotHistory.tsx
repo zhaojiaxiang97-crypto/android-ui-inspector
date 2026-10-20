@@ -1,20 +1,33 @@
 import { changeKindLabel, diffSummary, formatSnapshotTime, type SavedSnapshot, type SnapshotDiff } from "./model";
 
-export function SnapshotHistory({ entries, onSelect }: { entries: SavedSnapshot[]; onSelect: (entry: SavedSnapshot) => void }) {
+export function SnapshotHistory({ entries, fileBytes, onSelect, onExport, onDelete }: { entries: SavedSnapshot[]; fileBytes?: number | null;
+  onSelect: (entry: SavedSnapshot) => void; onExport?: (entry: SavedSnapshot) => void; onDelete?: (entry: SavedSnapshot) => void }) {
   return (
     <div className="snapshot-history">
       <div className="snapshot-history-heading">
-        <span>最近保存</span>
-        <span>最多保留 30 份</span>
+        <span>本地快照</span>
+        <span>{fileBytes === null || fileBytes === undefined ? "最多 30 份 / 200 MiB"
+          : "磁盘 " + (fileBytes / 1048576).toFixed(1) + " MiB · 新保存配额 200 MiB"}</span>
       </div>
+      {fileBytes !== null && fileBytes !== undefined && fileBytes > 200 * 1048576 && (
+        <p className="snapshot-history-capacity">旧文件可能含格式空白；新保存按紧凑内容核算 200 MiB。请先导出并确认可打开，再按需删除。</p>
+      )}
       <div className="snapshot-history-list">
-        {entries.slice(-6).reverse().map((entry) => (
-          <button className="snapshot-history-item" type="button" key={entry.id} onClick={() => onSelect(entry)}>
-            <code>{formatSnapshotTime(entry.capturedAt)}</code>
-            <span>{entry.snapshot.nodeCount} nodes</span>
-            <span className="tree-hint">{entry.snapshot.serial}</span>
-            {entry.diff && <span className="snapshot-diff">{diffSummary(entry.diff)}</span>}
-          </button>
+        {entries.slice().reverse().map((entry) => (
+          <div className="snapshot-history-row" key={entry.id}>
+            <button className="snapshot-history-item" type="button" onClick={() => onSelect(entry)}>
+              <code>{formatSnapshotTime(entry.capturedAt)}</code>
+              <span>{entry.snapshot.nodeCount} nodes</span>
+              <span className="tree-hint">{entry.snapshot.serial}</span>
+              {entry.diff && <span className="snapshot-diff">{diffSummary(entry.diff)}</span>}
+            </button>
+            {onExport && <button className="snapshot-history-export" type="button"
+              aria-label={"导出 " + formatSnapshotTime(entry.capturedAt) + "（" + entry.id.slice(0, 8) + "）的完整快照"}
+              onClick={() => onExport(entry)}>导出</button>}
+            {onDelete && <button className="snapshot-history-delete" type="button"
+              aria-label={`删除 ${formatSnapshotTime(entry.capturedAt)}（${entry.id.slice(0, 8)}）的本地快照`}
+              onClick={() => onDelete(entry)}>删除</button>}
+          </div>
         ))}
       </div>
     </div>

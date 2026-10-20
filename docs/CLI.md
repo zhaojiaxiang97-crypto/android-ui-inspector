@@ -78,6 +78,10 @@ android-ui wait --session '<会话ID>' --text '设置' --state visible --timeout
 android-ui stop --session '<会话ID>'
 ```
 
+`wait --visibility partial` 可显式确认局部遮挡下的 `visible` 条件，需要完整 Helper 双帧观察；动作的 `expect` JSON 也接受 `visibility: "partial"`。默认仍要求目标整框无遮挡，不改变点击或滚动权限。它证明 App 暴露的状态与稳定露出区域，不单独证明持续播放，详见 [部分可见断言](archive/automation/AUTOMATION_PARTIAL_VISIBILITY.md)。
+
+只需确认页面时，可直接调用 `android-ui wait --session '<会话ID>' --backend accessibility-helper --resource-id 'com.example:id/result'`，无需先单独采集。显式后端会在同一验证步骤内取得两个新的完整观察；省略 `--backend` 时仍沿用当前快照来源。来源变化、取消和原超时限制仍有效，切换后端会先撤销旧快照。
+
 文字本身不可点击、对应父容器没有名称/ID时，可明确使用文字锚点：
 
 ```sh
@@ -105,6 +109,92 @@ android-ui back --session '<会话ID>' --snapshot '<最新fast快照ID>'
 - Ctrl+C 取消当前请求；已发出的手机操作不能撤回。`stop` 才会撤销整个桌面会话。
 - 更完整的安全、跨帧限制和留证说明见 [MCP.md](MCP.md)。CLI 不增加任意 shell、任意坐标、文本输入或真实属性修改接口。
 
+显式使用 `--backend accessibility-helper` 时，新版桌面使用支持 `guardedInput:true` 的新版 Helper 执行点击、滑动和返回。输入与当前完整采集绑定，不经过 shell 输入，也不在失败后改用 ADB。旧 Helper 仍可只读采集，输入会在请求前拒绝。结果未知时该授权只允许继续观察；手势回执不代表页面断言通过。详情见 [Helper 输入与验证](HELPER_INPUT_TRANSPORT.md)。
+
+### 桌面操作计划
+
+一份计划可以包含点击、返回、有界滚动和只读等待。桌面收到后逐步执行，CLI快速返回当前状态；关闭提交命令后，计划仍由桌面管理。桌面的自动调试抽屉也提供折叠的“操作计划”：粘贴JSON、校验后运行，查看当前步骤或取消计划。
+
+先把下面内容保存为 `plan.json`，将页面文字和目标替换为实际 App 中的唯一控件：
+
+```json
+{
+  "version": 1,
+  "title": "打开设置",
+  "timeoutMs": 60000,
+  "startConditions": [{ "selector": { "text": "首页" }, "state": "visible" }],
+  "finalConditions": [{ "selector": { "text": "设置" }, "state": "visible" }],
+  "steps": [{
+    "id": "open_settings",
+    "kind": "step",
+    "input": {
+      "action": { "kind": "tap" },
+      "target": { "selector": { "text": "设置" } },
+      "expect": { "selector": { "text": "设置" }, "state": "visible" }
+    }
+  }]
+}
+```
+
+```sh
+android-ui plan-start --session '<会话ID>' --run-id '<固定UUID>' --plan-file ./plan.json --pretty
+android-ui plan-status --session '<同一会话ID>' --run-id '<同一UUID>' --pretty
+android-ui plan-cancel --session '<同一会话ID>' --run-id '<同一UUID>' --pretty
+```
+
+- `plan-start` 返回 `{ "run": ... }`，其中 `status=running` 只表示已经开始。用 `plan-status` 查询同一 `runId`；最终状态为 `passed / failed / cancelled / interrupted`。没有对应计划时返回 `{ "found": false, "runId": ... }`。
+- 固定 `runId`：相同ID和相同定义返回原记录，修改定义会拒绝。提交回复丢失时查询原ID；暂时查询不到也可能是原提交仍在等待，只能沿用原ID和原定义重试。桌面的“重试原计划”会保留这两个值。`plan-cancel` 取消后续步骤，`stop` 撤销整个授权，已经发出的输入无法撤回。
+- 授权结束后外部CLI/MCP桥会关闭；当前会话对象仍在时可在桌面查询本会话计划。开启新会话或重启后，请查看已保存的报告与计划台账，执行不会自动恢复。
+- 文件必须是12000 UTF8字节以内的普通JSON文件；最多32步，步骤 `id` 必须唯一。默认后端 `uiautomator`、总时限300000毫秒，上限600000毫秒。每个授权会话最多10次计划；软件重启后保留磁盘记录，执行不会自动恢复。
+- `startConditions` 和 `finalConditions` 各1至5个条件。开始、最终和可选 `when` 条件按双帧观察检查；计划验收独立于会话原有固定任务。只有声明条件通过且步骤完整完成，才返回 `passed`。
+- `kind=step` 的 `input` 沿用复合单步参数，必须提供 `expect`；`kind=scroll-until` 的 `input` 沿用有界连续滚动参数。两者都由计划管理 `sessionId / requestId / backend`，不能自行添加这些字段或 `visualConfirmation`。只读等待使用 `{ "id": "ready", "kind": "wait", "condition": { "selector": { "text": "准备完成" }, "state": "visible" }, "timeoutMs": 10000 }`，等待上限30000毫秒。
+- 步骤可带 `when: { "selector": ..., "state": ... }`；判断不满足时跳过该步。窗口变化、歧义、需要视觉确认、输入结果未知或证据不足时会停止，保留原因，交由用户检查后决定后续操作。
+- `run.steps` 提供每个计划步骤对应的产品步骤ID、耗时和结果，`reportPath` 对应原调试报告，`ledgerPath` 保存计划本身的记录。查看两者核对操作和证据；日志或截图缺失不应当作证据完整。
+
+### 复合单步与请求恢复（新源码）
+
+目标已有明确的精确条件时，可以一次完成新观察、定位、输入和预期验证：
+
+```sh
+android-ui step --session '<会话ID>' --request-id '<新UUID>' --action tap \
+  --resource-id 'com.example:id/settings' --clickable true \
+  --expect-json '{"selector":{"text":"设置"},"state":"visible"}' --timeout-ms 30000
+android-ui get-step --session '<同一会话ID>' --request-id '<同一UUID>'
+android-ui resume-step --session '<同一会话ID>' --request-id '<同一UUID>' --timeout-ms 30000
+```
+
+`step` 支持 `--action tap / scroll / back`。点击和滚动用精确 selector，可用 `--within-json '{"resourceId":"com.example:id/list"}'` 限定唯一子树；滚动另传 `--direction`，返回不传目标。`--input-json` 可传完整协议对象，与其他输入参数互斥。参数结构见 [MCP 说明](MCP.md#perform-ui-step)。
+
+同一请求 ID、同一参数返回已有状态，不会重复输入；同 ID 改参数会拒绝。`get-step` 只查台账，不采集。输入已发送或可能发送、后续读取失败时，用 `resume-step` 继续观察原预期，不重发点击或滚动。无 `--expect-json` 时仅返回操作后观察，`verified=false`；有预期仍要求连续两次观察符合，复用操作后观察作为第一次候选。
+
+需要视觉确认时，先查看返回的快照，再用 `--visual-snapshot-id` 与 `--visual-confirmation` 描述该图中的目标；仍核对新旧证据。原请求为 `not_sent` 且需要修改参数时使用新 UUID；`sent / unknown` 不通过换 UUID 盲目重试。`step` 和 `scroll-until` 默认 `--backend uiautomator`，也可显式选 `--backend accessibility-helper`；Helper 必须提供完整观察证据，旧只读版本不能用于输入。整个请求及 `resume-step` 固定原后端和 Helper 服务实例，不自动回退或沿用其他来源的视觉确认。单步 `timings` 包含观察、校验、输入、恢复和保存阶段，真机提速幅度尚待对照验证。
+
+### 有界连续滚动
+
+容器与终点标记已明确时，用一个请求完成多次滚动。示例标识需换成当前 App 实际暴露的控件：
+
+```sh
+android-ui scroll-until --session '<会话ID>' --request-id '<新UUID>' \
+  --resource-id 'com.example:id/favorites_list' --direction down \
+  --until-json '{"selector":{"text":"没有更多了"},"kind":"end_marker"}' \
+  --loading-json '{"text":"加载中"}' --empty-json '{"text":"暂无收藏"}' \
+  --max-scrolls 6 --timeout-ms 120000
+android-ui get-step --session '<同一会话ID>' --request-id '<同一UUID>'
+android-ui resume-step --session '<同一会话ID>' --request-id '<同一UUID>'
+```
+
+- `--resource-id / --text / --desc / --class` 精确定位滚动容器，可用 `--within-json` 限定范围；容器必须唯一、可见、启用并具有滚动语义。`--until-json` 必填，其中 `kind` 默认为 `target`，明确终点用 `end_marker`。目标、加载和空列表标记只在该容器内匹配。
+- 默认最多6次滚动，`--max-scrolls` 范围1–12；整个请求默认120秒，`--timeout-ms` 范围1000–120000。`--distance / --duration-ms` 仅控制手势，与单次滚动相同。也可用 `--input-json` 传完整输入，不能与其他步骤输入旗标混用；结构见 [MCP 连续滚动](MCP.md#scroll-until)。
+- `--input-method` 缺省为 `gesture`。显式 `--input-method accessibility` 仅支持 `--backend accessibility-helper`、`up / down`、同时提供 `--resource-id` 和 `--class` 的唯一容器，手机端须支持该方向的控件滚动；实际滚幅由控件决定。此方式不接受视觉确认，失败不换通道补发。
+- 页脚被底栏挡住时，可以在 `--until-json` 显式设置 `"reveal":"scroll"`。目前仅支持 Helper 向下滚动，容器与目标都须提供精确 `resourceId`、`className`。已知遮挡表示“尚未到达”，沿原方向在原次数和时间预算内继续查找；目标完整露出并通过两帧确认后才算成功。未知遮挡、重复或隐藏目标仍停止，加载/空列表提示不放宽。它不改变输入检查，也不启用部分可见断言。
+- 每次动作前重新定位、核对窗口和输入路径，动作后重新观察。目标或明确终点须连续两次可见确认，才有 `verified=true`；返回 `scrollTask.stopReason` 说明停止原因。`empty` 是空列表，`no_progress` 是无进展，`scroll_limit` 是次数耗尽；Helper 连续两次已发送输入后进展仍未知则 `interrupted`，均不能当作“已到底”或任务成功。
+- 同 ID 同参数只返回旧状态，不重启滚动。`get-step` 查询两种复合请求；`resume-step` 只恢复原条件观察，**不会续滑剩余次数**。滚动请求即使 `not_sent` 也可只读重验，例如第一屏已有目标、随后确认读取失败；P1 的普通 `step` 仍要求原输入为 `sent / unknown`。若确需继续，从新观察确认当前位置与已知回执后，用新请求定义下一段；`unknown` 时不能盲目换 ID 重发。
+- `--visual-snapshot-id / --visual-confirmation` 只用于第一个手势。后续手势遇到无法确认的重叠时会停止，不把旧确认自动套到新页面。
+
+固定 24 项测试列表已通过三轮控件滚动、末项双帧和同请求重放验收，见[阶段 B 记录与计划](archive/automation/HELPER_SCROLL_STAGE_B.md)。业务列表及同条件提速仍待验证。达到明确终点只验证列表条件，不会自动点击“最后一个视频”。
+
+内置 CLI 等待响应135秒，桌面桥接等待130秒，覆盖滚动执行的120秒预算并为收尾留出时间。外部 MCP 客户端可能默认60秒超时；使用完整120秒预算时，需把客户端请求超时设为至少135秒。客户端提前取消会终止后续观察与滚动，已发出的输入不会撤回；随后仍先查询原请求。
+
 ### 固定任务验收（新源码，尚未安装）
 
 已用独立候选`diagnosis-handoff-20261011-ab4c3840`完成自有样例真机及报告重开；当前本机安装版仍未包含新接口。实测步骤见[上手第7步](FIRST_USE.md#7-可选完成一次固定样例任务)，范围见[验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#task-sample-flow-acceptance)。
@@ -128,22 +218,26 @@ android-ui task-check --session '<会话ID>' --task-id '<定义返回的taskId>'
 android-ui task-check --session '<会话ID>' --task-id '<同一taskId>'
 ```
 
-定义不会采集或输入，之后不能改写；示例selector需换成实际App的精确标识。任务文件限16KiB，规范化定义限12KB。每次检查前按已有授权操作到相应页面，检查自身只读。阶段按序；复验会清除该阶段及后续结果，最终前置不足不采集。前置满足时固定两次新UIAutomator观察，不重试或自动换源。条件、额度及证据范围见[MCP任务验收](MCP.md#固定任务验收新源码尚未安装)。
+定义不会采集或输入，之后不能改写；示例selector需换成实际App的精确标识。任务文件限16KiB，规范化定义限12KB。每次检查前按已有授权操作到相应页面，检查自身只读。阶段按序；复验会清除该阶段及后续结果，最终前置不足不采集。前置满足时固定当前来源两次新观察，不重试或自动换源；Helper 需完整证据且两次属于同一服务、窗口和屏幕。条件、额度及证据范围见[MCP任务验收](MCP.md#固定任务验收新源码尚未安装)。
 
 `task-check`将结果JSON写stdout：`taskResult.status=passed`退出0；`failed / insufficient_evidence`退出2。非法参数、错误会话或任务ID等请求错误仍写stderr并退出1；Ctrl+C退出130。报告显示固定目标、阶段、逐条件结果和两次观察，导入缺树会降为证据不足。
 
-### 可选 Helper 只读采集
+### 可选 Helper 观察与操作
 
-Mac arm64本机交付版已支持以下入口；默认仍用UIAutomator：
+默认仍用 UIAutomator。旧快照和报告仍可只读查看；新版桌面的实时 Helper 采集与操作都需要观察 v1 服务，不会退回旧 `/dump` 协议。旧 Helper 安装版需升级，或显式改用 UIAutomator：
 
 ```sh
 android-ui capture --session '<会话ID>' --mode fast --backend accessibility-helper
 android-ui tree --snapshot '<新快照ID>' --pretty
 android-ui attributes --snapshot '<同一快照ID>' --node '<节点ID>' --pretty
+android-ui step --session '<会话ID>' --request-id '<新UUID>' --backend accessibility-helper \
+  --action tap --resource-id '<实际控件资源ID>'
 android-ui capture --session '<会话ID>' --backend uiautomator
 ```
 
-Helper须事先安装、手动启用、配对，并在桌面主进程启动时配置私有令牌文件。操作步骤见[交付说明](DELIVERY.md)，字段和限制见[MCP说明](MCP.md#可选-helper源码已接入仅只读)。`hint / error / stateDescription`单独返回，提示不冒充text。Helper仅支持fast采集和已有快照查询，不支持`tap / scroll / back / wait`；需先显式采集UIAutomator并重新定位才能操作。切换时旧ID立即撤销，新采集失败不会自动换源或保留旧共享。本机升级/回退已完成，验证范围见[交付验收](archive/ACCEPTANCE_HISTORY_2026-10-15.md#local-delivery-acceptance)。
+Helper 须事先安装、手动启用、配对，并在桌面主进程启动时配置私有令牌文件。操作步骤见[交付说明](DELIVERY.md)，字段和限制见[MCP说明](MCP.md#helper-observation)。`hint / error / stateDescription` 单独返回，提示不冒充 text。完整 Helper 观察支持 `tap / scroll / back / wait / task-check`，输入仍由现有受控执行器发送；旧版或缺少窗口、可见区域、无损截图证据的快照仍只读。切换时旧 ID 立即撤销，新采集失败不自动换源或保留旧共享；需要回退时显式采集 UIAutomator 后重新定位。此前同页对照与单机动作结果见[真机记录](archive/automation/AUTOMATION_DEVICE_BENCHMARK.md)。
+
+本轮已实现 Helper 白名单失败的只读恢复：每步最多增加2次读取，首次恢复起共用15秒截止时间，已发送输入不重放。返回 `observationFailures` 和有界 `helperDiagnostics`；确认中途失败会重新双帧验证，滚动换窗立即停止。候选已安装，单机点击/返回自动恢复通过；最后找底部遇遮挡后仍须同请求只读复查，规则及部署边界见[诊断与恢复说明](HELPER_OBSERVATION_RECOVERY.md)。
 
 ### 连接与采集诊断（新源码）
 
@@ -157,6 +251,16 @@ node dist-electron/cli.cjs diagnose --serial '<设备序列号>' --mode fast --b
 `--package`可省略，此时检查当前前台App，仍复核实际授权归属。`--mode`为fast/deep，Helper只支持fast；默认fast/UIAutomator，时限1000–30000毫秒。结果含检查时间、设备/App/窗口、必需或可选项、未知及处理提示。独立CLI诊断默认标准模式：跳过SDK安装声明探测，SDK项明确显示“增强未启用”，不视为缺SDK失败；命令参数不能开启增强。Helper只核启用与配对配置，实际服务响应未验证。CLI/MCP实时采集还需已有桌面授权连接；缺少可选Helper不阻断UIAutomator。
 
 就绪退出0，必需项失败、未知、超时或身份变化退出2，检查结果仍在stdout；非法参数等请求错误退出1。原`doctor`继续检查共享快照和桌面授权。Android日志选项在桌面授权前选择，`attach`返回日志是否开启和当前进度；CLI无法自行开启授权或日志。
+
+### 一键多轮回测
+
+构建后复用已有桌面授权，以固定计划重复执行操作并逐步导出证据：
+
+```sh
+bun run regression:ui --plan /绝对路径/plan.json --session '<会话 UUID>' --out /绝对路径/新的结果目录
+```
+
+脚本不自动授权或重放状态不确定的输入。缺少计时、图片或控件树会单独标记，不会把操作通过当成证据完整。计划字段、恢复边界及验证结果见[多轮回测说明](AUTOMATION_UI_REGRESSION.md)。
 
 ## 输出和验证
 

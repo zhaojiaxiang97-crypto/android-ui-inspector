@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomFillSync } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import sharp from "sharp";
 import { makeNode } from "../benchmarks/fixtures";
 import { DebugSession } from "../electron/automation/debug-session";
 import { DebugEvidenceWriter } from "../electron/automation/debug-evidence";
 import type { McpSnapshot } from "../electron/automation/mcp-snapshot";
 import { loadTestReport } from "../electron/desktop/test-report";
+import { exportDebugReportEvidence } from "../electron/desktop/debug-report-export";
 import { DEBUG_REPORT_VERSION, DEBUG_SNAPSHOT_VERSION, LEGACY_DEBUG_REPORT_VERSION, type DebugSessionReport, type DebugSnapshotDocument } from "../shared/debug-report";
 import type { DebugTaskCheckResult, DebugTaskCondition, DebugTaskDefinition, DebugTaskObservation } from "../shared/debug-task";
 import type { DebugSessionState } from "../shared/types";
@@ -86,6 +88,18 @@ function fixture(taskDefinition = definition()) {
     cleanup: () => rmSync(directory, { recursive: true, force: true }) };
 }
 
+async function largeImages(f: ReturnType<typeof fixture>) {
+  const pixels = randomFillSync(Buffer.alloc(1080 * 1080 * 3)), files = new Map<string, number>();
+  for (let index = 0; index < f.report.snapshots.length; index++) {
+    pixels[0] = index;
+    const bytes = await sharp(pixels, { raw: { width: 1080, height: 1080, channels: 3 } }).png({ compressionLevel: 0 }).toBuffer();
+    assert.ok(bytes.length > 3_400_000);
+    const entry = f.report.snapshots[index]; entry.screenshot = f.artifact(bytes, "png");
+    files.set(entry.screenshot.sha256, bytes.length);
+  }
+  f.save(); return files;
+}
+
 test("v1 remains readable but cannot smuggle task definitions, task checks, or v2 actions", async () => {
   const f = fixture();
   try {
@@ -99,6 +113,78 @@ test("v1 remains readable but cannot smuggle task definitions, task checks, or v
       () => { f.report.steps[0].step.action = "define_debug_task"; },
       () => { f.report.steps[0].step.taskCheck = {} as DebugTaskCheckResult; },
     ]) { Object.assign(f.report, structuredClone(original)); delete f.report.task; mutation(); f.save(); await assert.rejects(loadTestReport(f.file)); }
+  } finally { f.cleanup(); }
+});
+
+test("the 16 MiB image decode budget loads current dual-frame and failure proof before ordinary images without reordering the timeline", async () => {
+  const f = fixture();
+  try {
+    for (let index = 0; index < 7; index++) f.observation(100 + index * 100);
+    const first = f.report.snapshots[5], second = f.report.snapshots[6];
+    f.report.steps.push({ step: { id: 2, time: at(500), action: "capture_ui", input: { sessionId: f.report.session.id, mode: "fast", backend: "uiautomator" },
+      status: "failed", message: "fixture failure", beforeId: first.snapshotId, afterId: second.snapshotId },
+      finishedAt: at(800), durationMs: 300, verified: false,
+      before: { snapshotId: first.snapshotId, freshness: "current", reason: null }, after: { snapshotId: second.snapshotId, freshness: "current", reason: null } });
+    f.report.session.totalSteps = 2; f.report.session.updatedAt = at(1000);
+    const final = f.addCheck();
+    const files = await largeImages(f);
+    const original = readFileSync(f.file), imageOrder = f.report.snapshots.map(item => item.screenshot!.sha256);
+    const loaded = await loadTestReport(f.file);
+    assert.deepEqual(loaded.images.map(item => item.artifactId), imageOrder);
+    assert.deepEqual(loaded.debug!.snapshots.map(item => item.evidence.snapshotId), f.report.snapshots.map(item => item.snapshotId));
+    for (const entry of [first, second, ...f.report.snapshots.filter(item => [final.observations.first!.snapshotId, final.observations.second!.snapshotId].includes(item.snapshotId))]) {
+      const image = loaded.images.find(item => item.artifactId === entry.screenshot!.sha256)!;
+      assert.ok(image.dataUrl); assert.equal(image.error, null);
+    }
+    assert.equal(loaded.images.filter(item => item.dataUrl).length, 4);
+    assert.ok(loaded.images.filter(item => item.error).every(item => /上限/.test(item.error!)));
+    assert.ok(loaded.images.filter(item => item.dataUrl).reduce((sum, image) => sum + files.get(image.artifactId)!, 0) <= 16 * 1024 * 1024);
+    assert.equal(f.report.limits.maxBytes, 32 * 1024 * 1024);
+    assert.deepEqual(readFileSync(f.file), original);
+    assert.equal(loaded.debug!.taskAssessment!.final!.status, "passed");
+  } finally { f.cleanup(); }
+});
+
+test("selected read-only checkpoints get the existing image budget during export without promoting unrelated failures", async () => {
+  const f = fixture();
+  try {
+    for (let index = 0; index < 5; index++) f.observation(100 + index * 100);
+    const failedBefore = f.report.snapshots[3], failedAfter = f.report.snapshots[4];
+    f.report.steps.push({ step: { id: 2, time: at(300), action: "capture_ui", input: { sessionId: f.report.session.id, mode: "fast", backend: "uiautomator" },
+      status: "failed", message: "fixture failure", beforeId: failedBefore.snapshotId, afterId: failedAfter.snapshotId },
+      finishedAt: at(800), durationMs: 500, verified: false,
+      before: { snapshotId: failedBefore.snapshotId, freshness: "current", reason: null }, after: { snapshotId: failedAfter.snapshotId, freshness: "current", reason: null } });
+    f.report.session.totalSteps = 2; f.report.session.updatedAt = at(1000); f.addCheck();
+    const before = f.report.snapshots[0], after = f.observation(4100);
+    f.report.steps.push({ step: { id: 4, time: at(4000), action: "wait_for_ui", input: { sessionId: f.report.session.id, selector: { text: "READY" }, state: "visible", timeoutMs: 1000 },
+      status: "done", message: "fixture checkpoint", beforeId: before.snapshotId, afterId: after.snapshotId },
+      finishedAt: at(4200), durationMs: 200, verified: true,
+      before: { snapshotId: before.snapshotId, freshness: "previous", reason: "此前观察。" }, after: { snapshotId: after.snapshotId, freshness: "current", reason: null } });
+    f.report.session.totalSteps = 4; f.report.session.updatedAt = at(4300);
+    await largeImages(f);
+    const selectedSnapshots = [before.snapshotId, after.snapshotId], defaultLoad = await loadTestReport(f.file);
+    assert.ok(selectedSnapshots.every(id => {
+      const hash = f.report.snapshots.find(item => item.snapshotId === id)!.screenshot!.sha256;
+      return defaultLoad.images.find(item => item.artifactId === hash)!.error;
+    }));
+    const preferred = await loadTestReport(f.file, { preferredDebugStepIds: new Set([4]) });
+    for (const id of selectedSnapshots) {
+      const hash = f.report.snapshots.find(item => item.snapshotId === id)!.screenshot!.sha256;
+      assert.ok(preferred.images.find(item => item.artifactId === hash)!.dataUrl);
+    }
+    assert.ok(preferred.images.some(item => item.error));
+    assert.ok(preferred.index.run.errors.some(error => error?.code === "screenshot-unavailable"));
+    assert.deepEqual(preferred.images.map(item => item.artifactId), defaultLoad.images.map(item => item.artifactId));
+    await assert.rejects(loadTestReport(f.file, { preferredDebugStepIds: new Set([999]) }), /所选步骤/);
+    const parent = join(realpathSync(f.directory), "exports"); mkdirSync(parent);
+    const reportSha256 = createHash("sha256").update(readFileSync(f.file)).digest("hex");
+    const result = await exportDebugReportEvidence({ filePath: realpathSync(f.file), reportSha256 }, { requestId: "fixture-export", sourceId: "fixture-source", reportSha256,
+      stepIds: [4], includeTrees: true, includeScreenshots: true, includeLogs: false }, parent, { appVersion: "fixture" });
+    assert.equal(result.error, null);
+    const exported = await loadTestReport(join(result.directory!, "report.json"));
+    assert.equal(exported.images.length, 2); assert.ok(exported.images.every(item => item.dataUrl && !item.error));
+    assert.deepEqual(exported.debug!.steps.map(item => item.step.id), [4]);
+    assert.ok(exported.debug!.snapshots.every(item => item.snapshot && !item.treeError));
   } finally { f.cleanup(); }
 });
 
@@ -159,7 +245,7 @@ test("missing, omitted, corrupt or oversized trees make a recorded pass insuffic
   }
 });
 
-test("task proofs past the 16MiB aggregate tree loading budget remain insufficient", async () => {
+test("task proofs get the existing 16MiB tree budget ahead of ordinary trees without hiding their gaps", async () => {
   const f = fixture();
   try {
     f.addCheck(); const proofs = [...f.report.snapshots];
@@ -169,8 +255,11 @@ test("task proofs past the 16MiB aggregate tree loading budget remain insufficie
     }
     f.report.snapshots = [...f.report.snapshots.slice(2), ...proofs]; f.save();
     const loaded = await loadTestReport(f.file);
-    assert.equal(loaded.debug!.taskAssessment!.final!.status, "insufficient_evidence");
-    assert.ok(loaded.debug!.snapshots.filter(item => proofs.some(proof => proof.snapshotId === item.evidence.snapshotId)).every(item => item.treeError));
+    assert.equal(loaded.debug!.taskAssessment!.final!.status, "passed");
+    assert.ok(loaded.debug!.snapshots.filter(item => proofs.some(proof => proof.snapshotId === item.evidence.snapshotId)).every(item => !item.treeError));
+    assert.ok(loaded.debug!.snapshots.some(item => /上限/.test(item.treeError ?? "")));
+    assert.ok(loaded.index.run.errors.some(error => error?.code === "tree-unavailable"));
+    assert.deepEqual(loaded.debug!.snapshots.map(item => item.evidence.snapshotId), f.report.snapshots.map(item => item.snapshotId));
   } finally { f.cleanup(); }
 });
 

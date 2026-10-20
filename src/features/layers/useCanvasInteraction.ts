@@ -76,13 +76,14 @@ export function useCanvasInteraction({ surface, content, view, quick, tools, mea
 
   function selectAtPoint(event: PointerEvent<HTMLDivElement>, pressedNode?: UiNode | null) {
     const image = imageRef.current;
-    if (event.button !== 0 || !event.isPrimary || navigationDisabled || !enabled || !size || !image || !image.complete || !image.naturalWidth) return null;
+    if (event.button !== 0 || !event.isPrimary || navigationDisabled || !enabled || !size) return null;
     if (viewMode === "layers3d") {
       const layer = pressedNode === undefined ? layerSceneRef.current?.pick(event.clientX, event.clientY) : pressedNode;
       if (layer) onSelect(layer);
       // Never fall back to the flattened screen: it still contains hidden layers.
       return layer ?? null;
     }
+    if (!image || !image.complete || !image.naturalWidth) return null;
     const point = clientToScreen(event.clientX, event.clientY, image.getBoundingClientRect(), size);
     if (!point) return null;
     const node = findNodeAtPoint(root, point.x, point.y, size);

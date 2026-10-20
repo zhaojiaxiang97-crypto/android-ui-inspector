@@ -19,7 +19,10 @@ async function fixture(): Promise<UiSnapshot> {
   const png = await sharp({ create: { width: 2, height: 2, channels: 4, background: { r: 20, g: 30, b: 40, alpha: 0.5 } } }).png().toBuffer();
   const dataUrl = `data:image/png;base64,${png.toString("base64")}`;
   const child = { ...node("0/0"), layerImageDataUrl: dataUrl, layerImageSize: { width: 2, height: 2 }, layerImageStatus: "captured" as const, layerImageEmpty: false,
-    attributes: { "image-source": "sdk", "view-ref": "android.view.View@real", "debug-name": "原始业务名" } };
+    attributes: { "image-source": "sdk", "view-ref": "android.view.View@real", "debug-name": "原始业务名",
+      "text-style-source": "view-debug", "text-size-px": "42.25", "text-typeface-style": "3",
+      "text-color-argb": "#80123456", "text-gravity": "8388627", "text-ellipsize": "END",
+      "text-alignment": "1", "text-direction": "5", "layout-direction": "1" } };
   return { serial: "fixture-device", root: node("0", [child, { ...node("0/1"), layerImageStatus: "failed", attributes: { "image-capture-error": "原始缺图原因" } }]),
     nodeCount: 3, xmlSize: 12, rawXml: "<hierarchy/>", screenshotDataUrl: dataUrl, error: null, warning: "原始警告",
     inspectionSource: "debug-hybrid", captureMode: "deep", hierarchyDumpMode: "full", captureDurationMs: 20, captureTimings: { tree: 4, images: 16 },
