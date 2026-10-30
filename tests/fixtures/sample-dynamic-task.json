@@ -1,0 +1,19 @@
+{
+  "goal": "只在项目自有样例的 dynamic 页面点击一次 RED CHILD，确认文字更新且出现 NEW VIEW。",
+  "checkpoints": [
+    {
+      "id": "ready",
+      "title": "确认自有动态样例的初始页面",
+      "conditions": [
+        { "id": "ready_red_enabled", "selector": { "text": "RED CHILD", "className": "android.widget.TextView" }, "state": "enabled" },
+        { "id": "ready_updated_absent", "selector": { "text": "UPDATED CHILD", "className": "android.widget.TextView" }, "state": "absent" },
+        { "id": "ready_new_absent", "selector": { "text": "NEW VIEW", "className": "android.widget.TextView" }, "state": "absent" }
+      ]
+    }
+  ],
+  "finalConditions": [
+    { "id": "final_updated_visible", "selector": { "text": "UPDATED CHILD", "className": "android.widget.TextView" }, "state": "visible" },
+    { "id": "final_new_visible", "selector": { "text": "NEW VIEW", "className": "android.widget.TextView" }, "state": "visible" },
+    { "id": "final_red_absent", "selector": { "text": "RED CHILD", "className": "android.widget.TextView" }, "state": "absent" }
+  ]
+}
