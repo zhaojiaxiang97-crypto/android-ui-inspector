@@ -1,0 +1,39 @@
+/* Appearance adjusts inspector chrome, never img filters, canvas pixels or capture data. */
+:root[data-appearance="light"] .floating-inspector.is-docked { background: var(--ref-panel); box-shadow: inset 0 0 0 1px var(--ref-line-soft); }
+:root[data-appearance="light"] .floating-inspector { border-color: var(--ref-line); }
+:root[data-appearance="light"] .inspector-search { background: var(--ref-input); }
+:root[data-appearance="light"] .box-model-card { background: var(--ref-panel); }
+:root[data-appearance="light"] .inspector-card { border-color: var(--ref-line-soft); }
+:root[data-appearance="light"] .inspector-card-icon { border-color: currentColor; }
+:root[data-appearance="light"] .inspector-type .inspector-card-icon { background: rgba(116, 74, 161, 0.08); }
+:root[data-appearance="light"] .inspector-subsection { border-color: var(--ref-line-soft); }
+:root[data-appearance="light"] .inspector-inline-values { border-color: var(--ref-line-soft); }
+:root[data-appearance="light"] .entry-dialog::backdrop { background: rgba(25, 38, 58, 0.3); }
+:root[data-appearance="light"] .app-shell.inspection-active .scene-toolbar-host .view-mode-toggle button.active { color: var(--ref-selected-text); }
+:root[data-appearance="light"] .app-shell.inspection-active .selector-row code { color: var(--ref-value-accent); background: var(--ref-panel); }
+:root[data-appearance="light"] .app-shell.inspection-active :is(.selector-copy, .selector-actions button) { border-color: var(--ref-input-line); background: var(--ref-input); }
+:root[data-appearance="light"] .snapshot-history,
+:root[data-appearance="light"] .snapshot-diff-details,
+:root[data-appearance="light"] .snapshot-toolbar,
+:root[data-appearance="light"] .diff-row { border-color: var(--ref-line-soft); background: var(--ref-panel); color: var(--ref-text-soft); }
+:root[data-appearance="light"] .snapshot-history-item { color: var(--ref-text-soft); }
+:root[data-appearance="light"] :is(.snapshot-history-heading, .snapshot-toolbar-info, .diff-row code, .diff-kind, .diff-fields) { color: var(--ref-muted); }
+:root[data-appearance="light"] .snapshot-history-item code { color: var(--ref-blue); }
+:root[data-appearance="light"] .snapshot-history-item:hover { border-color: var(--ref-blue); background: var(--ref-hover); }
+:root[data-appearance="light"] :is(.snapshot-diff, .snapshot-status) { color: var(--ref-green); }
+:root[data-appearance="light"] .diff-row.added .diff-kind { color: var(--ref-green); }
+:root[data-appearance="light"] .diff-row.removed .diff-kind { color: var(--ref-danger); }
+:root[data-appearance="light"] .diff-row.changed .diff-kind { color: var(--ref-orange); }
+:root[data-appearance="light"] .node-image-preview-viewport { background-color: var(--ref-checker-light); background-image: conic-gradient(var(--ref-checker-dark) 25%, transparent 0 50%, var(--ref-checker-dark) 0 75%, transparent 0); }
+:root[data-appearance="light"] .app-shell.inspection-active .layer-webgl-fallback { background: var(--ref-floating-panel); }
+
+/* These drawing overlays sit over the fixed neutral canvas, not over themed controls. */
+:root[data-appearance] :is(.selection-overlay, .layer-quick-select-outline, .layer-plane, .layer-measurement, .layer-hover-label, .canvas-hover-overlay, .canvas-hover-label) {
+  --ref-blue: #6f9fff;
+  --ref-orange: #e9ad66;
+  --ref-green: #78d86b;
+  --ref-text: #edf1f7;
+  --ref-muted: #8993a0;
+  --lime: #78d86b;
+}
+:root[data-appearance] .screenshot-frame .no-screenshot { color: #aeb8c7; }

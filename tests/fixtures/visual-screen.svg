@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="2400" viewBox="0 0 1080 2400">
+  <title>Android UI Inspector visual fixture</title>
+  <rect width="1080" height="2400" fill="#f7f9fb"/>
+  <rect width="1080" height="86" fill="#f7f9fb"/>
+  <text x="48" y="55" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#1e2529">9:41</text>
+  <g fill="#1e2529">
+    <rect x="934" y="38" width="24" height="14" rx="3"/>
+    <rect x="965" y="34" width="24" height="18" rx="3"/>
+    <rect x="997" y="30" width="30" height="22" rx="4"/>
+  </g>
+  <rect y="86" width="1080" height="140" fill="#ffffff"/>
+  <text x="48" y="151" font-family="Arial, sans-serif" font-size="40" font-weight="700" fill="#151b1e">Settings</text>
+  <circle cx="1010" cy="156" r="23" fill="#dfe7ea"/>
+  <path d="M1001 156h18M1010 147v18" stroke="#445158" stroke-width="5" stroke-linecap="round"/>
+  <rect x="32" y="258" width="1016" height="88" rx="44" fill="#e8eef1"/>
+  <circle cx="82" cy="302" r="19" fill="none" stroke="#526169" stroke-width="6"/>
+  <path d="m96 316 17 17" stroke="#526169" stroke-width="6" stroke-linecap="round"/>
+  <text x="137" y="315" font-family="Arial, sans-serif" font-size="28" fill="#5f6d73">Search settings</text>
+  <text x="48" y="432" font-family="Arial, sans-serif" font-size="23" font-weight="700" fill="#718087">NETWORK &amp; CONNECTIVITY</text>
+  <g transform="translate(48 482)">
+    <circle cx="34" cy="36" r="28" fill="#dcecff"/>
+    <path d="M17 38c10-12 24-12 34 0M23 47c6-7 16-7 22 0M32 57h2" fill="none" stroke="#2d7fe5" stroke-width="6" stroke-linecap="round"/>
+    <text x="88" y="31" font-family="Arial, sans-serif" font-size="31" font-weight="600" fill="#1c2529">Network &amp; internet</text>
+    <text x="88" y="68" font-family="Arial, sans-serif" font-size="24" fill="#7a878c">Wi-Fi, mobile, hotspot</text>
+    <path d="M930 36l18 18-18 18" fill="none" stroke="#9ba7ac" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <path d="M48 598h984" stroke="#e1e7ea" stroke-width="2"/>
+  <g transform="translate(48 646)">
+    <circle cx="34" cy="36" r="28" fill="#e1f6e9"/>
+    <rect x="18" y="26" width="32" height="23" rx="5" fill="none" stroke="#2ca866" stroke-width="5"/>
+    <path d="M26 25v-8h16v8" fill="none" stroke="#2ca866" stroke-width="5"/>
+    <text x="88" y="31" font-family="Arial, sans-serif" font-size="31" font-weight="600" fill="#1c2529">Connected devices</text>
+    <text x="88" y="68" font-family="Arial, sans-serif" font-size="24" fill="#7a878c">Bluetooth, pairing, sharing</text>
+    <path d="M930 36l18 18-18 18" fill="none" stroke="#9ba7ac" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="48" y="828" font-family="Arial, sans-serif" font-size="23" font-weight="700" fill="#718087">PERSONALIZATION</text>
+  <g transform="translate(48 878)">
+    <circle cx="34" cy="36" r="28" fill="#fff0d8"/>
+    <circle cx="34" cy="36" r="14" fill="none" stroke="#d8842c" stroke-width="5"/>
+    <path d="M34 10v9M34 53v9M8 36h9M51 36h9" stroke="#d8842c" stroke-width="5" stroke-linecap="round"/>
+    <text x="88" y="31" font-family="Arial, sans-serif" font-size="31" font-weight="600" fill="#1c2529">Display</text>
+    <text x="88" y="68" font-family="Arial, sans-serif" font-size="24" fill="#7a878c">Brightness, lock screen, colors</text>
+    <path d="M930 36l18 18-18 18" fill="none" stroke="#9ba7ac" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <path d="M48 994h984" stroke="#e1e7ea" stroke-width="2"/>
+  <g transform="translate(48 1042)">
+    <circle cx="34" cy="36" r="28" fill="#f0e6ff"/>
+    <path d="M19 28h30v27H19zM25 28v-9h18v9" fill="none" stroke="#7d54c7" stroke-width="5" stroke-linejoin="round"/>
+    <text x="88" y="31" font-family="Arial, sans-serif" font-size="31" font-weight="600" fill="#1c2529">Wallpaper &amp; style</text>
+    <text x="88" y="68" font-family="Arial, sans-serif" font-size="24" fill="#7a878c">Colors, themes, icons</text>
+    <path d="M930 36l18 18-18 18" fill="none" stroke="#9ba7ac" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="48" y="1236" font-family="Arial, sans-serif" font-size="23" font-weight="700" fill="#718087">SECURITY &amp; PRIVACY</text>
+  <g transform="translate(48 1286)">
+    <circle cx="34" cy="36" r="28" fill="#ffe4e4"/>
+    <path d="M34 15 53 23v15c0 13-8 22-19 27-11-5-19-14-19-27V23z" fill="none" stroke="#d95353" stroke-width="5"/>
+    <path d="M34 30v13" stroke="#d95353" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="34" cy="50" r="3" fill="#d95353"/>
+    <text x="88" y="31" font-family="Arial, sans-serif" font-size="31" font-weight="600" fill="#1c2529">Security &amp; privacy</text>
+    <text x="88" y="68" font-family="Arial, sans-serif" font-size="24" fill="#7a878c">Screen lock, permissions</text>
+    <path d="M930 36l18 18-18 18" fill="none" stroke="#9ba7ac" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <path d="M48 1402h984" stroke="#e1e7ea" stroke-width="2"/>
+  <g transform="translate(48 1450)">
+    <circle cx="34" cy="36" r="28" fill="#e7f2ff"/>
+    <path d="M21 21h26v31H21zM28 14h12v7H28z" fill="none" stroke="#4b8dcc" stroke-width="5" stroke-linejoin="round"/>
+    <text x="88" y="31" font-family="Arial, sans-serif" font-size="31" font-weight="600" fill="#1c2529">Apps</text>
+    <text x="88" y="68" font-family="Arial, sans-serif" font-size="24" fill="#7a878c">Default apps, permissions, storage</text>
+    <path d="M930 36l18 18-18 18" fill="none" stroke="#9ba7ac" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <rect x="32" y="1688" width="1016" height="190" rx="28" fill="#ffffff" stroke="#e1e7ea" stroke-width="2"/>
+  <text x="72" y="1753" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#1c2529">System update</text>
+  <text x="72" y="1802" font-family="Arial, sans-serif" font-size="24" fill="#7a878c">Your device is up to date</text>
+  <rect x="804" y="1731" width="190" height="66" rx="33" fill="#d8f5e2"/>
+  <text x="849" y="1773" font-family="Arial, sans-serif" font-size="23" font-weight="700" fill="#238c50">CHECK</text>
+  <rect y="2280" width="1080" height="120" fill="#ffffff"/>
+  <path d="M270 2320v34h-34M810 2320v34h34" fill="none" stroke="#809097" stroke-width="5" stroke-linecap="round"/>
+  <text x="205" y="2380" font-family="Arial, sans-serif" font-size="22" fill="#809097">Back</text>
+  <text x="804" y="2380" font-family="Arial, sans-serif" font-size="22" fill="#809097">Home</text>
+</svg>
