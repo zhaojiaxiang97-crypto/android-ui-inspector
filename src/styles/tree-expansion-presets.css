@@ -1,0 +1,41 @@
+.ui-tree .tree-expansion-presets {
+  min-width: 0;
+  padding: 2px 10px 6px;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--ref-line-soft, var(--line));
+  color: var(--ref-muted, var(--muted));
+  background: var(--ref-sidebar, transparent);
+  font: 11px/1.4 var(--ref-font-ui, sans-serif);
+}
+
+.ui-tree .tree-expansion-label { margin-right: 2px; color: var(--ref-faint, var(--muted)); }
+
+.ui-tree .tree-expansion-preset {
+  min-width: 0;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: 1px solid var(--ref-line-soft, var(--line));
+  border-radius: 4px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ui-tree .tree-expansion-preset:hover:not(:disabled) {
+  border-color: var(--ref-blue, var(--lime));
+  color: var(--ref-text, inherit);
+  background: var(--ref-panel-raised, transparent);
+}
+
+.ui-tree .tree-expansion-preset:focus-visible {
+  outline: 2px solid var(--ref-blue, var(--lime));
+  outline-offset: 2px;
+}
+
+.ui-tree .tree-expansion-preset:disabled { opacity: 0.4; cursor: not-allowed; }
