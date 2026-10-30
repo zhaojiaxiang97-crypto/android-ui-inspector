@@ -1,0 +1,6 @@
+<hierarchy>
+  <node class="android.view.View" bounds="[0,0][720,1280]" enabled="1" clickable="0" focusable="1" focused="0" scrollable="0" selected="0">
+    <node index="0" bounds="[0,0][720,64]" visible-to-user="0" enabled="0" clickable="1" />
+    <node index="1" bounds="[ 8, 72 ][ 712, 120 ]" visible-to-user="1" enabled="1" clickable="1" />
+  </node>
+</hierarchy>
