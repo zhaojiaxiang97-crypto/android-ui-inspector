@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "title": "Helper 输入测试页：点击、等待、进入子页、返回",
+  "backend": "accessibility-helper",
+  "timeoutMs": 90000,
+  "startConditions": [
+    { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_main_page" }, "state": "visible" },
+    { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_click_count", "text": "0" }, "state": "visible" },
+    { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_navigation_count", "text": "0" }, "state": "visible" }
+  ],
+  "steps": [
+    {
+      "id": "start_wait",
+      "kind": "step",
+      "input": {
+        "target": { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_start" }, "clickable": true },
+        "action": { "kind": "tap" },
+        "expect": { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_click_count", "text": "1" }, "state": "visible" },
+        "timeoutMs": 15000
+      }
+    },
+    {
+      "id": "wait_ready",
+      "kind": "wait",
+      "condition": { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_ready" }, "state": "visible" },
+      "timeoutMs": 5000
+    },
+    {
+      "id": "open_child",
+      "kind": "step",
+      "input": {
+        "target": { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_open_child" }, "clickable": true },
+        "action": { "kind": "tap" },
+        "expect": { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_child_page" }, "state": "visible" },
+        "timeoutMs": 15000
+      }
+    },
+    {
+      "id": "return_main",
+      "kind": "step",
+      "input": {
+        "action": { "kind": "back" },
+        "expect": { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_main_page" }, "state": "visible" },
+        "timeoutMs": 15000
+      }
+    }
+  ],
+  "finalConditions": [
+    { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_main_page" }, "state": "visible" },
+    { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_child_page" }, "state": "absent" },
+    { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_click_count", "text": "1" }, "state": "visible" },
+    { "selector": { "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_navigation_count", "text": "1" }, "state": "visible" }
+  ]
+}

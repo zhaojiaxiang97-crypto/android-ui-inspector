@@ -1,0 +1,29 @@
+.hidden-layers-popup { position: fixed; z-index: 90; display: flex; flex-direction: column; overflow: hidden; min-height: 0; border: 1px solid var(--ref-line); border-radius: var(--ref-radius-sm); background: var(--ref-panel-raised); color: var(--ref-text-soft); box-shadow: var(--ref-shadow-panel); font: 11px/1.45 var(--ref-font-ui); }
+.hidden-layers-popup header { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: 0 0 auto; padding: 8px 10px; border-bottom: 1px solid var(--ref-line-soft); }
+.hidden-layers-popup h3 { min-width: 0; margin: 0; font-size: 12px; font-weight: 600; color: var(--ref-text); }
+.hidden-layers-popup h3 span { margin-left: 6px; color: var(--ref-muted); font-size: 11px; font-weight: 400; }
+.hidden-layers-popup h3:focus-visible { outline: 1px solid var(--ref-blue); outline-offset: 3px; }
+.hidden-layers-popup button { min-height: 26px; border: 1px solid var(--ref-line-soft); border-radius: 4px; background: transparent; color: var(--ref-text-soft); font: inherit; padding: 3px 7px; cursor: pointer; }
+.hidden-layers-popup button:disabled { opacity: .5; cursor: default; }
+.hidden-layers-popup button:hover:not(:disabled) { background: var(--ref-control-hover); }
+.hidden-layers-popup button:focus-visible, .hidden-layer-path summary:focus-visible { outline: 1px solid var(--ref-blue); outline-offset: 1px; }
+.hidden-layers-popup .hidden-layers-close { width: 26px; flex: 0 0 auto; padding: 0; border-color: transparent; color: var(--ref-muted); font-size: 18px; line-height: 1; }
+.hidden-layers-hint { flex: 0 0 auto; margin: 0; padding: 6px 10px; color: var(--ref-muted); font-size: 10px; overflow-wrap: anywhere; }
+.hidden-layers-items { flex: 1 1 auto; min-height: 50px; overflow: auto; scrollbar-color: var(--ref-scrollbar) transparent; margin: 0; padding: 0; list-style: none; }
+.hidden-layer-item { padding: 8px 10px; border-top: 1px solid var(--ref-line-soft); overflow-wrap: anywhere; }
+.hidden-layer-name { display: block; color: var(--ref-text); font-size: 12px; font-weight: 500; }
+.hidden-layer-detail { margin-top: 4px; display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.hidden-layer-detail > span { color: var(--ref-muted); font-size: 10px; }
+.hidden-layer-detail code { font: 10px/1.45 var(--ref-font-mono); color: var(--ref-text-soft); white-space: pre-wrap; overflow-wrap: anywhere; }
+.hidden-layer-path { margin-top: 4px; min-width: 0; }
+.hidden-layer-path summary { cursor: pointer; color: var(--ref-muted); padding: 2px 0; }
+.hidden-layer-path p { margin: 3px 0 0; color: var(--ref-text-soft); font: 10px/1.5 var(--ref-font-ui); white-space: pre-wrap; overflow-wrap: anywhere; }
+.hidden-layer-ancestor { margin: 5px 0; color: var(--ref-orange); font-size: 10px; }
+.hidden-layer-actions { display: flex; gap: 5px; margin-top: 6px; }
+.hidden-layer-actions .hidden-layer-restore { color: var(--ref-blue); }
+.hidden-layers-popup footer { flex: 0 0 auto; padding: 8px 10px; border-top: 1px solid var(--ref-line); }
+.hidden-layers-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
+.hidden-layers-pagination > span { color: var(--ref-muted); font-size: 10px; }
+.hidden-layers-pagination > div { display: flex; gap: 5px; }
+.hidden-layers-popup .hidden-layers-restore-all { margin-top: 6px; color: var(--ref-blue); }
+.hidden-layers-empty { margin: 0; padding: 15px 10px; color: var(--ref-muted); }
