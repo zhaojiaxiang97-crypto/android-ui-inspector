@@ -1,0 +1,25 @@
+.measurement-card { position: absolute; z-index: 11; transform: translateY(-100%); display: flex; flex-direction: column; box-sizing: border-box; min-width: 0; padding: 10px; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--ref-line-soft); border-radius: 6px; background: var(--ref-panel); color: var(--ref-text); box-shadow: 0 8px 24px #0004; }
+.measurement-card > * { flex: 0 0 auto; min-width: 0; }
+.measurement-card header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
+.measurement-card h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.measurement-card header button { min-height: 28px; padding: 4px 7px; border: 1px solid var(--ref-line-soft); border-radius: 3px; background: transparent; color: var(--ref-text-soft); font: inherit; font-size: 11px; cursor: pointer; }
+.measurement-card header button:hover { color: var(--ref-text); background: var(--ref-panel-raised); }
+.measurement-card header button:focus-visible { outline: 2px solid var(--ref-blue); outline-offset: 2px; }
+.measurement-card-pair { display: grid; gap: 4px; padding-top: 8px; }
+.measurement-card-pair p { display: flex; align-items: baseline; gap: 7px; margin: 0; font-size: 11px; }
+.measurement-card-pair b { flex: 0 0 auto; font: 600 11px var(--ref-font-mono); }
+.measurement-card-pair span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ref-text-soft); }
+.measurement-card-anchor { color: var(--ref-blue); }
+.measurement-card-target { color: var(--ref-orange); }
+.measurement-card-diagram { display: block; box-sizing: border-box; width: 100%; margin: 8px 0 6px; border: 1px solid var(--ref-line-soft); border-radius: 3px; background: var(--ref-panel-raised); }
+.measurement-card-shape { fill: none; stroke: currentColor; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.measurement-card-shape.measurement-card-target { stroke-dasharray: 5 3; }
+.measurement-card-guide { fill: none; stroke: var(--ref-muted); stroke-width: 1; stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
+.measurement-card-relation, .measurement-card-zero { margin: 0 0 6px; font-size: 11px; }
+.measurement-card-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 10px; margin: 0 0 7px; font-size: 11px; }
+.measurement-card-values > div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 5px; }
+.measurement-card-values dt, .measurement-card-values dd { margin: 0; }
+.measurement-card-values dt, .measurement-card-values dd span { color: var(--ref-muted); }
+.measurement-card-values dd { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.measurement-card-alignment { margin: 0 0 7px; color: var(--ref-text-soft); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.measurement-card-units { margin: 0; color: var(--ref-muted); font-size: 10px; }
