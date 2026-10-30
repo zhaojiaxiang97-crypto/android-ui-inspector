@@ -1,0 +1,14 @@
+.zoom-continuous { position: relative; flex: 0 0 auto; min-width: 0; }
+.zoom-continuous-toggle { display: flex; align-items: center; justify-content: center; box-sizing: border-box; width: 28px; height: 25px; padding: 0 3px; border: 1px solid transparent; border-radius: 4px; color: var(--ref-text-soft); cursor: pointer; list-style: none; font: 11px var(--ref-font-ui); }
+.zoom-continuous-toggle::-webkit-details-marker { display: none; }
+.zoom-continuous-toggle:hover, .zoom-continuous[open] .zoom-continuous-toggle { border-color: var(--ref-input-line); background: var(--ref-input); }
+.zoom-continuous-toggle:focus-visible { outline: 2px solid var(--ref-blue); outline-offset: 2px; }
+.zoom-continuous-toggle[aria-disabled="true"] { opacity: .4; cursor: not-allowed; }
+.app-shell.inspection-active .scene-toolbar-host .zoom-continuous-toggle { height: 30px; padding-inline: 4px; }
+.zoom-continuous-popup { position: fixed; z-index: 90; box-sizing: border-box; width: 260px; max-width: calc(100vw - 16px); padding: 12px; border: 1px solid var(--ref-line); border-radius: 6px; background: var(--ref-panel); box-shadow: var(--ref-shadow-panel); color: var(--ref-text-soft); font: 12px/1.5 var(--ref-font-ui); }
+.zoom-continuous-popup label { display: flex; justify-content: space-between; gap: 12px; }
+.zoom-continuous-popup output { font-family: var(--ref-font-mono); }
+.zoom-continuous-popup input { display: block; box-sizing: border-box; width: 100%; height: 24px; margin: 8px 0 0; accent-color: var(--ref-blue); }
+.zoom-continuous-popup input:focus-visible { outline: 2px solid var(--ref-blue); outline-offset: 3px; }
+.zoom-continuous-limits { display: flex; justify-content: space-between; color: var(--ref-muted); font: 10px var(--ref-font-mono); }
+.zoom-continuous-popup p { margin: 8px 0 0; color: var(--ref-muted); font-size: 10px; }
