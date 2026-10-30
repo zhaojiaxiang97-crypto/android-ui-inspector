@@ -1,0 +1,10 @@
+import { createRoot } from "react-dom/client";
+import { diagnosisHandoffFixture } from "./diagnosis-handoff-fixture";
+import { createWorkbenchEntryChecks } from "./workbench-entry-checks";
+import { verifySnapshotLibrary } from "./snapshot-library-checks";
+const canvas = document.createElement("canvas"); canvas.width = 360; canvas.height = 640;
+const context = canvas.getContext("2d")!; context.fillStyle = "#182332"; context.fillRect(0, 0, 360, 640);
+const source = diagnosisHandoffFixture(canvas.toDataURL("image/png"));
+const host = document.createElement("div"); document.body.append(host);
+const root = createRoot(host), entry = createWorkbenchEntryChecks(root, source);
+Object.assign(window, { verifyWorkbenchControllers: async () => ({ library: await verifySnapshotLibrary(root, { ...source, captureRequestDiagnostics: undefined }), entry: await entry.verify() }) });
