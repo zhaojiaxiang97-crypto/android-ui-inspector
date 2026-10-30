@@ -1,0 +1,9 @@
+.context-hint { box-sizing: border-box; display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; padding: 7px 10px; border: 1px solid var(--ref-line-soft); border-left: 2px solid var(--ref-blue); border-radius: 4px; color: var(--ref-text-soft); background: var(--ref-panel); font-size: 12px; }
+.app-shell.inspection-active .preview-pane > .context-hint { flex: 0 0 auto; margin: 8px 24px 0; }
+.context-hint[aria-hidden="true"] { visibility: hidden; pointer-events: none; }
+.context-hint-icon { display: grid; place-items: center; flex: 0 0 16px; height: 16px; border: 1px solid var(--ref-blue); border-radius: 50%; color: var(--ref-blue); font-size: 11px; font-weight: 600; }
+.context-hint p { flex: 1 1 auto; min-width: 0; margin: 0; overflow-wrap: anywhere; line-height: 1.5; }
+.context-hint-dismiss { flex: 0 0 auto; min-height: 28px; padding: 3px 7px; border: 1px solid var(--ref-line-soft); border-radius: 3px; color: var(--ref-text-soft); background: transparent; font: inherit; cursor: pointer; }
+.context-hint-dismiss:hover { color: var(--ref-text); background: var(--ref-panel-raised); }
+.context-hint-dismiss:focus-visible { outline: 2px solid var(--ref-blue); outline-offset: 2px; }
+@media (max-width: 540px) { .context-hint { gap: 6px; padding: 6px 7px; font-size: 11px; } }
