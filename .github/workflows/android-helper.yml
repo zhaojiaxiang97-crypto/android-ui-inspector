@@ -1,0 +1,36 @@
+name: Android SDK and Helper build gate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  android:
+    name: Pinned Android source and APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+      - name: Install Android platform and build tools
+        run: sdkmanager --install "platforms;android-30" "platforms;android-36" "build-tools;36.0.0"
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Verify Android SDK and samples
+        run: bun scripts/ci-android-sdk.mjs
+      - name: Verify pinned Helper source and compile APK
+        run: bun scripts/ci-android-helper.mjs
+      - name: Verify Helper protocol invariants
+        run: bun test tests/recognition-helper.test.ts tests/helper-input-scan.test.ts tests/helper-target-probe.test.ts tests/helper-input-dispatch.test.ts tests/debug-request-ledger.test.ts tests/target-scan-feasibility.test.ts tests/regression-quality.test.ts tests/inspection-provenance.test.ts
