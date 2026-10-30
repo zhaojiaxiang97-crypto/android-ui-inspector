@@ -1,0 +1,19 @@
+.inspector-node-path { margin: 0 0 8px; padding-bottom: 8px; border-bottom: 1px solid var(--ref-line-soft); min-width: 0; }
+.inspector-path-heading { display: flex; justify-content: space-between; margin-bottom: 5px; color: var(--ref-muted); font-size: 10px; }
+.inspector-node-path ol { margin: 0; padding: 0; list-style: none; }
+.inspector-path-compact { display: flex; align-items: center; gap: 3px; }
+.inspector-path-compact > li { display: flex; align-items: center; flex: 1; gap: 3px; min-width: 0; }
+.inspector-path-compact > li:last-child { flex: 1.4; }
+.inspector-path-compact > li.inspector-path-omission { flex: 0 0 auto; }
+.inspector-path-node, .inspector-path-current { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 3px; font-size: 11px; }
+.inspector-path-node { padding: 3px 4px; border: 0; background: transparent; color: var(--ref-muted); text-align: left; cursor: pointer; }
+.inspector-path-node:hover { background: var(--ref-panel-raised); color: var(--ref-text); }
+.inspector-path-current { padding: 3px 4px; color: var(--ref-text); }
+.inspector-path-separator { flex: 0 0 auto; color: var(--ref-muted); font-size: 10px; }
+.inspector-path-overflow { flex: 0 0 20px; padding: 1px 3px; border: 1px solid var(--ref-line-soft); border-radius: 3px; background: transparent; color: var(--ref-muted); cursor: pointer; }
+.inspector-path-node:focus-visible, .inspector-path-overflow:focus-visible, .inspector-path-current:focus { outline: 1px solid var(--ref-blue); outline-offset: -1px; }
+.inspector-path-node:disabled { opacity: .45; cursor: default; }
+.inspector-node-path .inspector-path-full { display: grid; gap: 2px; margin-top: 6px; padding: 4px; max-height: 160px; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--ref-line-soft); border-radius: 4px; }
+.inspector-path-full > li { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.inspector-path-depth { flex: 0 0 22px; color: var(--ref-muted); font-size: 10px; text-align: right; }
+.inspector-path-full .inspector-path-node { flex: 1; }

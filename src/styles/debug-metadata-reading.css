@@ -1,0 +1,26 @@
+.inspector-debug-reader-entry { grid-column: 1 / -1; }
+.inspector-debug-reader-entry button, .inspector-debug-branch-copy { min-height: 24px; padding: 2px 5px; border: 1px solid var(--ref-input-line); border-radius: 3px; background: var(--ref-input); color: var(--ref-text-soft); font: 10px/1.5 var(--ref-font-ui); cursor: pointer; }
+.inspector-debug-reader-entry button:disabled { opacity: .45; cursor: default; }
+.inspector-debug-reader-entry button:focus-visible, .inspector-debug-branch-copy:focus-visible { outline: 1px solid var(--ref-blue); outline-offset: 1px; }
+.entry-dialog.debug-metadata-reader { display: flex; flex-direction: column; box-sizing: border-box; width: min(760px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); padding: 18px; overflow: hidden; }
+.entry-dialog.debug-metadata-reader:not([open]) { display: none; }
+.debug-metadata-reader .entry-dialog-heading { flex: 0 0 auto; gap: 8px; }
+.debug-metadata-reader .entry-dialog-heading h2 { min-width: 0; overflow-wrap: anywhere; font-size: 17px; }
+.debug-metadata-reader .entry-dialog-close { flex: 0 0 auto; }
+.debug-metadata-reader-context { margin: 8px 0; font: 11px/1.5 var(--ref-font-ui); color: var(--ref-muted); overflow-wrap: anywhere; }
+.debug-metadata-reader-context p { margin: 2px 0; }
+.debug-metadata-reader-context code { color: var(--ref-text-soft); font: 11px/1.5 var(--ref-font-mono); }
+.debug-metadata-reader-tools { display: flex; flex-wrap: wrap; align-items: end; gap: 6px 10px; padding-bottom: 10px; border-bottom: 1px solid var(--ref-line-soft); }
+.debug-metadata-reader-tools label { display: grid; flex: 1 1 140px; min-width: 0; gap: 3px; color: var(--ref-muted); font: 11px/1.5 var(--ref-font-ui); }
+.debug-metadata-reader-tools input { box-sizing: border-box; width: 100%; min-width: 0; min-height: 30px; padding: 4px 7px; border: 1px solid var(--ref-input-line); border-radius: 4px; background: var(--ref-input); color: var(--ref-text); font: inherit; }
+.debug-metadata-reader-tools button { min-height: 30px; padding: 4px 7px; border: 1px solid var(--ref-input-line); border-radius: 4px; background: var(--ref-input); color: var(--ref-text-soft); font: 11px/1.5 var(--ref-font-ui); cursor: pointer; }
+.debug-metadata-reader-tools :focus-visible { outline: 1px solid var(--ref-blue); outline-offset: 1px; }
+.debug-metadata-reader-search-status { flex: 0 0 auto; margin: 6px 0 0; color: var(--ref-muted); font: 11px/1.5 var(--ref-font-ui); }
+.debug-metadata-reader-body { min-height: 0; min-width: 0; padding: 10px 2px 2px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.debug-metadata-reader-body .inspector-debug-fields { margin: 0; }
+.debug-metadata-reader-body .inspector-debug-tree-field { grid-template-columns: minmax(80px, .6fr) minmax(0, 1fr); }
+.debug-metadata-reader-body .inspector-debug-tree-leaf > div { grid-template-columns: minmax(80px, .6fr) minmax(0, 1fr); }
+.debug-metadata-reader-body .inspector-debug-tree-path { color: var(--ref-muted); font: 10px/1.5 var(--ref-font-mono); overflow-wrap: anywhere; }
+.debug-metadata-reader-body dt small { display: block; color: var(--ref-muted); font: 9px/1.5 var(--ref-font-ui); }
+.debug-metadata-reader-body .inspector-debug-match { border-radius: 3px; background: rgba(118, 160, 230, .15); outline: 1px solid var(--ref-blue); outline-offset: -1px; }
+.debug-metadata-reader-body .inspector-debug-branch-copy { flex: 0 0 auto; }
