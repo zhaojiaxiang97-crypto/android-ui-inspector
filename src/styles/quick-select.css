@@ -1,0 +1,27 @@
+.quick-select-tool[aria-pressed="true"] { color: var(--ref-blue); background: var(--ref-panel-raised); }
+.quick-select-panel { position: absolute; z-index: 12; top: 12px; right: 12px; display: flex; flex-direction: column; box-sizing: border-box; width: 340px; max-width: calc(100% - 24px); max-height: calc(100% - 24px); overflow: auto; overscroll-behavior: contain; padding: 12px; border: 1px solid var(--ref-line-soft); border-radius: 6px; background: var(--ref-panel); color: var(--ref-text); box-shadow: 0 8px 24px #0004; }
+.quick-select-panel > :not(.quick-select-candidates) { flex: 0 0 auto; }
+.quick-select-panel header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.quick-select-panel h3 { min-width: 0; margin: 0; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.quick-select-close { flex: 0 0 28px; height: 28px; border: 0; border-radius: 3px; background: transparent; color: var(--ref-muted); font-size: 20px; cursor: pointer; }
+.quick-select-close:hover { color: var(--ref-text); background: var(--ref-panel-raised); }
+.quick-select-help { margin: 7px 0; color: var(--ref-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.quick-select-branch { margin: 7px 0; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-select-branch span, .quick-select-count { color: var(--ref-muted); font-size: 10px; }
+.quick-select-count { margin-bottom: 7px; overflow-wrap: anywhere; }
+.quick-select-candidates { flex: 1 1 auto; min-height: 60px; list-style: none; margin: 0; padding: 0; max-height: min(360px, 50vh); overflow: auto; overscroll-behavior: contain; }
+.quick-select-candidates li + li { border-top: 1px solid var(--ref-line-soft); }
+.quick-select-candidate { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; width: 100%; padding: 8px 5px; border: 0; border-radius: 3px; background: transparent; color: var(--ref-text); text-align: left; cursor: pointer; }
+.quick-select-candidate strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.quick-select-candidate small { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ref-muted); font-size: 10px; }
+.quick-select-candidate span { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ref-muted); font-size: 10px; }
+.quick-select-candidate:hover { background: var(--ref-panel-raised); }
+.quick-select-candidate:focus-visible, .quick-select-close:focus-visible, .quick-select-pages button:focus-visible { outline: 1px solid var(--ref-blue); outline-offset: -1px; }
+.quick-select-candidate:disabled { opacity: .45; cursor: default; }
+.quick-select-pages { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; padding-top: 9px; margin-top: 7px; border-top: 1px solid var(--ref-line-soft); }
+.quick-select-pages span { color: var(--ref-muted); font-size: 10px; text-align: center; }
+.quick-select-pages button { padding: 5px 7px; border: 1px solid var(--ref-line-soft); border-radius: 3px; background: transparent; color: var(--ref-text); font-size: 11px; cursor: pointer; }
+.quick-select-pages button:disabled { opacity: .4; cursor: default; }
+.layer-quick-select-outline { position: absolute; z-index: 3; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.layer-quick-select-outline polygon { fill: #6da9ff14; stroke: var(--ref-blue, #6da9ff); stroke-width: 2; vector-effect: non-scaling-stroke; }
+@media (max-width: 420px) { .quick-select-panel { padding: 9px; } .quick-select-candidate small { max-width: 84px; } }

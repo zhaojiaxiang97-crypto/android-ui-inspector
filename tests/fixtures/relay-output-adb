@@ -1,0 +1,9 @@
+#!/usr/bin/env bun
+const args = process.argv.slice(2);
+const at = args.indexOf("forward");
+if (at >= 0) process.stdout.write(args[at + 1] === "--remove" ? "" : "23456\n");
+else {
+  const output = Buffer.alloc(400000);
+  for (let i = 0; i < output.length; i++) output[i] = i % 256;
+  await new Promise<void>(resolve => process.stdout.write(output, () => resolve()));
+}
