@@ -1,0 +1,42 @@
+#!/usr/bin/env bun
+// Isolated readiness fixture: never contacts a phone or delegates to a real adb.
+import { appendFileSync, readFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+if (args[0] !== "-s" || args[1] !== "startup-fixture" || !process.env.STARTUP_ADB_LOG) process.exit(2);
+appendFileSync(process.env.STARTUP_ADB_LOG, JSON.stringify(args.slice(2)) + "\n");
+const command = args.slice(2).join(" ");
+if (command === "shell dumpsys activity activities") {
+  const reads = readFileSync(process.env.STARTUP_ADB_LOG, "utf8").split("\n").filter(line => line.includes('"activity","com.example.startup"')).length;
+  const observed = readFileSync(process.env.STARTUP_ADB_LOG, "utf8").includes('"window","windows"');
+  const activity = process.env.STARTUP_READY_FIXTURE === "component-change" && reads >= 1 ? ".OtherActivity" : ".MainActivity";
+  const token = process.env.STARTUP_READY_FIXTURE === "instance-change" && reads >= 1
+    || process.env.STARTUP_READY_FIXTURE === "candidate-instance-change" && observed ? "def" : "abc";
+  console.log(`mResumedActivity: ActivityRecord{${token} u0 com.example.startup/${activity} t1}`);
+} else if (command === "shell run-as com.example.startup id") {
+  console.log("uid=10001(com.example.startup) gid=10001");
+} else if (command === "shell dumpsys activity com.example.startup") {
+  const reads = readFileSync(process.env.STARTUP_ADB_LOG, "utf8").split("\n").filter(line => line.includes('"activity","com.example.startup"')).length;
+  console.log("ACTIVITY com.example.startup/.MainActivity abc pid=42\n" + (process.env.STARTUP_READY_FIXTURE && (process.env.STARTUP_READY_FIXTURE !== "tree-delay" || reads > 1)
+    ? "    View Hierarchy:\n      DecorView@abcdef[MainActivity]\n        android.widget.TextView{123456 V.E...... ........ 0,0-100,100}\n    Looper (main)"
+    : "  No hierarchy yet"));
+} else if (process.env.STARTUP_READY_FIXTURE && command === "shell dumpsys window windows") {
+  const reads = readFileSync(process.env.STARTUP_ADB_LOG, "utf8").split("\n").filter(line => line.includes('"window","windows"')).length;
+  const id = process.env.STARTUP_READY_FIXTURE === "window-change" && reads >= 3 ? "def" : "abc";
+  console.log(process.env.STARTUP_READY_FIXTURE === "focus-delay" && reads < 3 || ["cancel-wait", "focus-null"].includes(process.env.STARTUP_READY_FIXTURE)
+    ? "mCurrentFocus=null" : `mCurrentFocus=Window{${id} u0 com.example.startup/.MainActivity}`);
+} else if (process.env.SDK_TREE_FIXTURE === "timeout" && command === "shell pidof com.example.startup") {
+  console.log("42");
+} else if (process.env.SDK_TREE_FIXTURE === "timeout" && command.startsWith("shell content call ") && command.includes("--method capture --arg ")) {
+  console.log("Result: Bundle[{error=View tree timed out}]");
+} else if (process.env.STARTUP_PID_FIXTURE === "multi" && command === "shell pidof com.example.startup") {
+  console.log("43 42");
+} else if (process.env.STARTUP_PID_FIXTURE === "multi" && command === "shell dumpsys window windows") {
+  console.log("mCurrentFocus=Window{abc u0 com.example.startup/.MainActivity}");
+} else if (command.startsWith("shell content call ") && command.includes("--method open-session")) {
+  console.error("Fixture has no SDK Provider");
+  process.exit(1);
+} else {
+  console.error("Unexpected fixture command");
+  process.exit(2);
+}
