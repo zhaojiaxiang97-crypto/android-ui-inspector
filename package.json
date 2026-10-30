@@ -1,0 +1,104 @@
+{
+  "name": "android-ui-inspector",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Cross-platform Android UI hierarchy inspector",
+  "author": "Android UI Inspector contributors",
+  "homepage": "https://github.com/zhaojiaxiang97-crypto/android-ui-inspector",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "bin": { "android-ui": "dist-electron/cli.cjs" },
+  "scripts": {
+    "dev": "concurrently -k \"bun run dev:renderer\" \"bun run dev:main\" \"bun run dev:preload\" \"bun run dev:mcp\" \"bun run dev:electron\"",
+    "dev:renderer": "vite --host 127.0.0.1 --port 1420",
+    "dev:main": "bun run build:webp-alpha && bun build electron/main.ts --outfile dist-electron/main.cjs --target node --format cjs --external electron --external sharp --watch",
+    "dev:preload": "bun build electron/preload.ts --outfile dist-electron/preload.cjs --target node --format cjs --external electron --watch",
+    "dev:mcp": "bun build electron/automation/mcp.ts --outfile dist-electron/mcp.cjs --target node --format cjs --watch",
+    "dev:electron": "wait-on http://127.0.0.1:1420 dist-electron/main.cjs dist-electron/preload.cjs dist-electron/mcp.cjs && node scripts/start-electron.cjs --dev",
+    "build": "tsc && bun run build:renderer && bun run build:electron && bun run build:mcp && bun run build:cli",
+    "build:mcp": "bun build electron/automation/mcp.ts --outfile dist-electron/mcp.cjs --target node --format cjs",
+    "build:cli": "bun build electron/automation/cli.ts --outfile dist-electron/cli.cjs --target node --format cjs",
+    "cli": "bun electron/automation/cli.ts",
+    "mcp": "node dist-electron/mcp.cjs",
+    "build:renderer": "vite build",
+    "build:webp-alpha": "node scripts/build-webp-alpha.mjs",
+    "build:electron": "bun run build:webp-alpha && bun build electron/main.ts --outfile dist-electron/main.cjs --target node --format cjs --external electron --external sharp && bun build electron/preload.ts --outfile dist-electron/preload.cjs --target node --format cjs --external electron",
+    "test": "bun test tests",
+    "test:tree-ui": "bun run scripts/render-benchmark.mjs --checks-only",
+    "test:diagnosis-handoff": "node scripts/diagnosis-handoff-checks.mjs",
+    "test:packaged-handoff": "node scripts/packaged-handoff-checks.mjs",
+    "test:packaged-readonly": "bun scripts/packaged-readonly-check.ts",
+    "test:coordinates": "node scripts/coordinate-checks.mjs",
+    "test:layer-images": "node scripts/layer-image-checks.mjs",
+    "test:dpi": "node scripts/dpi-checks.mjs",
+    "prepare:windows": "node scripts/prepare-windows-runtime.cjs",
+    "diagnose:startup": "node scripts/startup-probe.mjs",
+    "smoke:app": "bun run build && node --experimental-websocket scripts/app-smoke.mjs",
+    "visual:baseline": "bun run build && bun scripts/visual-baseline.mjs",
+    "visual:home": "bun run build && node scripts/visual-baseline.mjs --home",
+    "visual:home:states": "bun run build && node scripts/visual-baseline.mjs --home-states",
+    "smoke:fixture-dpi": "bun run build && node scripts/fixture-dpi-smoke.mjs",
+    "benchmark:tree": "bun run scripts/tree-benchmark.ts",
+    "benchmark:layers": "bun run scripts/layer-benchmark.ts",
+    "benchmark:render": "bun run scripts/render-benchmark.mjs",
+    "preview": "vite preview",
+    "start": "node scripts/start-electron.cjs",
+    "package": "bun run build && electron-builder --publish never",
+    "package:win": "bun run build && electron-builder --win --publish never",
+    "package:mac": "bun run build && electron-builder --mac --publish never",
+    "package:linux": "bun run build && electron-builder --linux --publish never"
+  },
+  "build": {
+    "appId": "com.androiduiinspector.desktop",
+    "productName": "Android UI Inspector",
+    "directories": {
+      "output": "release"
+    },
+    "asar": true,
+    "extraResources": [
+      { "from": "dist-electron/mcp.cjs", "to": "mcp/server.cjs" },
+      { "from": "dist-electron/cli.cjs", "to": "cli/android-ui.cjs" }
+    ],
+    "afterPack": "build/after-pack.cjs",
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": ["nsis"]
+    },
+    "nsis": {
+      "include": "build/installer.nsh"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": ["dmg", "zip"]
+    },
+    "linux": {
+      "category": "Development",
+      "maintainer": "Android UI Inspector contributors",
+      "target": ["AppImage", "deb"]
+    }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.1",
+    "fast-xml-parser": "^5.11.1",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "sharp": "0.35.5",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^6.0.2",
+    "concurrently": "^10.0.5",
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16",
+    "wait-on": "^9.1.0"
+  }
+}
