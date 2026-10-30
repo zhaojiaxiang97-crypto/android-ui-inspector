@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:allowBackup="false" android:label="Inspector Legacy SDK Windows"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name="com.androiduiinspector.sdkfree.HardwareTextActivity"
+            android:exported="true" android:hardwareAccelerated="true" />
+        <activity android:name="com.androiduiinspector.sdkfree.SoftwareTextActivity"
+            android:exported="true" android:hardwareAccelerated="false" />
+    </application>
+</manifest>
