@@ -1,0 +1,13 @@
+.debug-session-progress { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--ref-line); border-radius: var(--ref-radius-sm); background: var(--ref-panel-raised); color: var(--ref-text); font-size: 12px; overflow-wrap: anywhere; }
+.debug-session-progress-title { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.debug-session-progress-title > span, .debug-session-progress p { color: var(--ref-muted); }
+.debug-session-progress-title button { margin-left: auto; }
+.debug-session-progress p { margin: 7px 0; line-height: 1.6; }
+.debug-session-progress dl { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 10px 0 0; }
+.debug-session-progress dl > div { display: flex; gap: 7px; }
+.debug-session-progress dt { color: var(--ref-muted); }
+.debug-session-progress dd { margin: 0; }
+.debug-session-log-option { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; line-height: 1.6; margin-bottom: 7px; }
+.debug-session-log-option input { accent-color: var(--ref-blue); }
+.debug-session-log-option small { color: var(--ref-muted); flex-basis: 100%; margin-left: 21px; font-size: 11px; }
+.debug-session-log-option input:focus-visible, .debug-session-progress button:focus-visible { outline: 2px solid var(--ref-blue); outline-offset: 2px; }
