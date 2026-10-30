@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "title": "Helper 固定列表：连续滚动并确认第 24 项",
+  "backend": "accessibility-helper",
+  "timeoutMs": 45000,
+  "startConditions": [
+    {
+      "selector": {
+        "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_main_page"
+      },
+      "state": "visible"
+    },
+    {
+      "selector": {
+        "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_list_first"
+      },
+      "state": "visible"
+    },
+    {
+      "selector": {
+        "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_scroll_y",
+        "text": "0"
+      },
+      "state": "visible"
+    },
+    {
+      "selector": {
+        "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_list_end"
+      },
+      "state": "absent"
+    }
+  ],
+  "steps": [
+    {
+      "id": "find_list_end",
+      "kind": "scroll-until",
+      "input": {
+        "target": {
+          "selector": {
+            "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_scroll",
+            "className": "android.widget.ScrollView"
+          }
+        },
+        "direction": "down",
+        "until": {
+          "selector": {
+            "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_list_end",
+            "text": "末项 · 第24项"
+          },
+          "kind": "end_marker"
+        },
+        "maxScrolls": 6,
+        "timeoutMs": 30000,
+        "distance": 0.6,
+        "durationMs": 350
+      }
+    }
+  ],
+  "finalConditions": [
+    {
+      "selector": {
+        "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_list_end"
+      },
+      "state": "visible"
+    },
+    {
+      "selector": {
+        "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_scroll_changed"
+      },
+      "state": "visible"
+    },
+    {
+      "selector": {
+        "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_click_count",
+        "text": "0"
+      },
+      "state": "visible"
+    },
+    {
+      "selector": {
+        "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_navigation_count",
+        "text": "0"
+      },
+      "state": "visible"
+    },
+    {
+      "selector": {
+        "resourceId": "com.androiduiinspector.sdkfree:id/input_diagnostics_coordinate_click_count",
+        "text": "0"
+      },
+      "state": "visible"
+    }
+  ]
+}
