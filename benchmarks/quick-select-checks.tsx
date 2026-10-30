@@ -1,0 +1,206 @@
+import { createRef } from "react";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
+import type { LayerFocus, UiNode } from "../shared/types";
+import { ScreenshotPreview } from "../src/components/ScreenshotPreview";
+import { Layer3DPreview } from "../src/features/layers/Layer3DPreview";
+import type { LayerCamera, LayerSceneHandle } from "../src/features/layers/types";
+import type { QuickSelectResult } from "../src/features/layers/quick-select";
+import { makeNode } from "./fixtures";
+
+function check(value: unknown, message: string): asserts value { if (!value) throw new Error(`Quick select: ${message}`); }
+const tick = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+async function until(predicate: () => boolean, message: string) {
+  const deadline = performance.now() + 5000;
+  while (!predicate()) { check(performance.now() < deadline, message); await tick(); }
+}
+function image(w: number, h: number, color: string, trim = false) {
+  const canvas = document.createElement("canvas"); canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext("2d")!; ctx.fillStyle = color;
+  if (trim) ctx.fillRect(40, 25, w - 80, h - 50); else ctx.fillRect(0, 0, w, h);
+  return canvas.toDataURL("image/png");
+}
+function fixture(paging = false, trim = false) {
+  const node = (id: string, label: string, l: number, t: number, r: number, b: number, color: string): UiNode => ({
+    ...makeNode(id), text: label, className: "android.widget.TextView", bounds: { left: l, top: t, right: r, bottom: b, raw: `[${l},${t}][${r},${b}]` },
+    layerImageDataUrl: image(r - l, b - t, color, trim), layerImageSize: { width: r - l, height: b - t },
+  });
+  const root = node("quick-root", "快速选择根", 0, 0, 400, 320, "#162030"); root.layerImageEmpty = true;
+  const branch = node("folded-branch", "折叠业务容器", 60, 40, 360, 280, "#224938"); branch.className = "android.widget.FrameLayout";
+  const container = node("inner-container", "内部信息容器", 100, 80, 280, 220, "#275e46"); container.className = "android.widget.LinearLayout";
+  const text = node("inner-text", "深层标题文字", 140, 120, 220, 160, "#db9453"); container.children = [text]; branch.children = [container];
+  if (paging) for (let i = 0; i < 71; i++) branch.children.push(node(`overlap-${i}`, `重叠候选 ${i}`, 130, 110, 240, 180, "#224938"));
+  const other = node("other-control", "另一控件", 10, 280, 80, 315, "#486caa"); root.children = [branch, other];
+  return { root, branch, text, other, src: image(400, 320, "#162030") };
+}
+
+async function verifyPaintedQuickSelection() {
+  const host = document.createElement("div"); Object.assign(host.style, { width: "680px", height: "450px", position: "relative" }); document.body.append(host);
+  const mounted = createRoot(host), scene = createRef<LayerSceneHandle>(), original = fixture(), sourceBefore = JSON.stringify(original.root);
+  let root = original.root, expanded: ReadonlySet<string> = new Set([root.id]), hidden: ReadonlySet<string> = new Set(), session = 1;
+  const camera: LayerCamera = { distance: 1100, azimuth: 37, elevation: -17, roll: 12, panX: 14, panY: -9, layerGap: 96 };
+  const render = () => flushSync(() => mounted.render(<Layer3DPreview ref={scene} sessionKey={session} src={original.src} root={root} selectedNode={root.children[0]}
+    expandedNodeIds={expanded} hiddenNodeIds={hidden} size={{ width: 400, height: 320 }} renderScale={.84} origin={{ left: 90, top: 40 }} camera={camera} onSelect={() => { throw new Error("Preview selected a control"); }} />));
+  const canvas = () => host.querySelector<HTMLCanvasElement>(".layer-webgl-canvas")!;
+  const point = (x: number, y: number, id = root.children[0].id) => {
+    const record = host.querySelector<HTMLElement>(`[data-layer-node-id="${id}"]`)!, metadata = host.querySelector<HTMLElement>(".layer-scene")!;
+    const pivot = { x: Number(metadata.dataset.layerPivotX), y: Number(metadata.dataset.layerPivotY), z: Number(metadata.dataset.layerPivotZ) };
+    const yaw = -camera.azimuth * Math.PI / 180, pitch = -camera.elevation * Math.PI / 180, roll = -camera.roll * Math.PI / 180;
+    const cx = 90 + x * .84 - pivot.x, cy = pivot.y - (40 + y * .84), cz = Number(record.dataset.layerZ) * .84 - pivot.z;
+    const rx = Math.cos(yaw) * cx + Math.sin(yaw) * cz, rz = -Math.sin(yaw) * cx + Math.cos(yaw) * cz;
+    const ry = Math.cos(pitch) * cy - Math.sin(pitch) * rz, dz = Math.sin(pitch) * cy + Math.cos(pitch) * rz;
+    const r = canvas().getBoundingClientRect(), perspective = camera.distance / (camera.distance - dz);
+    return { x: r.left + pivot.x + (Math.cos(roll) * rx - Math.sin(roll) * ry) * perspective,
+      y: r.top + pivot.y - (Math.sin(roll) * rx + Math.cos(roll) * ry) * perspective };
+  };
+  let result!: QuickSelectResult;
+  const query = () => { const p = point(180.25, 140.75); return scene.current!.quickSelectAt(p.x, p.y); };
+  try {
+    render(); await until(() => canvas()?.dataset.layerRenderer === "webgl" && Number(canvas().dataset.layerTextureCount) >= 2 && canvas().dataset.layerTexturePendingCount === "0", "folded WebGL textures did not load");
+    result = query(); check(result.status === "ready" && result.branch === original.branch && result.candidates[0].node === original.text, `rotated painted plane mapped incorrectly: ${result.status} ${result.message}`);
+    check(Math.abs(result.point!.x - 180.25) < .06 && Math.abs(result.point!.y - 140.75) < .06, "source coordinates changed after yaw/pitch/roll/pan or page zoom");
+    const otherPoint = point(45, 297, original.other.id);
+    flushSync(() => scene.current!.hover(otherPoint.x, otherPoint.y));
+    flushSync(() => { check(scene.current!.toggleMeasurementPin(), "measurement setup could not be pinned"); });
+    await until(() => Boolean(host.querySelector<HTMLElement>(".layer-measurement-status[data-measure-pinned='true']")), "pinned measurement did not render");
+    const measureBefore = host.querySelector<HTMLElement>(".layer-measurement-status")!.dataset.measureAnchor + ":" + host.querySelector<HTMLElement>(".layer-measurement-status")!.dataset.measureTarget;
+    const gl = canvas().getContext("webgl")!, upload = gl.texImage2D, renderVersion = canvas().dataset.layerRenderVersion; let uploads = 0;
+    gl.texImage2D = ((...args: unknown[]) => { uploads++; Reflect.apply(upload, gl, args); }) as WebGLRenderingContext["texImage2D"];
+    try {
+      flushSync(() => scene.current!.previewQuickSelect(result, result.candidates[0]));
+      check(host.querySelector<SVGElement>('[data-quick-select-node-id="inner-text"]')?.style.visibility === "visible", "candidate hover did not draw its source rectangle");
+      check(Number(getComputedStyle(host.querySelector(".layer-quick-select-outline")!).zIndex) > Number(getComputedStyle(canvas()).zIndex), "candidate outline was painted behind the GPU canvas");
+      await tick(); check(uploads === 0 && canvas().dataset.layerRenderVersion === renderVersion && JSON.stringify(original.root) === sourceBefore, "candidate hover painted GPU textures, expanded or modified the tree");
+      const measure = host.querySelector<HTMLElement>(".layer-measurement-status")!;
+      check(measure.dataset.measurePinned === "true" && `${measure.dataset.measureAnchor}:${measure.dataset.measureTarget}` === measureBefore, "candidate preview changed the pinned measurement pair");
+      flushSync(() => scene.current!.previewQuickSelect(null, null));
+      check(host.querySelector<SVGElement>(".layer-quick-select-outline")?.style.visibility === "hidden", "cancel retained a candidate outline");
+    } finally { gl.texImage2D = upload; }
+
+    expanded = new Set([root.id, original.branch.id, original.branch.children[0].id]); render();
+    await until(() => canvas().dataset.layerAnimationProgress === "1" && canvas().dataset.layerTexturePendingCount === "0", "expanded child motion did not settle");
+    const childPoint = point(180.25, 140.75, original.text.id);
+    check(scene.current!.pick(childPoint.x, childPoint.y) === original.text, "expanded child was not actually pickable before folding");
+    expanded = new Set([root.id]); render();
+    check(Number(canvas().dataset.layerRetiringCount) > 0 && Number(canvas().dataset.layerAnimationProgress) < 1, "folding test did not retain a painted outgoing child");
+    check(scene.current!.pick(childPoint.x, childPoint.y) !== original.text, "retiring child remained normally pickable");
+    const during = scene.current!.quickSelectAt(childPoint.x, childPoint.y);
+    check(!during.branch || during.branch === original.branch, "quick select queried a retiring child plane");
+    await until(() => canvas().dataset.layerAnimationProgress === "1", "folded parent motion did not settle");
+
+    const trimmed = fixture(false, true); root = trimmed.root; render();
+    await until(() => Number(canvas().dataset.layerTrimmedCount) > 0 && Number(canvas().dataset.layerTextureCount) >= 2, "trimmed composites did not settle");
+    result = query(); check(result.status === "ready" && Math.abs(result.point!.x - 180.25) < .06 && Math.abs(result.point!.y - 140.75) < .06, "alpha trimming shifted the source coordinate map");
+    const old = result; session++; render();
+    check(scene.current!.quickSelectPage(old, 0).status === "stale", "same-object new session accepted old candidates");
+    flushSync(() => scene.current!.previewQuickSelect(old, old.candidates[0]));
+    check(host.querySelector<SVGElement>(".layer-quick-select-outline")?.style.visibility === "hidden", "old session preview returned");
+    const empty = fixture(); for (const n of [empty.branch, empty.branch.children[0], empty.text]) { delete n.layerImageDataUrl; delete n.layerImageSize; }
+    root = empty.root; render(); await tick();
+    check(query().status === "missing-image", "missing folded pixels were offered as a painted image");
+    const hiddenPoint = point(180.25, 140.75); hidden = new Set([root.children[0].id]); render();
+    check(scene.current!.quickSelectAt(hiddenPoint.x, hiddenPoint.y).status === "no-plane", "hidden folded branch could be queried");
+    return ["actual WebGL: painted yaw/pitch/roll/pan source coordinates, alpha-trim mapping and page zoom", "candidate SVG preview leaves tree, GPU uploads and pinned measurements untouched; retiring planes, missing/hidden pixels and reused-session callbacks rejected"];
+  } finally { flushSync(() => mounted.unmount()); host.remove(); }
+}
+
+async function verifyQuickSelectControls() {
+  const host = document.createElement("div"); host.className = "app-shell inspection-active"; Object.assign(host.style, { width: "760px", height: "620px", position: "relative" }); document.body.append(host);
+  const mounted = createRoot(host), initial = fixture(true), sourceBefore = JSON.stringify(initial.root);
+  let root = initial.root, expanded: ReadonlySet<string> = new Set([root.id]), session = 1, blocked = false, focus: LayerFocus | null = null;
+  let selected: UiNode | null = initial.branch, navigations = 0, ordinarySelections = 0, doubles = 0;
+  const navigate = (target: UiNode, sourceRoot: UiNode) => {
+    check(sourceRoot === root, "navigation used a different root"); navigations++; selected = target;
+    expanded = new Set([root.id, initial.branch.id, "inner-container"]); renderStable(); return true;
+  };
+  // Keep presentation inputs stable; unrelated renders must not fabricate a new
+  // visibility revision in this component-only fixture.
+  const hidden: ReadonlySet<string> = new Set();
+  const renderStable = () => flushSync(() => mounted.render(<div className="preview-pane"><ScreenshotPreview sessionKey={session} src={initial.src} root={root} selectedNode={selected}
+    expandedNodeIds={expanded} onSelect={() => { ordinarySelections++; }} onNavigateNode={navigate} navigationDisabled={blocked}
+    layerFocus={focus} hiddenNodeIds={hidden} doubleClickAction="toggle" onDoubleClick={() => { doubles++; }} onLayerAction={() => {}} onOpenLayerMenu={() => {}} /></div>));
+  const click = (selector: string) => { const el = host.querySelector<HTMLElement>(selector); check(el, `missing ${selector}`); flushSync(() => el.click()); };
+  const frame = () => host.querySelector<HTMLElement>(".screenshot-frame")!, canvas = () => host.querySelector<HTMLCanvasElement>(".layer-webgl-canvas")!;
+  const panel = () => host.querySelector<HTMLElement>(".quick-select-panel");
+  const open = async () => {
+    await until(() => Boolean(host.querySelector<HTMLButtonElement>(".view-mode-toggle button:last-child") && !host.querySelector<HTMLButtonElement>(".view-mode-toggle button:last-child")!.disabled), "3D view control unavailable after image decode");
+    if (!host.querySelector(".quick-select-tool")) click(".view-mode-toggle button:last-child");
+    await until(() => canvas()?.dataset.layerRenderer === "webgl" && Number(canvas().dataset.layerTextureCount) >= 1 && canvas().dataset.layerTexturePendingCount === "0", "ScreenshotPreview folded scene unavailable").catch(error => {
+      throw new Error(`${error.message}: ${JSON.stringify({ frame: frame()?.getBoundingClientRect().toJSON(), canvas: canvas()?.getBoundingClientRect().toJSON(), data: canvas()?.dataset, scene: host.querySelector<HTMLElement>(".layer-scene")?.dataset, active: host.querySelector(".view-mode-toggle .active")?.textContent })}`);
+    });
+    click(".quick-select-tool"); check(panel(), "tool did not open its instruction panel");
+  };
+  const pointSelect = (x: number, y: number) => {
+    const target = canvas(), rect = target.getBoundingClientRect();
+    const px = rect.left + x, py = rect.top + y;
+    flushSync(() => { target.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 71, button: 0, clientX: px, clientY: py, pointerType: "mouse", isPrimary: true }));
+      target.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 71, button: 0, clientX: px, clientY: py, pointerType: "mouse", isPrimary: true })); });
+  };
+  const findCandidates = async () => {
+    // Normal candidate checks need the folded plane to finish replacing its
+    // outgoing children. The separate middle-frame check below keeps testing
+    // selection during motion without snapping the animation.
+    await until(() => canvas().dataset.layerAnimationProgress === "1" && canvas().dataset.layerTexturePendingCount === "0", "candidate search fold did not settle");
+    // Real GPU-pick probes, without assuming a flattened screen coordinate.
+    const rect = canvas().getBoundingClientRect();
+    for (let y = 40; y < rect.height - 20; y += 20) for (let x = 30; x < rect.width - 20; x += 20) {
+      if (panel()?.contains(document.elementFromPoint(rect.left + x, rect.top + y))) continue;
+      pointSelect(x, y);
+      if (host.querySelector('[data-quick-select-id="inner-text"]')) return;
+    }
+    throw new Error("Quick select: collapsed text could not be reached through real pointer gestures");
+  };
+  try {
+    renderStable(); await until(() => Boolean(host.querySelector<HTMLImageElement>("img")?.naturalWidth), "preview image did not load");
+    await open(); await findCandidates();
+    check(host.querySelectorAll(".quick-select-candidate").length === 30 && panel()!.textContent!.includes("73 个匹配"), "candidate count/page bound was lost");
+    check(ordinarySelections === 0 && doubles === 0 && expanded.size === 1, "opening candidates selected, expanded or double-clicked a plane");
+    const yaw = frame().dataset.cameraPaintAzimuth;
+    flushSync(() => host.querySelector<HTMLButtonElement>(".quick-select-candidate")!.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown" })));
+    check(frame().dataset.cameraPaintAzimuth === yaw && document.activeElement?.classList.contains("quick-select-candidate"), "candidate keyboard navigation rotated the camera");
+    click(".quick-select-pages button:last-child"); check(host.querySelectorAll(".quick-select-candidate").length === 30 && panel()!.textContent!.includes("2 / 3"), "next page did not expose the remaining candidates");
+    click(".quick-select-pages button:first-child");
+    for (const width of [760, 300, 248]) {
+      host.style.width = `${width}px`; await tick(); await tick(); const p = panel()!.getBoundingClientRect(), f = frame().getBoundingClientRect();
+      check(p.left >= f.left - 1 && p.right <= f.right + 1 && panel()!.scrollWidth <= panel()!.clientWidth + 1, `candidate panel overflowed ${width}px`);
+      const pager = host.querySelector<HTMLElement>(".quick-select-pages")!.getBoundingClientRect();
+      check(pager.bottom <= p.bottom + 1 && pager.top >= p.top, `candidate pager was clipped at ${width}px`);
+    }
+    host.style.width = "760px"; await tick(); await tick();
+    const checkpoint = (window as typeof window & { quickSelectVisualCheckpoint?: () => Promise<void> }).quickSelectVisualCheckpoint;
+    if (checkpoint) await checkpoint();
+    click('[data-quick-select-id="inner-text"]'); check(navigations === 1 && selected?.id === "inner-text" && !panel(), "confirmation did not use workspace navigation and close");
+    check(JSON.stringify(initial.root) === sourceBefore, "quick selection changed captured source data");
+    expanded = new Set([root.id]); renderStable(); await open(); await findCandidates();
+    const escapedView = host.querySelector<HTMLElement>(".view-mode-toggle .active")?.textContent;
+    flushSync(() => document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" })));
+    check(!panel() && host.querySelector<HTMLElement>(".view-mode-toggle .active")?.textContent === escapedView && document.activeElement?.classList.contains("quick-select-tool"), "Escape changed the view or failed to restore tool focus");
+    await open(); await findCandidates(); blocked = true; renderStable();
+    check(!panel() && host.querySelector<HTMLButtonElement>(".quick-select-tool")!.disabled, "refresh/busy state retained an actionable candidate list");
+    blocked = false; expanded = new Set([root.id, initial.branch.id, "inner-container"]); renderStable();
+    await until(() => canvas().dataset.layerAnimationProgress === "1" && canvas().dataset.layerTexturePendingCount === "0", "expanded tool scene did not settle");
+    expanded = new Set([root.id]); renderStable();
+    check(Number(canvas().dataset.layerRetiringCount) > 0 && Number(canvas().dataset.layerAnimationProgress) < 1, "tool animation fixture did not retain a painted middle frame");
+    click(".quick-select-tool"); const beforePointer = Number(canvas().dataset.layerAnimationProgress), actualCanvas = canvas(), rect = actualCanvas.getBoundingClientRect();
+    const px = rect.left + Number(actualCanvas.dataset.layerProbeX), py = rect.top + Number(actualCanvas.dataset.layerProbeY);
+    flushSync(() => actualCanvas.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 72, button: 0, clientX: px, clientY: py, pointerType: "mouse", isPrimary: true })));
+    check(Number(canvas().dataset.layerAnimationProgress) < 1 && Number(canvas().dataset.layerAnimationProgress) - beforePointer < .1 && Number(canvas().dataset.layerRetiringCount) > 0,
+      `quick-select pointerdown snapped the painted middle frame to its destination: ${JSON.stringify({ beforePointer, afterPointer: canvas().dataset.layerAnimationProgress, retiring: canvas().dataset.layerRetiringCount, active: host.querySelector(".quick-select-tool")?.getAttribute("aria-pressed"), px, py })}`);
+    flushSync(() => actualCanvas.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 72, button: 0, clientX: px, clientY: py, pointerType: "mouse", isPrimary: true })));
+    click(".quick-select-close"); await until(() => canvas().dataset.layerAnimationProgress === "1", "tool frame motion did not finish");
+    await open(); flushSync(() => window.dispatchEvent(new Event("blur"))); check(!panel(), "window blur retained quick-select state");
+    await open(); await findCandidates(); const oldButton = host.querySelector<HTMLButtonElement>('[data-quick-select-id="inner-text"]')!;
+    session++; renderStable(); flushSync(() => oldButton.click()); check(!panel() && navigations === 1, "same-object new session accepted an old candidate button");
+    focus = { node: initial.branch, kind: "layer" }; renderStable();
+    await until(() => !host.querySelector<HTMLButtonElement>(".view-mode-toggle button:last-child")!.disabled, "isolated image did not decode"); click(".view-mode-toggle button:last-child");
+    check(host.querySelector<HTMLButtonElement>(".quick-select-tool")!.disabled, "single-plane isolation permitted out-of-focus descendants");
+    root = structuredClone(root); session++; focus = null; renderStable(); check(!panel(), "same-ID replacement root leaked candidate UI");
+    return ["actual ScreenshotPreview: explicit tool → painted fold → 30-candidate paging → workspace navigation; ordinary selection/double-click unchanged",
+      "candidate keyboard/hover, 760/300/248px panel/pager bounds, painted middle-frame pointerdown, Esc view/focus preservation, busy/blur/new session/isolation cleanup"];
+  } finally { flushSync(() => mounted.unmount()); host.remove(); }
+}
+
+export async function verifyQuickSelect() {
+  try { return [...await verifyPaintedQuickSelection(), ...await verifyQuickSelectControls()]; }
+  catch (error) { throw new Error(error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error)); }
+}
