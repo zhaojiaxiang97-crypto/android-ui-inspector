@@ -1,0 +1,118 @@
+import type { UiNode } from "./types";
+
+// CSS consumes this value too: compact rows must not drift from virtual scrolling.
+export const TREE_ROW_HEIGHT = 28;
+export const TREE_DETAIL_ROW_HEIGHT = 44;
+export const TREE_OVERSCAN = 8;
+export const TREE_VIRTUAL_THRESHOLD = 500;
+export const TREE_INDENT = 12;
+export const TREE_ROW_CONTENT_WIDTH = 200;
+
+export type TreeRow = {
+  node: UiNode;
+  parentId: string | null;
+  depth: number;
+  position: number;
+  setSize: number;
+};
+export type TreeIndex = ReadonlyMap<string, TreeRow>;
+
+// Iterative preorder. Collapsed branches cost no work beyond their parent row.
+export function visibleTreeRows(root: UiNode | null, expanded: ReadonlySet<string>, forceExpand = false): TreeRow[] {
+  if (!root) return [];
+  const rows: TreeRow[] = [];
+  const stack: TreeRow[] = [{ node: root, parentId: null, depth: 0, position: 1, setSize: 1 }];
+  while (stack.length > 0) {
+    const row = stack.pop()!;
+    rows.push(row);
+    if (!forceExpand && !expanded.has(row.node.id)) continue;
+    const children = row.node.children;
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push({ node: children[index], parentId: row.node.id, depth: row.depth + 1, position: index + 1, setSize: children.length });
+    }
+  }
+  return rows;
+}
+
+export function indexTree(root: UiNode): TreeIndex {
+  return new Map(visibleTreeRows(root, new Set(), true).map((row) => [row.node.id, row]));
+}
+
+export function expandAncestors(index: TreeIndex, expanded: ReadonlySet<string>, id: string | null): ReadonlySet<string> {
+  let parentId = id ? index.get(id)?.parentId : null;
+  let result: Set<string> | null = null;
+  while (parentId) {
+    if (!expanded.has(parentId)) {
+      result ??= new Set(expanded);
+      result.add(parentId);
+    }
+    parentId = index.get(parentId)?.parentId;
+  }
+  return result ?? expanded;
+}
+
+export function collapseTreeBranch(expanded: ReadonlySet<string>, id: string): ReadonlySet<string> {
+  const prefix = `${id}/`;
+  let result: Set<string> | null = null;
+  for (const expandedId of expanded) {
+    if (expandedId !== id && !expandedId.startsWith(prefix)) continue;
+    result ??= new Set(expanded);
+    result.delete(expandedId);
+  }
+  return result ?? expanded;
+}
+
+export function nearestVisibleId(id: string | null, index: TreeIndex, visible: ReadonlyMap<string, number>): string | null {
+  let candidate = id;
+  while (candidate) {
+    if (visible.has(candidate)) return candidate;
+    candidate = index.get(candidate)?.parentId ?? null;
+  }
+  return null;
+}
+
+export function treeWindow(count: number, scrollTop: number, viewportHeight: number, rowHeight = TREE_ROW_HEIGHT, overscan = TREE_OVERSCAN) {
+  if (rowHeight <= 0 || !Number.isFinite(rowHeight)) throw new Error("Row height must be positive and finite");
+  const height = Math.max(0, viewportHeight);
+  const totalHeight = count * rowHeight;
+  const top = Math.max(0, Math.min(scrollTop, Math.max(0, totalHeight - height)));
+  const start = Math.max(0, Math.floor(top / rowHeight) - overscan);
+  const end = Math.min(count, Math.ceil((top + height) / rowHeight) + overscan);
+  return { start, end, top, totalHeight, offset: start * rowHeight };
+}
+
+export function scrollToTreeRow(index: number, count: number, scrollTop: number, viewportHeight: number, rowHeight = TREE_ROW_HEIGHT) {
+  const current = treeWindow(count, scrollTop, viewportHeight, rowHeight).top;
+  if (index < 0 || index >= count) return current;
+  const rowTop = index * rowHeight;
+  const rowBottom = rowTop + rowHeight;
+  const next = rowTop < current ? rowTop : rowBottom > current + viewportHeight ? rowBottom - viewportHeight : current;
+  return treeWindow(count, next, viewportHeight, rowHeight).top;
+}
+
+export function scrollToTreeDepth(depth: number, scrollLeft: number, viewportWidth: number) {
+  const current = Math.max(0, scrollLeft);
+  if (viewportWidth <= 0) return current;
+  const left = Math.max(0, (depth - 1) * TREE_INDENT);
+  const right = depth * TREE_INDENT + TREE_ROW_CONTENT_WIDTH;
+  return left < current ? left : right > current + viewportWidth
+    ? Math.max(0, Math.min(left, right - viewportWidth)) : current;
+}
+
+export type TreeReadingAnchor = { nodeId: string | null; fraction: number; top: number; rowHeight: number };
+
+// Keep the first visible node and its fractional row offset when density changes.
+export function treeReadingAnchor(rows: readonly TreeRow[], top: number, rowHeight = TREE_ROW_HEIGHT): TreeReadingAnchor {
+  const safeTop = Math.max(0, top);
+  const position = Math.floor(safeTop / rowHeight);
+  return { nodeId: rows[position]?.node.id ?? null, fraction: (safeTop % rowHeight) / rowHeight, top: safeTop, rowHeight };
+}
+
+export function restoreTreeReading(anchor: TreeReadingAnchor, index: TreeIndex, positions: ReadonlyMap<string, number>, count: number, height: number, rowHeight = TREE_ROW_HEIGHT) {
+  const id = nearestVisibleId(anchor.nodeId, index, positions);
+  const position = id ? positions.get(id) : undefined;
+  const fraction = Number.isFinite(anchor.fraction) ? Math.max(0, Math.min(1, anchor.fraction)) : 0;
+  const top = position !== undefined ? (position + fraction) * rowHeight
+    : anchor.rowHeight > 0 ? anchor.top / anchor.rowHeight * rowHeight : anchor.top;
+  return treeWindow(count, top, height, rowHeight).top;
+}
