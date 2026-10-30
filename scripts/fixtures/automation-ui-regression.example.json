@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "id": "favorites-roundtrip",
+  "serial": "REPLACE_DEVICE_SERIAL",
+  "packageName": "com.example.replace_me",
+  "backend": "accessibility-helper",
+  "rounds": 10,
+  "maxDurationMs": 1200000,
+  "checkpointTimeoutMs": 15000,
+  "resumeTimeoutMs": 15000,
+  "startConditions": [
+    { "selector": { "resourceId": "com.example.replace_me:id/favorites_list" }, "state": "visible" },
+    { "selector": { "resourceId": "com.example.replace_me:id/favorites_end_marker" }, "state": "visible" }
+  ],
+  "returnConditions": [
+    { "selector": { "resourceId": "com.example.replace_me:id/favorites_list" }, "state": "visible" },
+    { "selector": { "resourceId": "com.example.replace_me:id/favorites_end_marker" }, "state": "visible" }
+  ],
+  "steps": [
+    {
+      "id": "open-video",
+      "kind": "step",
+      "input": {
+        "target": { "selector": { "resourceId": "com.example.replace_me:id/last_favorite_video" }, "within": { "resourceId": "com.example.replace_me:id/favorites_list" } },
+        "action": { "kind": "tap" },
+        "expect": { "selector": { "resourceId": "com.example.replace_me:id/video_player" }, "state": "visible" },
+        "timeoutMs": 45000
+      }
+    },
+    {
+      "id": "return-to-favorites",
+      "kind": "step",
+      "input": {
+        "action": { "kind": "back" },
+        "expect": { "selector": { "resourceId": "com.example.replace_me:id/favorites_list" }, "state": "visible" },
+        "timeoutMs": 45000
+      }
+    },
+    {
+      "id": "scroll-up",
+      "kind": "step",
+      "input": {
+        "target": { "selector": { "resourceId": "com.example.replace_me:id/favorites_list" }, "scrollable": true },
+        "action": { "kind": "scroll", "direction": "up", "distance": 0.6, "durationMs": 350 },
+        "expect": { "selector": { "resourceId": "com.example.replace_me:id/unique_upper_anchor" }, "state": "visible" },
+        "timeoutMs": 45000
+      }
+    },
+    {
+      "id": "scroll-to-bottom",
+      "kind": "scroll-until",
+      "input": {
+        "target": { "selector": { "resourceId": "com.example.replace_me:id/favorites_list" } },
+        "direction": "down",
+        "until": { "selector": { "resourceId": "com.example.replace_me:id/favorites_end_marker" }, "kind": "end_marker" },
+        "maxScrolls": 6,
+        "timeoutMs": 120000,
+        "distance": 0.6,
+        "durationMs": 350
+      }
+    }
+  ]
+}
