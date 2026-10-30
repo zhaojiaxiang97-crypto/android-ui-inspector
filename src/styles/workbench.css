@@ -1,0 +1,221 @@
+/* Workbench layout owner: header, split panes and docked inspector.
+   Component visuals and the optional movable inspector remain in App.css. */
+.snapshot-file-status {
+  position: fixed;
+  z-index: 80;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(720px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border: 1px solid var(--ref-line);
+  border-radius: 8px;
+  color: var(--ref-text);
+  background: var(--ref-panel);
+  box-shadow: 0 6px 24px #0004;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.snapshot-file-status[role="alert"] { border-color: #b86a61; }
+.snapshot-file-status .close-button { flex: 0 0 auto; }
+
+.app-shell.inspection-active {
+  --ref-font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  min-height: 0;
+}
+
+.inspection-header {
+  position: relative;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 56px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--ref-line);
+  background: var(--ref-toolbar);
+  color: var(--ref-text-soft);
+  font: 13px var(--ref-font-ui);
+}
+.workbench-device-tools { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.app-shell.inspection-active .inspection-header .toolbar-device-control { display: flex; min-width: 0; gap: 7px; }
+.app-shell.inspection-active .inspection-header .device-select { width: 168px; min-width: 0; height: 32px; padding: 0 24px 0 8px; border-color: transparent; background: transparent; font-size: 12px; }
+.app-shell.inspection-active .inspection-header .connection-dot { width: 6px; height: 6px; box-shadow: none; flex-shrink: 0; }
+.app-shell.inspection-active .inspection-header .workbench-tool-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  width: auto;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  margin: 0;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ref-text-soft);
+  box-shadow: none;
+  cursor: pointer;
+  font-size: 12px;
+}
+.workbench-tool-button svg { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.workbench-capture-status { min-width: 0; max-width: 144px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ref-muted); font-size: 11px; }
+.app-shell.inspection-active .inspection-header .workbench-tool-button:hover:not(:disabled) { border-color: var(--ref-line); background: var(--ref-control-hover); color: var(--ref-text); }
+.app-shell.inspection-active .inspection-header .capture-button { background: rgba(77, 134, 247, .16); color: var(--ref-selected-text); overflow: visible; }
+.app-shell.inspection-active .inspection-header .workbench-cancel { color: var(--ref-danger); }
+.app-shell.inspection-active .inspection-header .workbench-tool-button:disabled { opacity: .45; cursor: default; }
+.inspection-header :is(button, select, summary):focus-visible { outline: 2px solid var(--ref-blue); outline-offset: -2px; }
+
+.app-shell.inspection-active .workbench-scene-tools {
+  position: static;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.app-shell.inspection-active .workbench-scene-tools > .screenshot-view-toolbar {
+  position: static;
+  flex: 1 1 360px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.app-shell.inspection-active .workbench-scene-tools .zoom-controls { flex-wrap: wrap; gap: 3px; max-width: 100%; }
+.app-shell.inspection-active .workbench-scene-tools .view-mode-toggle { gap: 0; padding: 2px; border-radius: 6px; background: var(--ref-control-hover); }
+.app-shell.inspection-active .workbench-scene-tools :is(.view-mode-toggle button, .zoom-controls button, .zoom-preset-select) { min-height: 30px; height: 30px; padding: 4px 7px; border-color: transparent; border-radius: 4px; background: transparent; font-size: 12px; }
+.app-shell.inspection-active .workbench-scene-tools .view-mode-toggle button.active { border-color: transparent; background: var(--ref-selected-bg); }
+.app-shell.inspection-active .workbench-scene-tools .zoom-controls button { min-width: 28px; }
+.app-shell.inspection-active .workbench-scene-tools .zoom-preset-select { max-width: 72px; }
+.app-shell.inspection-active .workbench-scene-tools :is(.zoom-fit, .zoom-reset) { padding-inline: 7px; }
+.app-shell.inspection-active .workbench-scene-tools :is(.snapshot-drawer, .layer-settings, .workbench-utilities) { position: static; }
+.app-shell.inspection-active .workbench-scene-tools > .snapshot-drawer { order: 1; border: 0; background: transparent; }
+.app-shell.inspection-active .workbench-scene-tools > .inspector-toggle { order: 2; }
+.workbench-utilities { order: 3; flex: 0 0 auto; }
+.app-shell.inspection-active .workbench-scene-tools > .debug-stop { position: static; order: 4; flex: 0 0 auto; min-height: 32px; padding: 5px 9px; border-color: var(--ref-danger); background: transparent; color: var(--ref-danger); font-size: 12px; }
+.app-shell.inspection-active .workbench-scene-tools :is(.snapshot-drawer > summary, .layer-settings > summary, .inspector-toggle, .workbench-utilities > summary) {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ref-text-soft);
+  cursor: pointer;
+  list-style: none;
+}
+.workbench-utilities > summary { font-size: 20px; }
+.workbench-utilities > summary::-webkit-details-marker { display: none; }
+.app-shell.inspection-active .workbench-scene-tools :is(summary, .inspector-toggle):hover { background: var(--ref-control-hover); }
+.app-shell.inspection-active .workbench-scene-tools .snapshot-drawer-body,
+.app-shell.inspection-active .workbench-scene-tools .layer-settings-body,
+.workbench-utilities-body {
+  position: absolute;
+  z-index: 50;
+  top: calc(100% + 6px);
+  right: 8px;
+  left: auto;
+  width: min(520px, calc(100% - 16px));
+  min-width: 0;
+  max-height: min(60vh, calc(100dvh - 128px));
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--ref-line);
+  border-radius: 8px;
+  background: var(--ref-panel-raised);
+  box-shadow: var(--ref-shadow-panel);
+}
+.app-shell.inspection-active .workbench-scene-tools .layer-settings-body { width: min(300px, calc(100% - 16px)); }
+.app-shell.inspection-active .scene-toolbar-host .layer-options select { min-width: 112px; border-color: var(--ref-line); color: var(--ref-text); background: var(--ref-panel); font-size: 12px; }
+.layer-appearance-help { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--ref-muted); font-size: 11px; }
+.layer-appearance-help button { padding: 3px 5px; border: 0; color: inherit; background: transparent; font-size: inherit; }
+.workbench-utilities-body { width: min(320px, calc(100% - 16px)); }
+.workbench-utilities-body > .close-button { width: 100%; text-align: left; }
+.workbench-utilities-body .close-button { min-height: 30px; border-color: var(--ref-line); background: transparent; color: var(--ref-text-soft); font-size: 12px; }
+.workbench-utilities-body .close-button:hover:not(:disabled) { background: var(--ref-control-hover); color: var(--ref-text); }
+.workbench-utilities-body .close-button:disabled { opacity: .45; }
+.workbench-utilities-body .debug-drawer { margin-top: 8px; border: 0; border-radius: 0; background: transparent; }
+.workbench-utilities-body .debug-drawer > summary { display: flex; gap: 8px; width: 100% !important; justify-content: flex-start; padding: 5px 8px !important; }
+.workbench-utilities-body .debug-drawer .visually-hidden { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip-path: none; }
+.app-shell.inspection-active .workbench-utilities-body .debug-drawer .snapshot-drawer-body { position: static; width: 100%; max-height: none; padding: 8px 0 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; overflow: visible; }
+
+.app-shell.inspection-active > .workspace { flex: 1 1 0; width: 100%; height: auto; min-height: 0; margin: 0; padding: 0; overflow: hidden; }
+.app-shell.inspection-active .inspector-panel { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.app-shell.inspection-active .inspector-grid { display: grid; flex: 1 1 0; height: auto; min-height: 0; grid-template-columns: 306px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); overflow: hidden; }
+.app-shell.inspection-active .inspector-grid.is-resizable { grid-template-columns: var(--tree-pane-width, 306px) 5px minmax(0, 1fr); }
+.app-shell.inspection-active :is(.tree-pane, .preview-pane) { height: 100%; min-height: 0; overflow: hidden; border-bottom: 0; }
+.app-shell.inspection-active .tree-pane { display: flex; flex-direction: column; }
+.app-shell.inspection-active .preview-pane { background: var(--ref-bg); }
+.app-shell.inspection-active .preview-pane > .screenshot-frame { min-height: 0; padding: 20px; background: var(--ref-canvas); }
+.app-shell.inspection-active .tree-tools { flex: 0 0 auto; padding: 8px; border-top: 1px solid var(--ref-line); }
+.app-shell.inspection-active .tree-filter-details[open] .tree-filter-row { top: auto; bottom: calc(100% + 6px); right: 0; }
+
+.tree-focus-bar { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; min-height: 34px; padding: 4px 8px; border-bottom: 1px solid var(--ref-line); background: rgba(77, 134, 247, .12); color: var(--ref-text-soft); font-size: 12px; }
+.tree-focus-bar > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-interaction-settings { position: relative; flex: 0 0 auto; }
+.tree-interaction-settings > summary { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 1px solid transparent; border-radius: 4px; color: var(--ref-text-soft); background: transparent; list-style: none; cursor: pointer; }
+.tree-interaction-settings > summary::-webkit-details-marker { display: none; }
+.tree-interaction-settings > summary:hover { background: var(--ref-control-hover); }
+.tree-interaction-settings-body { position: absolute; z-index: 50; right: 0; bottom: calc(100% + 8px); width: 218px; padding: 12px; border: 1px solid var(--ref-line); border-radius: 6px; background: var(--ref-panel-raised); box-shadow: var(--ref-shadow-panel); color: var(--ref-text-soft); font-size: 12px; }
+.tree-interaction-settings-body label { display: grid; gap: 8px; }
+.tree-interaction-settings-body select { width: 100%; height: 30px; border: 1px solid var(--ref-line); border-radius: 4px; background: var(--ref-panel); color: var(--ref-text); font: inherit; }
+.tree-interaction-settings-body p { margin: 10px 0 0; color: var(--ref-muted); font-size: 11px; line-height: 1.5; }
+:is(.tree-interaction-settings, .tree-focus-bar) :is(summary, select, button):focus-visible { outline: 2px solid var(--ref-blue); outline-offset: -2px; }
+
+.floating-inspector.is-docked {
+  top: var(--inspector-min-top, 12px);
+  right: 8px;
+  width: min(296px, calc(100% - 16px));
+  max-height: calc(var(--inspector-viewport-height, 100%) - var(--inspector-min-top, 12px) - 12px);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  backdrop-filter: none;
+  box-shadow: none;
+}
+.floating-inspector.is-docked.is-collapsed { width: 176px; }
+.is-docked .inspector-tab { min-height: 32px; padding: 0 0 4px; }
+.is-docked .inspector-tab .inspector-drag-handle { padding-left: 8px; font-size: 12px; cursor: default; }
+.is-docked .inspector-drag-handle svg { display: none; }
+.is-docked .inspector-body { padding: 0 0 10px; }
+.is-docked .inspector-search { background: var(--ref-input); }
+.is-docked .inspector-node-heading { padding: 10px 8px; background: var(--ref-panel-raised); border-radius: 6px; margin: 8px 0; }
+.is-docked .inspector-card { border-color: transparent; background: var(--ref-panel-raised); }
+
+@media (max-width: 900px) {
+  .inspection-header { grid-template-columns: minmax(0, 1fr); gap: 5px; padding: 6px 10px; }
+  .app-shell.inspection-active .workbench-scene-tools > .screenshot-view-toolbar { justify-content: flex-start; }
+  .workbench-device-tools { justify-content: flex-start; }
+}
+@media (max-width: 520px) {
+  .app-shell.inspection-active .tree-search-row { flex-wrap: wrap; }
+}
+.zoom-controls .pin-layer-measurement[aria-pressed="true"] { color: var(--ref-orange); background: var(--ref-panel-raised); }
+.screenshot-pinned-measurement { margin: 4px 12px; color: var(--ref-orange); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
