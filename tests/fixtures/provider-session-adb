@@ -1,0 +1,24 @@
+#!/usr/bin/env bun
+// Local socket fixture only: it never invokes real adb or contacts a phone.
+import { appendFileSync } from "node:fs";
+import { setTimeout as wait } from "node:timers/promises";
+const args = process.argv.slice(2);
+if (args[0] !== "-s" || args[1] !== "session-fixture" || !process.env.PROVIDER_FIXTURE_LOG || !/^\d+$/.test(process.env.PROVIDER_FIXTURE_PORT ?? "")) process.exit(2);
+appendFileSync(process.env.PROVIDER_FIXTURE_LOG, JSON.stringify(args.slice(2)) + "\n");
+const command = args.slice(2).join(" ");
+if (command === "shell content call --uri content://com.example.sessionfixture.inspector --method open-session"
+  || command === "shell content call --uri content://com.example.sessionfixture.inspector --method open-session --extra sessionTiming:b:true") {
+  await wait(60); // Isolate bootstrap timing from socket probing without real-device queries.
+  const enabled = command.endsWith("sessionTiming:b:true");
+  if (enabled && process.env.PROVIDER_TIMING_FIXTURE === "new")
+    console.log("Result: Bundle[{result=ok, sessionTimingVersion=1, sessionCallNs=100, sessionLockWaitNs=20, sessionDispatchNs=70, sessionOpenNs=60}]");
+  else if (enabled && process.env.PROVIDER_TIMING_FIXTURE === "invalid")
+    console.log("Result: Bundle[{result=ok, sessionTimingVersion=1, sessionOpenNs=-1}]");
+  else if (enabled && process.env.PROVIDER_TIMING_FIXTURE === "reject")
+    console.log("Result: Bundle[{error=Unauthorized or unsupported request, sessionTimingVersion=1}]");
+  else console.log("Result: Bundle[{result=ok}]");
+}
+else if (command === "forward tcp:0 localabstract:com.example.sessionfixture.inspector.session") console.log(process.env.PROVIDER_FIXTURE_PORT);
+else if (command === `forward --remove tcp:${process.env.PROVIDER_FIXTURE_PORT}`) process.exit(0);
+else if (command === "shell content call --uri content://com.example.sessionfixture.inspector --method capture-refs --arg TextView@a") console.log("Result: Bundle[{result=ok}]");
+else process.exit(2);
