@@ -1,0 +1,23 @@
+<resources>
+    <item name="input_diagnostics_main_page" type="id" />
+    <item name="input_diagnostics_child_page" type="id" />
+    <item name="input_diagnostics_start" type="id" />
+    <item name="input_diagnostics_ready" type="id" />
+    <item name="input_diagnostics_open_child" type="id" />
+    <item name="input_diagnostics_back" type="id" />
+    <item name="input_diagnostics_child_entry_count" type="id" />
+    <item name="input_diagnostics_click_count" type="id" />
+    <item name="input_diagnostics_coordinate_click_count" type="id" />
+    <item name="input_diagnostics_navigation_count" type="id" />
+    <item name="input_diagnostics_touch_down_count" type="id" />
+    <item name="input_diagnostics_touch_up_count" type="id" />
+    <item name="input_diagnostics_touch_cancel_count" type="id" />
+    <item name="input_diagnostics_scroll_y" type="id" />
+    <item name="input_diagnostics_scroll_change_count" type="id" />
+    <item name="input_diagnostics_log_count" type="id" />
+    <item name="input_diagnostics_last_touch" type="id" />
+    <item name="input_diagnostics_scroll" type="id" />
+    <item name="input_diagnostics_scroll_changed" type="id" />
+    <item name="input_diagnostics_list_first" type="id" />
+    <item name="input_diagnostics_list_end" type="id" />
+</resources>
