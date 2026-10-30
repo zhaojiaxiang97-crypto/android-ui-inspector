@@ -1,0 +1,33 @@
+#!/usr/bin/env bun
+// Test-only ADB relay. Only the Inspector SDK socket forward is redirected.
+import { spawnSync } from "node:child_process";
+import { appendFileSync, readFileSync } from "node:fs";
+const real = process.env.INSPECTOR_PROBE_REAL_ADB;
+const journal = process.env.INSPECTOR_PROBE_FORWARD_LOG;
+const port = process.env.INSPECTOR_PROBE_PROXY_PORT;
+if (!real || !journal || !port || !/^\d+$/.test(port)) throw new Error("Missing isolated probe configuration");
+const args = process.argv.slice(2);
+const forward = args.indexOf("forward");
+const redirect = forward >= 0 && args[forward + 1] === "tcp:0" && /\.inspector\.session$/.test(args[forward + 2] ?? "");
+if (forward >= 0 && args[forward + 1] === "--remove" && args[forward + 2] === `tcp:${port}`) {
+  const entries = readFileSync(journal, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+  const last = entries.filter(entry => entry.type === "open").at(-1);
+  if (!last) throw new Error("No owned SDK forward to remove");
+  args[forward + 2] = `tcp:${last.port}`;
+  appendFileSync(journal, JSON.stringify({ type: "remove", port: last.port }) + "\n");
+}
+const reply = spawnSync(real, args, { timeout: 120000, maxBuffer: 64 * 1024 * 1024 });
+if (reply.error) throw reply.error;
+let stdout = reply.stdout;
+if (redirect && reply.status === 0) {
+  const target = reply.stdout.toString().trim();
+  if (!/^\d+$/.test(target)) throw new Error("Invalid real SDK forward");
+  appendFileSync(journal, JSON.stringify({ type: "open", port: Number(target) }) + "\n");
+  stdout = Buffer.from(port + "\n");
+}
+// Do not process.exit before a large hierarchy/binary reply has drained.
+await Promise.all([
+  new Promise<void>(resolve => process.stdout.write(stdout, () => resolve())),
+  new Promise<void>(resolve => process.stderr.write(reply.stderr, () => resolve())),
+]);
+process.exitCode = reply.status ?? 1;

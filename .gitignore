@@ -1,0 +1,44 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-electron
+.benchmarks
+/release/
+dist-ssr
+*.local
+
+# Accidental root-level Electron bundle. The build chain writes to dist-electron/.
+/main.cjs
+
+# Ignore local caches left by the retired Tauri prototype after its source removal.
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Android Debug SDK sample build products.
+android/.gradle/
+android/.kotlin/
+android/**/build/
+android/local.properties
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Keep local device evidence out of public snapshots.
+/.audit/
+/.benchmarks/

@@ -1,0 +1,399 @@
+{
+  "generator": "OpenAI built-in imagegen",
+  "generatedOn": "2026-10-14",
+  "format": "Transparent PNG. Original pixels preserved; CSS alpha mask supplies the theme color.",
+  "icons": [
+    {
+      "name": "device",
+      "label": "设备",
+      "file": "device.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A single upright smartphone outline with a short horizontal speaker near its top and a small home indicator near the bottom. Simple empty screen. This means connected Android device. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "ed4228d01b41f8026603bc94fc4a056af25b39971e0755dd82acb71a515d08ae"
+    },
+    {
+      "name": "refresh",
+      "label": "刷新",
+      "file": "refresh.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A nearly complete clockwise circular arrow with one clear arrowhead at its upper right. This means refresh. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "81e253b9d325351d3c6c725d3d4815a368635be9fee9c913cbfe042c09011090"
+    },
+    {
+      "name": "measure",
+      "label": "测距",
+      "file": "measure.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A single diagonal ruler with four short evenly spaced tick marks inside its long edge. This means measure the distance between UI controls. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "f452690713efec1f0b1704513d50d1be6a2b309af6a228879fd42b4a6b7f3656"
+    },
+    {
+      "name": "select-inside",
+      "label": "选择内部控件",
+      "file": "select-inside.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A square containing a smaller square and a simple mouse arrow pointer touching the inner square from the bottom right. This means select a nested UI element. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "db2908a6a91df131e3e58d8dcb6895fb32d18e3147bb0762a6aa833443cee6d5"
+    },
+    {
+      "name": "settings",
+      "label": "设置",
+      "file": "settings.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Three horizontal lines, each with one small circular slider knob at a different position. This means adjust view settings. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "58d7ade705afa95fc3b3562f5f539867ff707718875879548aff5ead3b97f1d4"
+    },
+    {
+      "name": "history",
+      "label": "快照历史",
+      "file": "history.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A round clock with a simple short hour hand and long minute hand; its outer circle ends with a small backward arrow at the upper left. This means snapshot history. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "8c4bf939d6390806e470f7aeb49b0a40dcc429dc04d7af2831e0c534a1453f34"
+    },
+    {
+      "name": "sidebar",
+      "label": "属性面板",
+      "file": "sidebar.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A rectangular application window divided vertically: a large blank area on the left and a narrow properties sidebar with two short horizontal lines on the right. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "9dadfb0881aa5e4a2c9d6ca4c0e0fc3e913792a6d067267f8e13cd7efbe9ac8e"
+    },
+    {
+      "name": "copy",
+      "label": "复制",
+      "file": "copy.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Two overlapping upright rectangular sheets with rounded corners, the front sheet shifted down and right. Transparent interior, no text. This means copy. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "15e7810770553268ec8518f97e0b51e290d7b84a4bab56ffe756c70ab35340a4"
+    },
+    {
+      "name": "camera",
+      "label": "采集快照",
+      "file": "camera.png",
+      "prompt": "Generate one simple camera icon for a desktop application's Capture Snapshot button. Black outline, transparent background, centered square composition. A rounded rectangle camera body and one circular lens. Consistent medium line weight, simple enough to be clear at 20 pixels. No words, no decorative details, no shadows, no gradient. The camera fills about 80 percent of the image width.",
+      "sha256": "04b291949bde59b333f5c3fc9ae1ad6658841a5492a112f65e1ff5c7389f5cac"
+    },
+    {
+      "name": "stop",
+      "label": "停止",
+      "file": "stop.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A solid compact square with subtly rounded corners. This is the universal stop action symbol. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "5a5bb659a8528e21eea8f524a6f862538e8d006925a7161f20c7fbc45a92bc60"
+    },
+    {
+      "name": "chevron",
+      "label": "展开箭头",
+      "file": "chevron.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A single wide downward-pointing V shaped chevron made of two equal diagonal strokes. No enclosing shape. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "3f1ba1d41456f1b8d144b2236b76cfdda3ecf7b829a900544f6b72157bbf12a0"
+    },
+    {
+      "name": "close",
+      "label": "关闭",
+      "file": "close.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A symmetrical X made of two intersecting diagonal strokes. No enclosing shape. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "db0d6b3643f7c16b003f046aaab726668db67fb20f40159f49f242b7e5a6cd56"
+    },
+    {
+      "name": "plus",
+      "label": "放大 / 添加",
+      "file": "plus.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A plus sign with equal length horizontal and vertical strokes. No enclosing shape. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "88ff2d676250c0d7bb6e9d32207d79a37bfda88fbe5a27fc6a7da6b7bee2a475"
+    },
+    {
+      "name": "minus",
+      "label": "缩小",
+      "file": "minus.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A single short horizontal stroke. This is a minus sign. No enclosing shape. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "ae57510d46d096e7c64419aaf16adccf952e45971b9130ff5025566f74d5927d"
+    },
+    {
+      "name": "drag",
+      "label": "拖动手柄",
+      "file": "drag.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Six small solid circular dots arranged in two columns and three rows, with generous equal spacing. A draggable handle. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "cabd472cd55a591d53e983174f768515eb14f39e7f95afa938daed6c88a86bbc"
+    },
+    {
+      "name": "popout",
+      "label": "浮动面板",
+      "file": "popout.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One rectangular window outline with a small arrow pointing diagonally up and right out of its top right corner. This means detach into a floating window. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "e696625106c53e5778657dc1acd831b35cf88d7034ce801cbe01d81246f72739"
+    },
+    {
+      "name": "compare",
+      "label": "对比参考",
+      "file": "compare.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Two equal upright rectangular panels side by side, separated by a clear gap. Each panel has one short horizontal line inside. This means compare two controls. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "0241ddeb210558c3f5719d1076bf5165ef540de6a904858a1a9e7a111668d57b"
+    },
+    {
+      "name": "search",
+      "label": "搜索",
+      "file": "search.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One simple magnifying glass, a hollow circular lens with a short handle extending diagonally down and right. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "7577bf17e97a978edad49efe38727428e83128ee3173ea38db5ffbb1d48bbbfc"
+    },
+    {
+      "name": "resize",
+      "label": "调整大小",
+      "file": "resize.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Two parallel diagonal strokes of different lengths tucked toward the bottom right, forming a familiar window resize grip. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "49376d75236605936593793f21bcd9eda4da1f076071beac79dda6edc481bf7f"
+    },
+    {
+      "name": "cursor",
+      "label": "交互",
+      "file": "cursor.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A familiar computer mouse arrow pointer aimed at the upper left, a simple clear filled silhouette with a small stem. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "7be55fa8db588e6d82fddb09f8e83694ee1d351e655b63b567c6d3b21eeb0ccf"
+    },
+    {
+      "name": "type",
+      "label": "控件类型",
+      "file": "type.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One simple isometric cube drawn with six outer edges and three internal edges. This means an object or class type. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "d8716a1a945fe3da6cf874ad5e1032ef6e2cd3cc7ca199d2ce3cab34d38e515e"
+    },
+    {
+      "name": "business",
+      "label": "业务信息",
+      "file": "business.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A single simple metadata tag outline: a horizontal label shape with one clipped pointed left end, one small circular hole near that left end, and two short horizontal lines inside the right half. No person, avatar, face, card portrait or text. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "b8bfc8cf9fbbaa67c436b1249b6708962247e5012c11378dd81dca9c753874f8"
+    },
+    {
+      "name": "link",
+      "label": "关系",
+      "file": "link.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Two interlocked oblong chain links tilted diagonally. This means relationship or connection. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "34839cab4a09e86cb8a7751e1fdcf6eec730eb55f8837e93d76fed0208789af9"
+    },
+    {
+      "name": "image",
+      "label": "图片",
+      "file": "image.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A landscape rectangle outline with one small sun circle in the upper left and two simple mountain peaks along the bottom. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "e0d039ad11cc47c6493a9ff3e794008f93adf47504ab7029e901841e219150e9"
+    },
+    {
+      "name": "document",
+      "label": "原始属性",
+      "file": "document.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One upright page outline with a folded upper right corner and three short horizontal lines inside. No letters. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "69e10e9afc4ce9c63730ea3e97da0df5e1030121e7c99087eb8188fb21fce25e"
+    },
+    {
+      "name": "info",
+      "label": "提示",
+      "file": "info.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A circular information symbol containing a short vertical stroke and a dot above it. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "e7297b6844e69d662d02fd8ee38108545168551ddca9e408621f3cbe17f48b8d"
+    },
+    {
+      "name": "help",
+      "label": "帮助",
+      "file": "help.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A circular help symbol containing one clear question mark. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "0c9b353d7fc1e5da109866d5a0973630c5e33ba6f45364f82198f48d5b8b3e3c"
+    },
+    {
+      "name": "front",
+      "label": "正面视角",
+      "file": "front.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A single tall PORTRAIT rectangle outline representing a flat UI plane, viewed straight from the front. Its height is 1.5 times its width. Nothing inside the rectangle. This is an abstract flat rectangular layer, NOT a monitor, computer, television or physical device. No stand, no base, no extra frame. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "4918c468fbe6455dfb2e4c2732cc3f29b2eb908c81c1cf2ae79a8883c1e0a811"
+    },
+    {
+      "name": "stacked",
+      "label": "分层视角",
+      "file": "stacked.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Three vertical rectangular UI screen planes in a mild side perspective, partially overlapping with moderate even horizontal offsets. Line diagram of a layered screen stack. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "9579a35238a59fdf5b6daaa022bedcd7c67f43c27aa6a1e7a7281519d598cc74"
+    },
+    {
+      "name": "exploded",
+      "label": "展开视角",
+      "file": "exploded.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Three thin upright rectangular UI screen planes viewed from a side perspective, separated widely and evenly from left to right. Clean exploded-view line diagram, clear gaps between the planes. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "0e6d3cb7646a1e67d50bfde52962009d7f0ca1b52244e5a73646a1ff41692980"
+    },
+    {
+      "name": "arrow-up-right",
+      "label": "跳转定位",
+      "file": "arrow-up-right.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One simple diagonal arrow pointing up and right, with a clear ninety degree arrowhead. No enclosing box. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "77f7bd297676633ef43567433dbc01f49d2a0fd1ca54c3046a410d6781bb5f91"
+    },
+    {
+      "name": "alert",
+      "label": "异常",
+      "file": "alert.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A simple warning triangle outline with a short vertical mark and dot inside. No extra details. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "e6378fde86dd8520639cfc0a2b4455121c8f286119e7fa31c77f82b9a0e1612f"
+    },
+    {
+      "name": "hierarchy",
+      "label": "控件层级",
+      "file": "hierarchy.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A small square parent node on top connected by simple orthogonal lines to two small square child nodes beneath. Clear hierarchy symbol. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "cd641dc179292324fe53a9a3f621f631e18f3553438045f1f6f00b3b3e70b51a"
+    },
+    {
+      "name": "more",
+      "label": "更多",
+      "file": "more.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Three equal solid dots arranged horizontally with even spacing. The universal more actions icon. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "69cf1088cb3f54eee3d4e6c9eb78697159f72f3005203ae017352505ab55ab9f"
+    },
+    {
+      "name": "layout",
+      "label": "布局约束",
+      "file": "layout.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A small central square attached by four short perpendicular lines to four outer bracket anchors, one on each side. Clear symmetric layout constraints symbol. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "fa6ced35393d69b1d28a5c76334ec036ace9bfdcce904794d05ef1faa52bc037"
+    },
+    {
+      "name": "activity",
+      "label": "应用页面",
+      "file": "activity.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A single application window outline with a narrow top title bar and two short content lines below. Simple front view. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "0501f7e578248486cf0238543f6b9b5994170a3ff70d29f2c39d4405e4ac4775"
+    },
+    {
+      "name": "window",
+      "label": "窗口",
+      "file": "window.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Two overlapping rectangular application window outlines, front window lower left with a thin top title bar. Clear overlapping windows symbol. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "67791443df038222075291f2b4a39736128478ac7ffb49cd2bab0c8c28cb0cc3"
+    },
+    {
+      "name": "linear",
+      "label": "线性布局",
+      "file": "linear.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One square outline divided into three equal horizontal rows by two horizontal lines. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "78c872fe98e98e5c23c3ec391095f81fc830a101c4a53fbc9f0c73befed31e6e"
+    },
+    {
+      "name": "pager",
+      "label": "分页容器",
+      "file": "pager.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A single upright rectangular page with a short partial page edge on each side, and three small evenly spaced pagination dots beneath. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "55f4b4bcabd83c6e4df540882eb49c96e0205dbc6fa9d64e668a7fa10dd18f4a"
+    },
+    {
+      "name": "list",
+      "label": "列表",
+      "file": "list.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Three horizontal list rows, each a short solid dot followed by one horizontal line. Evenly spaced. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "85cbd49dffca840bcaf085d9708699702431a4ba6e13c0f60d5ad0d1503bf49c"
+    },
+    {
+      "name": "grid",
+      "label": "网格",
+      "file": "grid.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Four equal small square outlines arranged as a symmetric two by two grid with generous equal gaps. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "01567850e4b5d335a71395a08573afb39a8a6e0288141352e24359da2c921817"
+    },
+    {
+      "name": "scroll",
+      "label": "滚动区域",
+      "file": "scroll.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A vertical rectangular content region containing two short horizontal lines, with one vertical scrollbar and a short knob along the right side. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "e1cfe57a23a06e3852b03b6162ccb08490cd67065650775ae90e1c73ae4a3001"
+    },
+    {
+      "name": "text",
+      "label": "文字",
+      "file": "text.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A familiar typography capital T symbol with a wide horizontal top bar and a central vertical stem, tiny perpendicular tips at the top ends. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "552a8138e468bc261d2dd205e8da7cfde57f21d51fe832871d170f98e0ab10b9"
+    },
+    {
+      "name": "input",
+      "label": "输入框",
+      "file": "input.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. A wide rectangular text field outline with a prominent vertical I-beam caret near its left side. No typed letters. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "cb45ed2a7902f895cfe006a4b461038d377b95186f5462003b2e451f16513507"
+    },
+    {
+      "name": "button",
+      "label": "按钮",
+      "file": "button.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One wide rounded rectangle with one short horizontal line centered inside. Clearly a single clickable UI button. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "33d37377d972bac99b9ab1c09540e5de885d6ce702a6aa2577eab39744c7f137"
+    },
+    {
+      "name": "checkbox",
+      "label": "复选框",
+      "file": "checkbox.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One square outline with a bold checkmark inside. The checkmark has a short left stroke and a longer rising right stroke. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "a2253e4080c7e729ed769a1000eb788b57a88b2d7187fd72abb46ca336d13621"
+    },
+    {
+      "name": "radio",
+      "label": "单选框",
+      "file": "radio.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One hollow circle outline with one solid small dot centered inside. An enabled radio option. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "c6be39192fef19820bc173b02d7fbf56cb231405c86196d3c3d363c772d66b27"
+    },
+    {
+      "name": "switch",
+      "label": "开关",
+      "file": "switch.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One horizontal capsule outline containing one filled circular knob on its right side. A simple on-off toggle switch. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "2c179804772d9bd07bbaddc8343f6bbd9f1eb63605b7a704643ab1615050f1e4"
+    },
+    {
+      "name": "slider",
+      "label": "滑块",
+      "file": "slider.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One single horizontal track line with one circular outlined knob slightly right of center. A simple value slider. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "3928d06e648f9c02929d9ae2252ac7032093cbe5d9915de0cf026fbed9aa6bfd"
+    },
+    {
+      "name": "progress",
+      "label": "进度条",
+      "file": "progress.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One narrow horizontal rectangular outline with rounded corners, filled halfway from the left by a solid bar. A progress indicator. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "5ebcdf6e0f60cc97cf2fdc56d271bf15bcc130a1b36cd6123adadd71f48fa201"
+    },
+    {
+      "name": "web",
+      "label": "网页",
+      "file": "web.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One simple globe outline: a circle with a single vertical elliptical meridian and a horizontal equator. Minimal geography-free web symbol. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "d8744035c2df2508097508cb7210c0d0e7991b323e3ad1bce5882dcdcc7e4281"
+    },
+    {
+      "name": "video",
+      "label": "视频",
+      "file": "video.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One landscape screen rectangle outline with a clear right-pointing filled play triangle centered inside. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "42af1ae71c6e547bed4ce47774c4163916d44b5ba5e97bd76760e35fef0ebd35"
+    },
+    {
+      "name": "surface",
+      "label": "独立渲染画面",
+      "file": "surface.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One desktop monitor outline with a short stand beneath and two clean diagonal strokes inside the screen. Represents a separately rendered surface. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "2b4df927e8b40a3a35d4a54cacd2d236d200c92db888987b92ba0c0c8bab1b8b"
+    },
+    {
+      "name": "stub",
+      "label": "延迟加载占位",
+      "file": "stub.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. Four separated L-shaped corner brackets marking an empty square region, with a small plus sign in the center. No enclosing continuous border. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "798b1cf6abee868aeae766bf76e66ccf5cfd6daeb6760f234d9aea5a44f8569f"
+    },
+    {
+      "name": "folder",
+      "label": "容器",
+      "file": "folder.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One simple file folder outline with a raised tab on its upper left. Empty interior. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "94681f0f6df19f559c8db1b323423d2447676ca3b38281b7053f5d282080eaa9"
+    },
+    {
+      "name": "leaf",
+      "label": "普通控件",
+      "file": "leaf.png",
+      "prompt": "Generate one simple black outline icon for a desktop application. One rounded square outline with one smaller solid square centered inside. A basic UI element. Transparent background, centered square composition. Crisp solid BLACK strokes only, evenly weighted at about 2 units on a 24 unit grid. Gently rounded ends. Simple geometric shape clear at 20 pixels. Fill about 80 percent of the canvas with balanced margins. No background or tile, no words, no decorative details, no shadows, no gradient. Empty areas including the symbol's interior must be fully transparent.",
+      "sha256": "cd3851c95b7fbc3e1c74642bbc0f714b6f6cb69397092ce7b16b1052cb7ed72b"
+    }
+  ]
+}

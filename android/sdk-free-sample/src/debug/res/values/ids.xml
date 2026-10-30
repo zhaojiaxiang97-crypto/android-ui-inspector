@@ -1,0 +1,5 @@
+<resources>
+    <item name="delayed_condition_start" type="id" />
+    <item name="delayed_condition_ready" type="id" />
+    <item name="delayed_condition_run_count" type="id" />
+</resources>
