@@ -1,0 +1,9 @@
+.inspector-layout-rule-heading { display: flex; align-items: flex-start; gap: 4px; min-width: 0; }
+.inspector-layout-rule-heading > span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.inspector-layout-target { min-width: 0; flex: 1; display: inline-flex; align-items: baseline; gap: 4px; min-height: 24px; padding: 2px 0; border: 0; border-radius: 3px; background: transparent; color: var(--ref-blue); font: inherit; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.inspector-layout-target-label { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-layout-target-arrow { flex: 0 0 auto; font-family: var(--ref-font-ui); }
+.inspector-layout-target:hover:enabled { background: rgba(111, 159, 255, 0.1); }
+.inspector-layout-target:disabled { color: var(--ref-muted); cursor: default; }
+.inspector-layout-target:focus-visible, .inspector-layout-rule .inspector-field-copy:focus-visible { outline: 2px solid var(--ref-blue); outline-offset: 2px; }
+.inspector-layout-rule-raw, .inspector-layout-rule-reason { margin-top: 2px; color: var(--ref-muted); font-size: 10px; overflow-wrap: anywhere; }
