@@ -1,0 +1,33 @@
+/* Shared visual contract for the renderer. Component styles should consume
+   these tokens instead of introducing a new one-off color or spacing scale. */
+:root {
+  color-scheme: dark;
+  --ref-bg: #111419;
+  --ref-sidebar: #181c22;
+  --ref-panel: #15191f;
+  --ref-panel-raised: #1b2028;
+  --ref-toolbar: #1b1f26;
+  --ref-line: #2b313b;
+  --ref-line-soft: #242a33;
+  --ref-text: #edf1f7;
+  --ref-text-soft: #c0c7d1;
+  --ref-muted: #8993a0;
+  --ref-faint: #626c79;
+  --ref-blue: #6f9fff;
+  --ref-blue-strong: #4d86f7;
+  --ref-green: #78d86b;
+  --ref-danger: #ed7e7e;
+  --ref-orange: #e9ad66;
+  --ref-font-ui: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  --ref-font-mono: "Cascadia Mono", "DM Mono", Consolas, monospace;
+  --ref-radius-sm: 6px;
+  --ref-radius-md: 8px;
+  --ref-radius-lg: 10px;
+  --ref-space-1: 4px;
+  --ref-space-2: 8px;
+  --ref-space-3: 12px;
+  --ref-space-4: 16px;
+  --ref-space-5: 24px;
+  --ref-space-6: 32px;
+  --ref-shadow-panel: 0 18px 36px rgba(0, 0, 0, 0.32);
+}
