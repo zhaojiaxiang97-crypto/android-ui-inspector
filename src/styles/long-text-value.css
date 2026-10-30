@@ -1,0 +1,5 @@
+.long-text-value { display: flex; align-items: flex-start; gap: 6px; flex: 1 1 40px; min-width: 0; max-width: 100%; }
+.long-text-content { display: block; min-width: 0; max-width: 100%; max-height: 8em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; overscroll-behavior: contain; }
+.long-text-value > .long-text-content { flex: 1; }
+.long-text-value + .inspector-field-copy { align-self: flex-start; }
+.long-text-content:focus-visible { outline: 1px solid var(--ref-blue); outline-offset: 2px; border-radius: 3px; }
