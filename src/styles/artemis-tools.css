@@ -1,0 +1,8 @@
+.live-preview-host {
+  position: fixed;
+  inset: 64px 0 0;
+  z-index: 55;
+  pointer-events: none;
+}
+.live-preview-host > .live-preview-panel { pointer-events: auto; }
+.debug-home-controls { max-width: calc(100vw - 36px); flex-wrap: wrap; }
