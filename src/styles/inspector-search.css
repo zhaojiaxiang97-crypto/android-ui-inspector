@@ -1,0 +1,19 @@
+.inspector-search-results { min-width: 0; margin: 0 0 12px; padding: 9px; border: 1px solid var(--ref-line-soft); border-radius: 6px; background: rgba(129, 154, 189, .055); }
+.inspector-search-results > p { margin: 0 0 5px; color: var(--ref-muted); font: 11px/1.5 var(--ref-font-ui); }
+.inspector-search-results > p:only-child { margin-bottom: 0; }
+.inspector-search-pages { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin: 0 0 5px; min-width: 0; color: var(--ref-muted); font: 10px/1.5 var(--ref-font-ui); }
+.inspector-search-pages button { min-height: 25px; border: 1px solid var(--ref-input-line); border-radius: 4px; padding: 3px 5px; background: var(--ref-input); color: var(--ref-text-soft); font: inherit; cursor: pointer; }
+.inspector-search-pages button:disabled { opacity: .45; cursor: default; }
+.inspector-search-pages button:focus-visible { outline: 1px solid var(--ref-blue); outline-offset: 1px; }
+.inspector-search-results ul { display: grid; gap: 3px; max-height: 210px; padding: 0; margin: 0; overflow: auto; list-style: none; scrollbar-width: thin; }
+.inspector-search-results li { display: flex; align-items: center; min-width: 0; gap: 3px; }
+.inspector-search-result { display: grid; gap: 2px; flex: 1; min-width: 0; max-width: 100%; border: 0; border-radius: 4px; padding: 6px; background: transparent; color: var(--ref-text-soft); text-align: left; font: 11px/1.45 var(--ref-font-ui); cursor: pointer; }
+.inspector-search-result:hover, .inspector-search-result:focus-visible { background: rgba(118, 160, 230, .15); outline: 1px solid rgba(118, 160, 230, .5); outline-offset: -1px; }
+.inspector-search-result > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-search-result small { color: var(--ref-muted); font-size: 10px; }
+.inspector-search-result strong { font-weight: 500; }
+.inspector-search-result span { font-family: var(--ref-font-mono); }
+.inspector-search-result-copy { flex: none; border: 0; border-radius: 4px; padding: 5px; background: transparent; color: var(--ref-muted); font: 10px var(--ref-font-ui); cursor: pointer; }
+.inspector-search-result-copy:hover, .inspector-search-result-copy:focus-visible { color: var(--ref-text); background: rgba(118, 160, 230, .15); }
+.inspector-property-highlight { outline: 2px solid rgba(117, 170, 255, .85); outline-offset: 2px; border-radius: 3px; background-color: rgba(117, 170, 255, .16); }
+@media (prefers-reduced-motion: reduce) { .inspector-body { scroll-behavior: auto; } }
