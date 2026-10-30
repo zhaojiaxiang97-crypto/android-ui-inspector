@@ -1,0 +1,23 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/page" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical" android:padding="24dp" android:background="#FFFFFF"
+    android:focusable="true" android:focusableInTouchMode="true">
+    <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:text="Recognition sample" android:textSize="24sp" android:textColor="#102B4E" />
+    <FrameLayout android:id="@+id/layout_stage" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:layout_marginTop="24dp"
+        android:background="#EDF3FA" android:padding="16dp" android:importantForAccessibility="no">
+        <LinearLayout android:id="@+id/nested_layout" android:layout_width="match_parent"
+            android:layout_height="wrap_content" android:orientation="vertical"
+            android:importantForAccessibility="no">
+            <EditText android:id="@+id/account_input" android:layout_width="match_parent"
+                android:layout_height="64dp" android:hint="Account name" android:inputType="text"
+                android:singleLine="true" android:importantForAccessibility="yes" />
+            <TextView android:id="@+id/capture_state" android:layout_width="match_parent"
+                android:layout_height="56dp" android:gravity="center_vertical"
+                android:text="Capture paused" android:textSize="18sp" android:textColor="#102B4E" />
+            <Button android:id="@+id/sample_action" android:layout_width="match_parent"
+                android:layout_height="56dp" android:text="Sample action" />
+        </LinearLayout>
+    </FrameLayout>
+</LinearLayout>
