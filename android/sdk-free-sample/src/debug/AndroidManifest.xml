@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity android:name=".TraversalDiagnosticsActivity" android:exported="true" android:launchMode="singleTop" />
+        <activity android:name=".DelayedConditionActivity" android:exported="true" android:launchMode="singleTop" />
+        <activity android:name=".InputDiagnosticsActivity" android:exported="true" />
+        <activity android:name=".InputDiagnosticsChildActivity" android:exported="false" />
+    </application>
+</manifest>

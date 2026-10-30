@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node index="0" class="android.view.View" bounds="[0,0][720,1280]">
+    <node index="0" class="android.view.View" bounds="junk[1,2][3,4]" />
+    <node index="1" class="android.view.View" bounds="[0,0][999999999999999999999,4]" />
+    <node index="2" class="android.view.View" bounds="[0,0][10,10] trailing" />
+  </node>
+</hierarchy>
