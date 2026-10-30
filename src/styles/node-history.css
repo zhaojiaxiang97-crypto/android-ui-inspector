@@ -1,0 +1,7 @@
+.node-history-controls { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.node-history-control { display: inline-flex; border-radius: 4px; }
+.node-history-control button, .app-shell.inspection-active .tree-toolbar .node-history-control button { display: grid; place-items: center; width: 26px; height: 26px; min-height: 26px; padding: 0; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--ref-text-soft); cursor: pointer; }
+.node-history-control button:hover:not(:disabled), .app-shell.inspection-active .tree-toolbar .node-history-control button:hover:not(:disabled) { background: var(--ref-panel-raised); border-color: var(--ref-line); }
+.node-history-control button:disabled, .app-shell.inspection-active .tree-toolbar .node-history-control button:disabled { color: var(--ref-faint); cursor: default; opacity: 1; }
+.node-history-control:focus-visible, .node-history-control button:focus-visible { outline: 1px solid var(--ref-blue); outline-offset: -1px; }
+.node-history-description { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
