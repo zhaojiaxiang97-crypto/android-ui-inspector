@@ -1,0 +1,4 @@
+<resources>
+    <item name="inspector_debug_name" type="id" />
+    <item name="inspector_debug_metadata" type="id" />
+</resources>
