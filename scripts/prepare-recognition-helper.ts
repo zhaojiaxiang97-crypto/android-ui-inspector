@@ -1,0 +1,230 @@
+// Prepare an isolated evaluation fork; upstream sources and Apache-2.0 license stay in the ignored output.
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+
+export const helperCommit = "351ca8422f7b5b54e80a9c1ce03a222e02415b6b";
+export const helperPackage = "com.androiduiinspector.a11yhelper";
+const prefix = "packages/artemis-accessibility-helper/";
+const java = "app/src/main/java/com/artemis/helper/";
+export const inspectorHelperSource = java + "InspectorObservation.java";
+export const inspectorHelperTemplates = ["InspectorObservation.java", "InspectorPngCodec.java", "InspectorPngEncoder.java", "InspectorInput.java", "InspectorSnapshotJson.java", "InspectorReadControl.java", "InspectorTargetProbe.java", "InspectorWindowState.java"] as const;
+const sources: Record<string, string> = {
+  LICENSE: "ba262877bba9344e5e5b8ff5828ba2e7e2c8d963",
+  "app/build.gradle.kts": "ad802d617bf693a74345ffd4b97b5f1198dc82b4",
+  "app/src/main/AndroidManifest.xml": "94b1a1c58d868c0608fb993d09e13ac48a27bdb1",
+  [java + "A11yNode.java"]: "676728ab3e078d36022414f7bd0ffe0d48636c37",
+  [java + "ArtemisAccessibilityService.java"]: "895a59d8889b7ba5280ce62837464fe9f5a74418",
+  [java + "CommandServer.java"]: "328f7174e1e535e623b524c367aa6d330a8200ee",
+  [java + "DisplayUtils.java"]: "9c6731d18c6eb5a51e804ad783611339d8d58127",
+  [java + "GestureController.java"]: "1714a634f2fd6c4a939fda74abcad6e7a75565a4",
+  [java + "HierarchyDumper.java"]: "ee1084bddb6b394cb0e0630c4de345dc7d747464",
+  [java + "TokenReceiver.java"]: "7e7090490ab6bec696a6715d68f2a851769d70f3",
+  [java + "TokenStore.java"]: "2062fc1fbdb4feaa988712b47dd090ccd290c5aa",
+  [java + "XmlUtils.java"]: "40422544689ac6a4f117f4f54266b1735364d274",
+  "app/src/main/res/values/strings.xml": "0d5195ac96f747201994c673c648d120adefb628",
+  "app/src/main/res/xml/accessibility_service_config.xml": "ee07cb5d4515a5b1ebd9117b936f50adf940f0a0",
+  "build.gradle.kts": "c153e67997dac7a7b13d0427606124a454269b1a",
+  "settings.gradle.kts": "a68441d7442d3196c499aae2424c85b84065aac9",
+  "gradle.properties": "3c5e11311bd5f328c2ef0eef1cf06eda2eaf7eae",
+};
+
+export function verifyHelperSource(path: string, bytes: Uint8Array) {
+  const digest = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+  if (!sources[path] || digest !== sources[path]) throw new Error(`固定版本源码摘要不符：${path}`);
+}
+
+function replaceOnce(source: string, from: string, to: string) {
+  if (source.split(from).length !== 2) throw new Error(`补丁目标缺失或重复：${from}`);
+  return source.replace(from, to);
+}
+
+export function patchRecognitionHelper(path: string, source: string) {
+  if (path === java + "CommandServer.java") {
+    source = replaceOnce(source, '                clientExecutor.execute(new Runnable() {',
+      '                final long inspectorSubmittedNs = System.nanoTime();\n                clientExecutor.execute(new Runnable() {');
+    source = replaceOnce(source, '                        handleClient(socket);',
+      '                        handleClient(socket, inspectorSubmittedNs, System.nanoTime());');
+    source = replaceOnce(source, '    private void handleClient(Socket socket) {',
+      '    private void handleClient(Socket socket, long inspectorSubmittedNs, long inspectorWorkerStartedNs) {');
+    source = replaceOnce(source, '                handleHttp(ascii, in, output);',
+      '                handleHttp(ascii, in, output, inspectorSubmittedNs, inspectorWorkerStartedNs);');
+    source = replaceOnce(source, '    private void handleHttp(String requestLine, InputStream in, OutputStream output) {',
+      '    private void handleHttp(String requestLine, InputStream in, OutputStream output, long inspectorSubmittedNs, long inspectorWorkerStartedNs) {');
+    source = replaceOnce(source, '    private static void send(OutputStream output, int status, String contentType, byte[] bytes) {',
+      '    private static void send(OutputStream output, int status, String contentType, byte[] bytes) {\n' +
+      '        send(output, status, contentType, bytes, null);\n    }\n\n' +
+      '    private static void send(OutputStream output, int status, String contentType, byte[] bytes, String inspectorSnapshotTiming) {');
+    source = replaceOnce(source, '                    "Connection: close\\r\\n\\r\\n";',
+      '                    (inspectorSnapshotTiming == null ? "" : "X-Inspector-Snapshot-Timing: " + inspectorSnapshotTiming + "\\r\\n") +\n' +
+      '                    "Connection: close\\r\\n\\r\\n";');
+    source = replaceOnce(source, '            if (contentLength < 0 || contentLength > MAX_BODY) {',
+      '            if (contentLength < 0 || contentLength > MAX_BODY\n' +
+      '                    || ((path.equals("/inspector/wait") || path.equals("/inspector/input")) && contentLength > 4096)) {');
+    source = replaceOnce(source, '                body = new String(readExactly(in, contentLength), StandardCharsets.UTF_8);',
+      '                byte[] bodyBytes = readExactly(in, contentLength);\n' +
+      '                if (path.equals("/inspector/wait") || path.equals("/inspector/input")) {\n' +
+      '                    if (bodyBytes.length != contentLength) {\n' +
+      '                        sendJson(output, 400, errorJson("Invalid wait body").toString());\n' +
+      '                        return;\n' +
+      '                    }\n' +
+      '                    try {\n' +
+      '                        body = StandardCharsets.UTF_8.newDecoder()\n' +
+      '                                .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)\n' +
+      '                                .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)\n' +
+      '                                .decode(java.nio.ByteBuffer.wrap(bodyBytes)).toString();\n' +
+      '                    } catch (java.nio.charset.CharacterCodingException invalidBody) {\n' +
+      '                        sendJson(output, 400, errorJson("Invalid wait body").toString());\n' +
+      '                        return;\n' +
+      '                    }\n' +
+      '                } else body = new String(bodyBytes, StandardCharsets.UTF_8);');
+    source = replaceOnce(source, '            // Route endpoints\n            if (path.equals("/snapshot")) {',
+      '            // Inspector routes stay behind the existing token authentication.\n' +
+      '            if (path.equals("/inspector/input")) {\n' +
+      '                if (!"POST".equals(parts[0])) {\n' +
+      '                    sendJson(output, 405, errorJson("POST required").toString());\n' +
+      '                    return;\n' +
+      '                }\n' +
+      '                JSONObject json = InspectorInput.execute(service, body,\n' +
+      '                        () -> TokenStore.matches(token) && ArtemisAccessibilityService.getInstance() == service);\n' +
+      '                sendJson(output, 200, json.toString());\n' +
+      '                return;\n' +
+      '            }\n' +
+      '            if (path.equals("/inspector/wait")) {\n' +
+      '                if (!"POST".equals(parts[0])) {\n' +
+      '                    sendJson(output, 405, errorJson("POST required").toString());\n' +
+      '                    return;\n' +
+      '                }\n' +
+      '                JSONObject json = InspectorObservation.waitForCondition(service, body,\n' +
+      '                        () -> TokenStore.matches(token) && ArtemisAccessibilityService.getInstance() == service);\n' +
+      '                sendJson(output, 200, json.toString());\n' +
+      '                return;\n' +
+      '            }\n' +
+      '            if (path.equals("/inspector/capabilities") || path.equals("/inspector/snapshot")) {\n' +
+      '                if (!"GET".equals(parts[0])) {\n' +
+      '                    sendJson(output, 405, errorJson("GET required").toString());\n' +
+      '                    return;\n' +
+      '                }\n' +
+      '                if (path.equals("/inspector/capabilities")) {\n' +
+      '                    sendJson(output, 200, InspectorObservation.capabilities(service).toString());\n' +
+      '                } else {\n' +
+      '                    InspectorObservation.SnapshotTimings timings = new InspectorObservation.SnapshotTimings(inspectorSubmittedNs, inspectorWorkerStartedNs);\n' +
+      '                    timings.startObservation();\n' +
+      '                    JSONObject json;\n' +
+      '                    try { json = InspectorObservation.snapshot(service, timings); }\n' +
+      '                    finally { timings.finishObservation(); }\n' +
+      '                    byte[] bytes = timings.serialize(json, InspectorSnapshotJson::stringify);\n' +
+      '                    send(output, 200, "application/json", bytes, timings.header());\n' +
+      '                }\n' +
+      '                return;\n' +
+      '            }\n\n            // Route endpoints\n            if (path.equals("/snapshot")) {');
+    source = replaceOnce(source, '            // Inspector routes stay behind the existing token authentication.',
+      '            // Optional controlled reads share the existing authentication boundary.\n' +
+      '            if (path.equals("/inspector/read-capabilities")) {\n' +
+      '                if (!"GET".equals(parts[0])) { sendJson(output, 405, errorJson("GET required").toString()); return; }\n' +
+      '                sendJson(output, 200, InspectorReadControl.capabilities(service).toString()); return;\n' +
+      '            }\n' +
+      '            if (path.equals("/inspector/read") || path.equals("/inspector/cancel-read")) {\n' +
+      '                if (!"POST".equals(parts[0])) { sendJson(output, 405, errorJson("POST required").toString()); return; }\n' +
+      '                java.util.function.BooleanSupplier permitted = () -> TokenStore.matches(token) && ArtemisAccessibilityService.getInstance() == service;\n' +
+      '                if (path.equals("/inspector/cancel-read")) {\n' +
+      '                    sendJson(output, 200, InspectorReadControl.cancel(service, body, token, permitted).toString());\n' +
+      '                } else {\n' +
+      '                    InspectorObservation.SnapshotTimings controlledTimings = new InspectorObservation.SnapshotTimings(inspectorSubmittedNs, inspectorWorkerStartedNs);\n' +
+      '                    byte[] controlledBytes = InspectorReadControl.snapshot(service, body, token, permitted, controlledTimings, Math.max(0, (System.nanoTime() - inspectorSubmittedNs) / 1000000L));\n' +
+      '                    send(output, 200, "application/json", controlledBytes, controlledTimings.header());\n' +
+      '                }\n' +
+      '                return;\n' +
+      '            }\n\n' +
+      '            // Inspector routes stay behind the existing token authentication.');
+    source = replaceOnce(source,
+      '|| ((path.equals("/inspector/wait") || path.equals("/inspector/input")) && contentLength > 4096)',
+      '|| ((path.equals("/inspector/wait") || path.equals("/inspector/input") || path.equals("/inspector/read") || path.equals("/inspector/cancel-read") || path.equals("/inspector/target-probe")) && contentLength > 4096)');
+    source = replaceOnce(source,
+      'if (path.equals("/inspector/wait") || path.equals("/inspector/input")) {',
+      'if (path.equals("/inspector/wait") || path.equals("/inspector/input") || path.equals("/inspector/read") || path.equals("/inspector/cancel-read") || path.equals("/inspector/target-probe")) {');
+    source = replaceOnce(source, '            if (path.equals("/inspector/input")) {',
+      '            if (path.equals("/inspector/window-state")) {\n' +
+      '                if (!"POST".equals(parts[0])) { sendJson(output, 405, errorJson("POST required").toString()); return; }\n' +
+      '                sendJson(output, 200, InspectorWindowState.execute(service, body,\n' +
+      '                        () -> TokenStore.matches(token) && ArtemisAccessibilityService.getInstance() == service).toString()); return;\n' +
+      '            }\n' +
+      '            if (path.equals("/inspector/input")) {');
+    source = replaceOnce(source,
+      '|| path.equals("/inspector/target-probe")) && contentLength > 4096)',
+      '|| path.equals("/inspector/target-probe") || path.equals("/inspector/window-state")) && contentLength > 4096)');
+    source = replaceOnce(source,
+      '|| path.equals("/inspector/target-probe")) {',
+      '|| path.equals("/inspector/target-probe") || path.equals("/inspector/window-state")) {');
+    source = replaceOnce(source, '            if (path.equals("/inspector/input")) {',
+      '            if (path.equals("/inspector/target-probe")) {\n' +
+      '                if (!"POST".equals(parts[0])) { sendJson(output, 405, errorJson("POST required").toString()); return; }\n' +
+      '                JSONObject json = InspectorTargetProbe.execute(service, body,\n' +
+      '                        () -> TokenStore.matches(token) && ArtemisAccessibilityService.getInstance() == service);\n' +
+      '                sendJson(output, 200, json.toString()); return;\n' +
+      '            }\n' +
+      '            if (path.equals("/inspector/input")) {');
+  } else if (path === java + "ArtemisAccessibilityService.java") {
+    source = replaceOnce(source, "info.flags &= ~AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS;",
+      "info.flags |= AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS;");
+    source = replaceOnce(source,
+      "// Not-important views are what UIAutomator's compressed dump leaves out;\n            // keep them out here too so both backends describe the same tree.",
+      "// Inspector evaluation: retain layout containers as in the existing uncompressed fast tree.");
+  } else if (path === "app/src/main/res/xml/accessibility_service_config.xml") {
+    source = replaceOnce(source, "flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds",
+      "flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews");
+  } else if (path === "app/build.gradle.kts") {
+    source = replaceOnce(source, 'applicationId = "com.artemis.helper"', `applicationId = "${helperPackage}"`);
+    source = replaceOnce(source, "compileSdk = 35", "compileSdk = 36");
+    source = replaceOnce(source, 'versionName = "1.2.0"', 'versionName = "1.2.0-inspector-observation-v1"');
+  } else if (path === "app/src/main/AndroidManifest.xml") {
+    source = replaceOnce(source, '\n    package="com.artemis.helper"', "");
+    source = replaceOnce(source, '    <uses-sdk\n        android:minSdkVersion="24"\n        android:targetSdkVersion="35" />\n\n', "");
+    for (const name of ["ArtemisAccessibilityService", "TokenReceiver"])
+      source = replaceOnce(source, `android:name=".${name}"`, `android:name="com.artemis.helper.${name}"`);
+  } else if (path === "app/src/main/res/values/strings.xml") {
+    source = replaceOnce(source, "Artemis Accessibility Helper", "Inspector Layout Helper");
+  }
+  return source;
+}
+
+async function main() {
+  if (process.argv.length !== 2) throw new Error("用法：bun scripts/prepare-recognition-helper.ts；仅准备源码，不安装或操作手机");
+  const base = join(process.cwd(), ".benchmarks", "recognition-helper");
+  mkdirSync(base, { recursive: true });
+  const output = mkdtempSync(join(base, "source-"));
+  const manifest: Array<{ path: string; sourceBlob: string; patchedSha256: string; changed: boolean }> = [];
+  // Fetch only pinned source files. Never download upstream installers, APKs or signing keys.
+  const replies = await Promise.allSettled(Object.entries(sources).map(async ([path, blob]) => {
+    const upstream = path === "LICENSE" ? path : prefix + path;
+    const response = await fetch(`https://raw.githubusercontent.com/google/artemis/${helperCommit}/${upstream}`, {
+      redirect: "error", signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`源码下载失败：${path} HTTP ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    verifyHelperSource(path, bytes);
+    const original = Buffer.from(bytes).toString("utf8");
+    const patched = path === "build.gradle.kts" ? readFileSync(join(process.cwd(), "android", path), "utf8")
+      : patchRecognitionHelper(path, original);
+    const target = join(output, path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, patched, { mode: 0o600 });
+    manifest.push({ path, sourceBlob: blob, patchedSha256: createHash("sha256").update(patched).digest("hex"), changed: original !== patched });
+  }));
+  const failures = replies.filter((reply): reply is PromiseRejectedResult => reply.status === "rejected").map(reply => String(reply.reason));
+  const additions = inspectorHelperTemplates.map(name => {
+    const source = readFileSync(new URL(`./helper-templates/${name}`, import.meta.url), "utf8");
+    const path = java + name, target = join(output, path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, source, { mode: 0o600 });
+    return { path, sha256: createHash("sha256").update(source).digest("hex") };
+  });
+  writeFileSync(join(output, "source-manifest.json"), JSON.stringify({ helperCommit, helperPackage,
+    patches: ["include layout nodes in static and runtime flags", "isolated application ID and label", "compile SDK 36 and repository Gradle plugin; SDK versions remain in Gradle", "authenticated Inspector observation v1 with ordered lossless screenshot and explicit visibility", "bounded read-only condition wait hint; not input permission or assertion proof", "capture-bound once-only input with queue and callback deadlines; desktop grant and new observation still required"],
+    additions,
+    files: manifest.sort((a, b) => a.path.localeCompare(b.path)), failures }, null, 2) + "\n", { mode: 0o600 });
+  if (failures.length) throw new Error(`准备失败，保留现场 ${output}：${failures.join("; ")}`);
+  console.log(JSON.stringify({ output, helperPackage, helperCommit, build: "gradle -p <output> :app:assembleDebug --console=plain" }));
+}
+
+if (import.meta.main) await main();
