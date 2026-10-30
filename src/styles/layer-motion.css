@@ -1,0 +1,14 @@
+.screenshot-frame[data-mode-motion="flat"] .screenshot-stage,
+.screenshot-frame[data-mode-motion="layers3d"] .layer-scene {
+  animation: layer-mode-reveal 220ms ease-out both;
+}
+
+@keyframes layer-mode-reveal {
+  from { opacity: .25; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screenshot-frame[data-mode-motion] .screenshot-stage,
+  .screenshot-frame[data-mode-motion] .layer-scene { animation: none; }
+}

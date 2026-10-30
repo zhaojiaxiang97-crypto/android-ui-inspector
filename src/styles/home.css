@@ -1,0 +1,128 @@
+/* Start with one device and one primary action. Workspace styling stays scoped out. */
+.app-shell:not(.inspection-active) .topbar.is-home {
+  height: 56px;
+  min-height: 56px;
+  padding: 0 24px;
+  border: 0;
+  background: var(--ref-bg);
+}
+.topbar.is-home .brand-lockup { gap: 10px; }
+.topbar.is-home .brand-lockup h1 { color: var(--ref-muted); font-size: 13px; font-weight: 500; letter-spacing: 0; }
+.topbar.is-home .brand-mark { color: var(--ref-muted); filter: none; box-shadow: none; }
+.app-shell.native-menu:not(.inspection-active) .topbar.is-home { display: none; }
+.app-shell:not(.inspection-active) .workspace { height: calc(100dvh - 56px); }
+.app-shell.native-menu:not(.inspection-active) .workspace { height: 100dvh; }
+.app-shell:not(.inspection-active) .home-view {
+  display: flex;
+  align-items: safe center;
+  justify-content: center;
+  min-height: 0;
+  height: 100%;
+  padding: 32px 24px;
+  overflow: auto;
+}
+.home-launchpad { flex: 0 0 auto; width: min(460px, 100%); text-align: center; }
+.home-launch-heading { margin: 0 0 24px; color: var(--ref-muted); font-size: 13px; font-weight: 400; letter-spacing: 0; }
+.home-launchpad .home-center-state { width: 100%; min-height: 0; justify-content: flex-start; }
+.home-target-preview {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 144px;
+  height: 220px;
+  margin: 0 0 20px;
+  overflow: hidden;
+  border: 1px solid var(--ref-line);
+  border-radius: 6px;
+  background: var(--ref-panel);
+}
+.home-target-preview img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
+.home-target-preview.has-image { background: var(--ref-canvas); }
+.home-target-preview figcaption {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 6px;
+  color: #fff;
+  background: rgba(16, 18, 20, .85);
+  font-size: 10px;
+}
+.home-preview-placeholder { display: grid; justify-items: center; gap: 14px; color: var(--ref-muted); font-size: 12px; }
+.home-empty-symbol { display: grid; place-items: center; width: 80px; height: 80px; margin: 18px 0 24px; color: var(--ref-muted); }
+.state-error .home-empty-symbol, .state-adb-missing .home-empty-symbol { color: var(--ref-danger); }
+.state-unauthorized .home-empty-symbol, .state-offline .home-empty-symbol { color: var(--ref-orange); }
+.home-launchpad .home-center-state h2 { max-width: 360px; width: 100%; font-size: 19px; line-height: 1.4; font-weight: 500; letter-spacing: 0; }
+.home-launchpad .home-device-platform { margin: 4px 0 0; font-size: 12px; }
+.home-launchpad .home-connection-status { gap: 6px; margin-top: 10px; font-size: 12px; }
+.home-launchpad .home-status-dot { width: 6px; height: 6px; box-shadow: none; }
+.home-launchpad .home-empty-description { max-width: 330px; margin-top: 10px; font-size: 13px; line-height: 1.7; }
+.home-start-hint { margin: 24px 0 0; color: var(--ref-muted); font-size: 12px; }
+.home-launchpad .home-actions { width: min(260px, 100%); gap: 10px; margin-top: 12px; }
+.home-launchpad .is-empty .home-actions { margin-top: 24px; }
+.home-launchpad .home-primary-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ref-selected-text);
+  background: var(--ref-selected-bg);
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: none;
+  transition: border-color 120ms ease;
+}
+.home-launchpad .home-primary-action:hover:not(:disabled) { border-color: var(--ref-blue); background: var(--ref-selected-bg); box-shadow: none; }
+.home-launchpad .home-secondary-action { min-height: 28px; margin: 0; padding: 4px 10px; color: var(--ref-text-soft); font-size: 12px; font-weight: 400; }
+.home-launchpad .home-secondary-action:hover:not(:disabled) { border-radius: 4px; background: var(--ref-control-hover); }
+.home-launchpad .home-check-time { margin: 12px 0 0; color: var(--ref-muted); font-size: 11px; }
+.home-connection-help { margin: 20px auto 0; color: var(--ref-muted); font-size: 12px; }
+.home-connection-help > summary { display: flex; justify-content: center; align-items: center; gap: 6px; width: fit-content; margin: auto; padding: 4px 8px; list-style: none; cursor: pointer; }
+.home-connection-help > summary::-webkit-details-marker { display: none; }
+.home-connection-help > summary:hover, .home-connection-help[open] > summary { color: var(--ref-blue); }
+.home-connection-help > div { max-width: 360px; margin: 8px auto 0; padding: 10px 14px; border-left: 2px solid var(--ref-line); text-align: left; line-height: 1.65; }
+.home-connection-help p { margin: 0; }
+.home-connection-help p + p { margin-top: 6px; }
+.home-diagnose-action { margin-top: 8px; padding: 4px 0; border: 0; color: var(--ref-blue); background: transparent; font: inherit; cursor: pointer; }
+.home-application-menu { position: relative; margin-left: auto; color: var(--ref-text-soft); font-size: 12px; z-index: 30; }
+.home-application-menu > summary { display: flex; align-items: center; gap: 6px; min-height: 30px; padding: 6px 8px; border-radius: 4px; list-style: none; cursor: pointer; }
+.home-application-menu > summary::-webkit-details-marker { display: none; }
+.home-application-menu > summary:hover, .home-application-menu[open] > summary { background: var(--ref-control-hover); }
+.home-application-menu-body { position: absolute; top: calc(100% + 6px); right: 0; width: 210px; max-height: calc(100dvh - 80px); overflow: auto; padding: 6px; border: 1px solid var(--ref-line); border-radius: 6px; background: var(--ref-panel-raised); box-shadow: var(--ref-shadow-panel); }
+.home-application-menu-body > button { display: block; width: 100%; min-height: 32px; padding: 7px 10px; border: 0; border-radius: 4px; background: transparent; color: var(--ref-text-soft); text-align: left; font: inherit; cursor: pointer; }
+.home-application-menu-body > button:hover:not(:disabled) { background: var(--ref-control-hover); }
+.home-application-menu-body > button:disabled { opacity: .45; cursor: default; }
+.home-application-menu :is(button, summary):focus-visible { outline: 2px solid var(--ref-blue); outline-offset: 2px; }
+.home-command-status { position: absolute; bottom: 12px; left: 16px; right: 16px; z-index: 25; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--ref-line); border-radius: 6px; background: var(--ref-panel-raised); color: var(--ref-text-soft); font-size: 12px; }
+.home-command-status > span { min-width: 0; overflow-wrap: anywhere; }
+.home-command-status > button { flex: 0 0 auto; }
+.home-history > p { font-size: 12px; line-height: 1.6; }
+.home-history .snapshot-history { margin-top: 16px; width: 100%; }
+.home-emergency-control { position: absolute; top: 12px; right: 16px; z-index: 25; }
+.app-shell:not(.native-menu) .home-emergency-control { top: 64px; }
+.home-emergency-control .debug-stop { position: static; color: var(--ref-danger); border-color: var(--ref-danger); }
+.home-launchpad :is(button, summary):focus-visible { outline: 2px solid var(--ref-blue); outline-offset: 3px; }
+@media (max-height: 740px) {
+  .app-shell:not(.inspection-active) .home-view { padding-block: 20px; }
+  .home-launch-heading { margin-bottom: 16px; }
+  .home-target-preview { width: 126px; height: 190px; margin-bottom: 14px; }
+  .home-start-hint { margin-top: 18px; }
+  .home-connection-help { margin-top: 14px; }
+}
+@media (max-width: 480px) {
+  .home-launchpad .home-center-state h2 { max-width: 100%; }
+}
+
+@media (max-height: 580px) {
+  .app-shell:not(.inspection-active) .home-view { padding-block: 16px; }
+  .home-target-preview { width: 100px; height: 150px; margin-bottom: 10px; }
+  .home-launch-heading { margin-bottom: 12px; }
+  .home-start-hint { margin-top: 14px; }
+  .home-launchpad .home-check-time { margin-top: 8px; }
+  .home-connection-help { margin-top: 10px; }
+}

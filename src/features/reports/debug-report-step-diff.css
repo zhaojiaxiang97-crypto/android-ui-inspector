@@ -1,0 +1,36 @@
+.debug-step-diff { margin: var(--ref-space-4) 0; padding: var(--ref-space-3); border: 1px solid var(--ref-line); border-radius: var(--ref-radius-sm); font: 12px/1.6 var(--ref-font-ui); overflow-wrap: anywhere; min-width: 0; }
+.debug-step-diff-heading { display: flex; align-items: baseline; justify-content: space-between; gap: var(--ref-space-2); }
+.debug-step-diff h4 { margin: 0; font-size: 13px; color: var(--ref-text); }
+.debug-step-diff-heading > span { flex-shrink: 0; font-size: 11px; color: var(--ref-blue); }
+.debug-step-diff[data-diff-status="partial"] .debug-step-diff-heading > span, .debug-step-diff[data-diff-status="unavailable"] .debug-step-diff-heading > span { color: var(--ref-orange); }
+.debug-step-diff p { margin: var(--ref-space-2) 0; color: var(--ref-muted); }
+.debug-step-diff-counts { display: flex; flex-wrap: wrap; gap: var(--ref-space-2) var(--ref-space-4); margin: var(--ref-space-3) 0; }
+.debug-step-diff-counts > div { display: flex; align-items: baseline; gap: var(--ref-space-2); }
+.debug-step-diff-counts dt { color: var(--ref-muted); }
+.debug-step-diff-counts dd { margin: 0; color: var(--ref-text); font: 14px var(--ref-font-mono); }
+.debug-step-diff-warnings { padding-left: var(--ref-space-4); margin: var(--ref-space-2) 0; color: var(--ref-orange); }
+.debug-step-diff summary { cursor: pointer; color: var(--ref-text-soft); }
+.debug-step-diff summary:focus-visible, .debug-step-diff-changes > ol:focus-visible { outline: 2px solid var(--ref-blue); outline-offset: 2px; }
+.debug-step-diff-changes { margin-top: var(--ref-space-3); }
+.debug-step-diff-changes > ol { list-style: none; padding: 0; margin: var(--ref-space-2) 0 0; max-height: 440px; overflow: auto; }
+.debug-step-diff-row { padding: var(--ref-space-3) 0; border-top: 1px solid var(--ref-line-soft); }
+.debug-step-diff-node { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 0 var(--ref-space-2); margin-bottom: var(--ref-space-2); }
+.debug-step-diff-node > span { color: var(--ref-blue); font-size: 11px; }
+.debug-step-diff-row[data-diff-kind="removed"] .debug-step-diff-node > span { color: var(--ref-orange); }
+.debug-step-diff-node strong { font-weight: 500; color: var(--ref-text); }
+.debug-step-diff-node small { grid-column: 2; color: var(--ref-muted); font: 11px/1.6 var(--ref-font-mono); }
+.debug-step-diff table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.debug-step-diff th, .debug-step-diff td { vertical-align: top; text-align: left; padding: var(--ref-space-1) var(--ref-space-2); border-top: 1px solid var(--ref-line-soft); overflow-wrap: anywhere; }
+.debug-step-diff thead th { color: var(--ref-muted); font-size: 11px; font-weight: 400; }
+.debug-step-diff th:first-child { width: 24%; padding-left: 0; font-weight: 400; color: var(--ref-muted); }
+.debug-step-diff td { color: var(--ref-text-soft); }
+.debug-step-diff td[data-side="after"] { color: var(--ref-text); }
+.debug-step-diff-caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.debug-step-diff-unmatched { margin-top: var(--ref-space-3); }
+.debug-step-diff-unmatched-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--ref-space-3); }
+.debug-step-diff-unmatched h5 { font-size: 12px; margin: var(--ref-space-2) 0; color: var(--ref-text-soft); }
+.debug-step-diff-unmatched ul { padding: 0; margin: 0; list-style: none; }
+.debug-step-diff-unmatched li { border-top: 1px solid var(--ref-line-soft); padding: var(--ref-space-1) 0; }
+.debug-step-diff-unmatched strong, .debug-step-diff-unmatched span { display: block; font-weight: 400; color: var(--ref-muted); }
+.debug-step-diff .debug-step-diff-boundary { border-top: 1px solid var(--ref-line-soft); padding-top: var(--ref-space-2); margin-bottom: 0; font-size: 11px; }
+@media (max-width: 520px) { .debug-step-diff-unmatched-list { grid-template-columns: 1fr; } .debug-step-diff th:first-child { width: 22%; } .debug-step-diff th, .debug-step-diff td { padding-right: var(--ref-space-1); padding-left: var(--ref-space-1); } }
