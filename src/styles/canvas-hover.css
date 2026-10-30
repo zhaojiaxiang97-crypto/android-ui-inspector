@@ -1,0 +1,22 @@
+.canvas-hover-overlay {
+  position: absolute;
+  z-index: 3;
+  box-sizing: border-box;
+  border: 2px solid rgba(240, 184, 89, .88);
+  background: rgba(240, 184, 89, .08);
+  pointer-events: none;
+}
+.canvas-hover-label {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  max-width: min(240px, 100%);
+  padding: 3px 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  background: rgba(30, 28, 24, .9);
+  color: #f6dba6;
+  font: 11px var(--ref-font-ui);
+}
