@@ -1,0 +1,39 @@
+/* Compact reading surface. Geometry and content are snapshot values, never editable controls. */
+.floating-inspector.inspector-compact .inspector-node-heading {
+  margin: 4px 0 0;
+  padding: 8px;
+  border-radius: 0;
+  background: transparent;
+}
+.floating-inspector.inspector-compact .inspector-node-heading h4 { font-size: 13px; line-height: 1.5; }
+.floating-inspector.inspector-compact .inspector-node-heading p { margin-top: 2px; font-size: 10px; }
+.inspector-compact .inspector-overview { padding: 0 8px 8px; font: 11px/1.5 var(--ref-font-ui); }
+.inspector-compact .inspector-overview:has(> [hidden]):not(:has(> :not([hidden]))) { display: none; }
+.inspector-compact .inspector-overview > [hidden] { display: none; }
+.inspector-compact .inspector-geometry { padding: 4px 0; }
+.inspector-compact .inspector-geometry h5 { margin: 0 0 4px; }
+.inspector-compact .inspector-geometry dl { margin: 0; gap: 0; }
+.inspector-compact .inspector-geometry dl > div {
+  padding: 3px 0;
+  border: 0;
+  border-bottom: 1px solid var(--ref-line-soft);
+  border-radius: 0;
+  background: transparent;
+}
+.inspector-compact .inspector-geometry dl > div:nth-child(odd) { margin-right: 12px; }
+.inspector-compact .inspector-geometry dt { font-size: 11px; }
+.inspector-compact .inspector-geometry dd { display: flex; align-items: center; gap: 2px; order: initial; }
+.inspector-compact .inspector-geometry dd > span { min-width: 0; overflow-wrap: anywhere; }
+.inspector-compact .inspector-property-list > div { grid-template-columns: 64px minmax(0, 1fr); gap: 6px; padding: 3px 0; }
+.inspector-compact .inspector-summary-text .long-text-content { max-height: 4.8em; }
+.inspector-compact .inspector-summary-color { display: flex; align-items: center; gap: 6px; }
+.inspector-compact .inspector-summary-color > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.inspector-compact .inspector-summary-colors .inspector-color-swatch { width: 16px; height: 16px; flex-basis: 16px; }
+.app-shell.inspection-active .floating-inspector.inspector-compact .node-properties-panel { gap: 4px; }
+.floating-inspector.inspector-compact .inspector-card { border-radius: 4px; background: var(--ref-panel-raised); }
+.inspector-compact .inspector-card > summary { min-height: 32px; padding: 5px 8px; }
+.inspector-compact .inspector-card-body { padding: 0 8px 7px; }
+.inspector-compact .inspector-subsection { margin-top: 4px; }
+.inspector-compact .inspector-subsection > summary { min-height: 28px; padding: 5px 0 3px; }
+.inspector-compact .inspector-inline-values { margin-top: 5px; padding-top: 5px; }
+.inspector-compact .inspector-preference-status { margin: 0 8px 6px; color: var(--ref-orange); font: 11px/1.5 var(--ref-font-ui); }
