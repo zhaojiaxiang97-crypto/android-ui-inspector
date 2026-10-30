@@ -1,0 +1,18 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <provider android:name=".QueueHoldProvider" android:authorities="com.androiduiinspector.sample.queue-hold"
+            android:exported="true" />
+        <activity android:name=".QueueObservationActivity" android:exported="true"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".AlphaPrecisionActivity" android:exported="true"
+            android:hardwareAccelerated="true" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".GroupColorActivity" android:exported="true"
+            android:hardwareAccelerated="true" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".SoftwareGroupColorActivity" android:exported="true"
+            android:hardwareAccelerated="false" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".HardwareTextActivity" android:exported="true"
+            android:hardwareAccelerated="true" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity android:name=".SoftwareTextActivity" android:exported="true"
+            android:hardwareAccelerated="false" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+    </application>
+</manifest>

@@ -1,0 +1,13 @@
+.inspector-color-property .inspector-color-heading { min-width: 0; }
+.inspector-color-value { min-width: 0; overflow-wrap: anywhere; }
+.inspector-color-details { margin-top: 4px; color: var(--ref-muted); font-size: 10px; }
+.inspector-color-details > summary { min-height: 24px; padding: 3px 0; cursor: pointer; }
+.inspector-color-detail-value { padding-top: 5px; border-top: 1px solid var(--ref-line-soft); }
+.inspector-color-detail-value > span { display: block; color: var(--ref-muted); }
+.inspector-color-detail-value code { display: block; color: var(--ref-text-soft); font: inherit; overflow-wrap: anywhere; }
+.inspector-color-details .inspector-color-actions { margin: 2px 0 4px; }
+.inspector-color-property button:focus-visible, .inspector-color-details > summary:focus-visible { outline: 1px solid var(--ref-blue); outline-offset: 1px; }
+.inspector-compare-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; padding: 0 8px 4px; }
+.inspector-color-format { display: inline-flex; align-items: center; gap: 4px; color: var(--ref-muted); font: 10px/1.4 var(--ref-font-ui); }
+.inspector-color-format select { min-height: 25px; max-width: 110px; padding: 2px 4px; border: 1px solid var(--ref-input-line); border-radius: 4px; background: var(--ref-input); color: var(--ref-text); font: inherit; }
+.inspector-summary-color .inspector-color-alias { display: block; margin: 0; color: var(--ref-muted); }
