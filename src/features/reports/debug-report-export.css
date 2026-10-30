@@ -1,0 +1,23 @@
+.debug-report-export { flex-shrink: 0; max-height: min(300px, 38%); overflow: auto; border-bottom: 1px solid var(--ref-line); font-size: 12px; }
+.debug-report-export > summary { padding: 10px 20px; color: var(--ref-text); cursor: pointer; }
+.debug-report-export > summary small { margin-left: 8px; color: var(--ref-muted); }
+.debug-report-export-body { padding: 0 20px 12px; overflow-wrap: anywhere; }
+.debug-report-export-fields { display: flex; align-items: end; flex-wrap: wrap; gap: 12px 24px; }
+.debug-report-export-scope { display: grid; gap: 5px; min-width: 210px; color: var(--ref-text-soft); }
+.debug-report-export-scope select { box-sizing: border-box; min-width: 0; max-width: 100%; padding: 7px 9px; border: 1px solid var(--ref-line); border-radius: var(--ref-radius-sm); background: var(--ref-panel-raised); color: var(--ref-text); font: inherit; }
+.debug-report-export fieldset { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 18px; margin: 0; padding: 0 0 6px; border: 0; min-width: 0; }
+.debug-report-export legend { padding: 0; margin-bottom: 7px; color: var(--ref-text-soft); }
+.debug-report-export fieldset label { display: inline-flex; align-items: center; gap: 5px; color: var(--ref-text-soft); }
+.debug-report-export input { margin: 0; accent-color: var(--ref-blue); }
+.debug-report-export select:focus-visible, .debug-report-export input:focus-visible, .debug-report-export summary:focus-visible { outline: 2px solid var(--ref-blue); outline-offset: 2px; }
+.debug-report-export-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.debug-report-export-actions p { flex: 1; min-width: 180px; margin: 0; }
+.debug-report-export .debug-report-export-note { margin: 8px 0; font-size: 11px; }
+.debug-report-export [data-export-feedback] p { margin: 7px 0; }
+.debug-report-export [data-export-state="failed"] p { color: var(--ref-danger); }
+.debug-report-export-directory { font-family: var(--ref-font-mono); }
+.debug-report-export-warnings { margin-top: 8px; color: var(--ref-muted); }
+.debug-report-export-warnings summary { cursor: pointer; }
+.debug-report-export-warnings ul { margin: 6px 0; padding-left: 20px; }
+.debug-report-export-warnings li { margin: 4px 0; }
+@media (max-width: 1000px) { .debug-report-export-fields { gap: 10px 16px; } .debug-report-export > summary small { display: none; } }
