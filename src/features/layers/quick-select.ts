@@ -1,0 +1,195 @@
+import type { UiNode } from "../../../shared/types";
+import { nodeDisplayLabel, nodeResourceName, nodeShortClass } from "../../../shared/tree-utils";
+import { indexLayerTree } from "./presentation";
+import { projectPlane, cameraRotation, pointOnProjectedPlane } from "./projection";
+import type { Point, ProjectedPlane, Rect } from "./types";
+import type { PositionLayerKind } from "./position-select";
+
+export function quickSelectModifier(event: Pick<MouseEvent, "metaKey" | "ctrlKey" | "altKey" | "shiftKey">, platform: string) {
+  return !event.altKey && !event.shiftKey && (/Mac|iPhone|iPad|iPod/.test(platform)
+    ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey);
+}
+
+export const QUICK_SELECT_PAGE_SIZE = 30;
+export type QuickSelectCandidate = { node: UiNode; label: string; className: string; path: string; relativePath?: string; bounds: Rect; depth: number; kind?: PositionLayerKind };
+export type QuickSelectResult = {
+  scope?: "inside" | "position";
+  context: object; root: UiNode; branch: UiNode | null; point: Point | null;
+  status: "ready" | "no-plane" | "not-collapsed" | "missing-image" | "unsupported" | "stale";
+  message: string; candidates: QuickSelectCandidate[]; total: number; page: number; pages: number; unsupported: number;
+  query?: string; filteredTotal?: number; allCandidates?: readonly QuickSelectCandidate[];
+};
+
+export function filterQuickSelectResult(result: QuickSelectResult, query = "", requestedPage = 0): QuickSelectResult {
+  if (result.status !== "ready") return result;
+  const allCandidates = result.allCandidates ?? result.candidates;
+  const literal = query.trim().toLocaleLowerCase();
+  const matches = literal ? allCandidates.filter(candidate => [candidate.label, candidate.node.text, candidate.node.contentDesc,
+    candidate.node.resourceId, candidate.node.className, candidate.path, candidate.relativePath]
+    .some(value => value?.toLocaleLowerCase().includes(literal))) : allCandidates;
+  const pages = Math.ceil(matches.length / QUICK_SELECT_PAGE_SIZE);
+  const page = Math.max(0, Math.min(Math.max(0, pages - 1), Math.trunc(requestedPage) || 0));
+  return { ...result, query, filteredTotal: matches.length, allCandidates, page, pages,
+    candidates: matches.slice(page * QUICK_SELECT_PAGE_SIZE, (page + 1) * QUICK_SELECT_PAGE_SIZE) };
+}
+
+/** Anchor and viewport use the same canvas-local coordinates, including its scroll offset. */
+export function quickSelectPlacement(viewport: Rect, anchor?: Point): Rect | null {
+  if (![viewport.left, viewport.top, viewport.width, viewport.height].every(Number.isFinite) || viewport.width <= 0 || viewport.height <= 0) return null;
+  const insetX = Math.min(12, viewport.width / 4), insetY = Math.min(12, viewport.height / 4);
+  const left = viewport.left + insetX, top = viewport.top + insetY;
+  const width = Math.min(340, viewport.width - insetX * 2), height = Math.min(570, viewport.height - insetY * 2);
+  const right = viewport.left + viewport.width - insetX, bottom = viewport.top + viewport.height - insetY;
+  const gap = 18;
+  if (anchor && [anchor.x, anchor.y].every(Number.isFinite)) {
+    const x = Math.max(left, Math.min(right, anchor.x)), anchorY = Math.max(top, Math.min(bottom, anchor.y));
+    const y = Math.max(top, Math.min(bottom - height, anchorY - 42));
+    if (x + gap + width <= right) return { left: x + gap, top: y, width, height };
+    if (x - gap - width >= left) return { left: x - gap - width, top: y, width, height };
+    // On a narrow canvas use the opposite vertical edge before docking to a side.
+    const above = anchorY - gap - top, below = bottom - anchorY - gap;
+    if (Math.max(above, below) >= 320) {
+      const available = Math.min(height, Math.max(above, below));
+      return { left: right - width, top: below >= above ? anchorY + gap : anchorY - gap - available, width, height: available };
+    }
+    return { left: x > left + (right - left) / 2 ? left : right - width, top, width, height };
+  }
+  return { left: right - width, top, width, height };
+}
+
+export function quickSelectMessage(context: object, root: UiNode, status: QuickSelectResult["status"], message: string): QuickSelectResult {
+  return { context, root, status, message, branch: null, point: null, candidates: [], total: 0, page: 0, pages: 0, unsupported: 0 };
+}
+
+function rectOf(node: UiNode): Rect | null {
+  const b = node.bounds;
+  return b && [b.left, b.top, b.right, b.bottom].every(Number.isFinite) && b.right > b.left && b.bottom > b.top
+    ? { left: b.left, top: b.top, width: b.right - b.left, height: b.bottom - b.top } : null;
+}
+function contains(rect: Rect, point: Point) {
+  return point.x >= rect.left && point.y >= rect.top && point.x < rect.left + rect.width && point.y < rect.top + rect.height;
+}
+function intersect(a: Rect, b: Rect): Rect | null {
+  const left = Math.max(a.left, b.left), top = Math.max(a.top, b.top);
+  const width = Math.min(a.left + a.width, b.left + b.width) - left, height = Math.min(a.top + a.height, b.top + b.height) - top;
+  return width > 0 && height > 0 ? { left, top, width, height } : null;
+}
+function transformUnknown(node: UiNode) {
+  const attrs = node.attributes;
+  if (attrs?.["image-capture-placement"] === "unsupported-context-legacy-fallback") return true;
+  for (const key of ["rotation", "rotation-x", "rotation-y", "sdk-rotation", "sdk-rotationX", "sdk-rotationY", "qml-rotation"]) {
+    if (attrs?.[key] !== undefined && (!Number.isFinite(Number(attrs[key])) || Number(attrs[key]) % 360 !== 0)) return true;
+  }
+  for (const key of ["scale-x", "scale-y", "sdk-scaleX", "sdk-scaleY"]) {
+    if (attrs?.[key] !== undefined && (!Number.isFinite(Number(attrs[key])) || Number(attrs[key]) !== 1)) return true;
+  }
+  // Own-bitmap placement does not certify a native/local folded group map.
+  // In particular, its clipped/scaled screen rectangle may differ from the
+  // legacy bounds used by local subtree composition.
+  const b = rectOf(node), p = node.layerCapturePlacement;
+  if (p && b && [p.screen.left - b.left, p.screen.top - b.top, p.screen.width - b.width, p.screen.height - b.height].some(delta => Math.abs(delta) > .01)) return true;
+  return false;
+}
+type Clip = { rect: Rect; radius: number };
+function insideClip(clip: Clip, point: Point) {
+  if (!contains(clip.rect, point)) return false;
+  const r = Math.min(clip.radius, clip.rect.width / 2, clip.rect.height / 2);
+  if (!r) return true;
+  const x = Math.max(clip.rect.left + r, Math.min(clip.rect.left + clip.rect.width - r, point.x));
+  const y = Math.max(clip.rect.top + r, Math.min(clip.rect.top + clip.rect.height - r, point.y));
+  return (point.x - x) ** 2 + (point.y - y) ** 2 <= r ** 2;
+}
+function ownClips(node: UiNode): Clip[] | null {
+  const b = rectOf(node), a = node.attributes;
+  if (!b) return [];
+  const clips: Clip[] = [];
+  if (a?.["qml-clip"] === "true") clips.push({ rect: b, radius: 0 });
+  if (a?.["clip-to-outline"] === "true") {
+    const [l, t, r, d, radius] = ["Left", "Top", "Right", "Bottom", "Radius"].map(key => Number(a[`sdk-outline${key}`]));
+    if (![l, t, r, d, radius].every(Number.isFinite) || r <= l || d <= t || radius < 0) return null;
+    clips.push({ rect: { left: b.left + l, top: b.top + t, width: r - l, height: d - t }, radius });
+  }
+  return clips;
+}
+function childrenClips(node: UiNode): Clip[] | null {
+  const b = rectOf(node), a = node.attributes;
+  if (!b) return [];
+  const clips: Clip[] = [];
+  if (a?.["clip-children"] === "true") clips.push({ rect: b, radius: 0 });
+  if (a?.["clip-to-padding"] === "true") {
+    const [l, t, r, d] = ["left", "top", "right", "bottom"].map(side => Number(a[`padding-${side}`] ?? 0));
+    if (![l, t, r, d].every(value => Number.isFinite(value) && value >= 0)) return null;
+    clips.push({ rect: { left: b.left + l, top: b.top + t, width: Math.max(0, b.width - l - r), height: Math.max(0, b.height - t - d) }, radius: 0 });
+  }
+  return clips;
+}
+
+export function pointOnPaintedPlane(projected: ProjectedPlane, point: Point): Point | null {
+  const mapping = projected.painted?.plane.quickSelect;
+  if (!mapping || !projected.painted?.visible) return null;
+  const unit = pointOnProjectedPlane(projected, point);
+  return unit ? { x: mapping.screen.left + unit.x * mapping.screen.width, y: mapping.screen.top + unit.y * mapping.screen.height } : null;
+}
+
+export function candidateOnPaintedPlane(projected: ProjectedPlane, candidate: QuickSelectCandidate): Point[] | null {
+  const painted = projected.painted, source = painted?.plane.quickSelect?.screen;
+  if (!painted || !source || !painted.visible) return null;
+  const b = intersect(source, candidate.bounds);
+  if (!b) return null;
+  const p = painted.plane;
+  const rect = { left: p.rect.left + (b.left - source.left) / source.width * p.rect.width,
+    top: p.rect.top + (b.top - source.top) / source.height * p.rect.height,
+    width: b.width / source.width * p.rect.width, height: b.height / source.height * p.rect.height };
+  return projectPlane({ ...p, rect }, painted.pivot, painted.camera, cameraRotation(painted.camera)).corners;
+}
+
+export function findQuickSelectCandidates(input: {
+  context: object; root: UiNode; branch: UiNode; point: Point; hidden: ReadonlySet<string>;
+  focusedNode?: UiNode | null; focusKind?: "branch" | "layer"; page?: number; query?: string; index?: ReturnType<typeof indexLayerTree>;
+}): QuickSelectResult {
+  const { context, root, branch, point, hidden, focusedNode, focusKind } = input;
+  const index = input.index ?? indexLayerTree(root);
+  if (index.nodes.get(branch.id) !== branch || focusedNode && index.nodes.get(focusedNode.id) !== focusedNode) {
+    return quickSelectMessage(context, root, "stale", "页面已更新，请重新点选折叠画面。");
+  }
+  const path: UiNode[] = [];
+  for (let id: string | null | undefined = branch.id; id; id = index.parents.get(id)) path.unshift(index.nodes.get(id)!);
+  if (focusedNode && (focusKind === "layer" || !path.includes(focusedNode))) {
+    return quickSelectMessage(context, root, "unsupported", "当前聚焦范围不包含这条分支，请退出聚焦后重试。");
+  }
+  let inherited: Clip[] = [];
+  for (const node of path) {
+    if (!node.visibleToUser || hidden.has(node.id) || Number(node.attributes?.["effective-alpha"] ?? node.attributes?.alpha ?? 1) === 0 || node.layerCapturePlacement?.hidden) {
+      return quickSelectMessage(context, root, "unsupported", "这条分支或祖先已隐藏，无法选择内部控件。");
+    }
+    const clips = ownClips(node), children = childrenClips(node);
+    if (transformUnknown(node) || !clips || !children) return quickSelectMessage(context, root, "unsupported", "这条分支的变换或裁剪无法可靠映射，请展开后从层级树选择。");
+    inherited = [...inherited, ...clips];
+    if (node !== branch) inherited.push(...children);
+  }
+  if (inherited.some(clip => !insideClip(clip, point))) return quickSelectMessage(context, root, "unsupported", "这个位置被祖先裁剪，不包含可选择的内部控件。");
+  const branchChildren = childrenClips(branch)!;
+  const pending = branch.children.map((node, i) => ({ node, clips: [...inherited, ...branchChildren], path: [nodeDisplayLabel(branch)], positions: [i + 1], depth: 1 })).reverse();
+  const matches: QuickSelectCandidate[] = [];
+  let unsupported = 0;
+  while (pending.length) {
+    const current = pending.pop()!, node = current.node;
+    if (!node.visibleToUser || hidden.has(node.id) || Number(node.attributes?.["effective-alpha"] ?? node.attributes?.alpha ?? 1) === 0 || node.layerCapturePlacement?.hidden) continue;
+    const own = ownClips(node), children = childrenClips(node);
+    if (transformUnknown(node) || !own || !children) { unsupported++; continue; }
+    const clips = [...current.clips, ...own];
+    if (clips.some(clip => !insideClip(clip, point))) continue;
+    let bounds = rectOf(node);
+    for (const clip of clips) if (bounds) bounds = intersect(bounds, clip.rect);
+    if (bounds && contains(bounds, point)) matches.push({ node, bounds,
+      label: node.text?.trim() || node.contentDesc?.trim() || nodeResourceName(node) || nodeDisplayLabel(node), className: nodeShortClass(node),
+      path: [...current.path, nodeDisplayLabel(node)].join(" › "), relativePath: current.positions.join(" / "), depth: current.depth });
+    const childPath = [...current.path, nodeDisplayLabel(node)];
+    for (let i = node.children.length - 1; i >= 0; i--) pending.push({ node: node.children[i], clips: [...clips, ...children], path: childPath, positions: [...current.positions, i + 1], depth: current.depth + 1 });
+  }
+  // Deep controls appear before their enclosing containers; equal-depth siblings
+  // retain tree order. This is a bounds list, never a claim about painted pixels.
+  matches.sort((a, b) => b.depth - a.depth);
+  return filterQuickSelectResult({ context, root, branch, point, status: "ready", message: matches.length ? "按布局边界匹配 · 确认后展开并定位" : "这个位置没有匹配的内部控件。可换个位置点选。",
+    total: matches.length, page: 0, pages: 0, unsupported, candidates: [], allCandidates: matches }, input.query, input.page);
+}
