@@ -1,0 +1,34 @@
+# 文档索引
+
+更新：2026-10-11。Mac arm64本机交付及升级/回退已完成；独立空配置中的真实样例采集、保存重开和同一快照CLI/MCP共享/撤销也已通过，见[第一次使用](FIRST_USE.md)和[验收](CORE_ACCEPTANCE.md#first-use-acceptance)。Helper结果及限制保留，UI优化与原手机复核继续暂停，历史记录不自动成为待办。
+
+## 当前文档
+
+| 文档 | 职责 |
+| --- | --- |
+| [第一次使用](FIRST_USE.md) | 从连接自有样例到采集、保存重开、只读共享及停止；含真实2D/3D截图 |
+| [项目状态](PROJECT_STATUS.md) | 能力、当前阶段和保留缺口 |
+| [Lookin计划](LOOKIN_ALIGNMENT_PLAN.md#下一步) | 当前安排、暂停方向和执行边界 |
+| [Lookin后续功能迁移](LOOKIN_MIGRATION_PLAN.md) | 前三项源码完成、后续候选、上游依据与验收边界 |
+| [Lookin UI与交互细节计划](LOOKIN_UI_INTERACTION_PLAN.md) | 2026-10-13新增；属性栏、工具状态、2D测距、候选与搜索等7项，按三批实施 |
+| [验收清单](CORE_ACCEPTANCE.md) | 最近安装版本、关键已验范围和限制 |
+| [本机交付](DELIVERY.md) | 固定版本、安装、Helper配置、备份与回退 |
+| [测试计划](TEST_PLAN.md) | 验证入口、通过标准和发布门槛 |
+| [开发目录](DEVELOPMENT_STRUCTURE.md) | 模块职责、依赖方向和真实代码入口 |
+| [Android接入](../android/README.md) | SDK构建/接入；实际安装另限定范围 |
+| [CLI](CLI.md) / [MCP](MCP.md) | 命令和授权调试用法 |
+| [e2e实验](../scripts/experiments/tester-e2e/README.md) | 确定性用例、报告和数据/模型边界 |
+| [截图坐标](SCREEN_COORDINATES.md) / [树性能](TREE_PERFORMANCE.md) / [Windows启动](WINDOWS_STARTUP.md) | 专项实现与环境限制 |
+
+U1–U6c阶段实窗复核使用旧历史和报告，后续首次使用验收另采项目自有样例。用户说明此前是在等待权限确认，原“程序卡住”判断已撤回；版本、结果和原观察分别见[验收清单](CORE_ACCEPTANCE.md)及[沿革](archive/CORE_ACCEPTANCE_2026-10-09.md#ui复刻收口u1u6c2026-10-11)。
+
+## 历史参考
+
+[归档索引](archive/README.md)集中保留方案、独有失败和证据路径。UI逐轮结果已合并进既有验收沿革；原7份图层/UI方案见[设计沿革](archive/LAYER_UI_HISTORY.md)。归档中的“当前/下一步/已安装”只对应原日期。
+
+## 维护规则
+
+- 能力写状态，安排写计划，门禁写测试，当前结果写验收；逐轮细节进入归档，避免多页复制。
+- 新增脚本/文件或合并入口时更新链接；删除前保留独有断言和失败证据。
+- 源码、隔离工装、安装窗口、手机和目标平台分别标明；旧授权不自动延续。
+- 私有源码、APK、业务画面、配置和日志只留本机忽略目录；上手文档仅使用核过内容的项目自有样例截图。
