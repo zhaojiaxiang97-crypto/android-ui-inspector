@@ -1,0 +1,14 @@
+.inspector-debug-fields .inspector-debug-tree-field > .inspector-debug-tree-root { grid-column: 1 / -1; min-width: 0; }
+.inspector-debug-tree-root > summary { padding: 4px 0; color: var(--ref-text-soft); cursor: pointer; font: 11px/1.5 var(--ref-font-ui); overflow-wrap: anywhere; }
+.inspector-debug-tree-children { margin-left: 5px; padding-left: 7px; border-left: 1px solid var(--ref-line-soft); min-width: 0; }
+.inspector-debug-tree-node { min-width: 0; padding: 2px 0; }
+.inspector-debug-tree-node > summary { position: relative; display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 6px; cursor: pointer; padding: 3px 0 3px 12px; color: var(--ref-text-soft); }
+.inspector-debug-tree-node > summary::before { position: absolute; left: 0; top: 4px; content: "▸"; color: var(--ref-muted); }
+.inspector-debug-tree-node[open] > summary::before { content: "▾"; }
+.inspector-debug-tree-name { flex: 1 1 54px; min-width: 0; overflow-wrap: anywhere; font: 11px/1.5 var(--ref-font-ui); }
+.inspector-debug-tree-name small, .inspector-debug-tree-leaf dt small { display: block; font-size: 9px; color: var(--ref-muted); }
+.inspector-debug-tree-value { flex: 1 1 40px; min-width: 0; font: 11px/1.6 var(--ref-font-mono); }
+.inspector-debug-tree-node > summary > .inspector-field-copy { flex: 0 0 auto; margin-left: auto; }
+.inspector-debug-fields .inspector-debug-tree-leaf > div { grid-template-columns: minmax(36px, 0.8fr) minmax(0, 1fr); gap: 6px; }
+.inspector-debug-tree-leaf dt { min-width: 0; overflow-wrap: anywhere; }
+.inspector-debug-tree-root summary:focus-visible, .inspector-debug-tree-node > summary:focus-visible { outline: 1px solid var(--ref-blue); outline-offset: 2px; border-radius: 3px; }
